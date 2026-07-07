@@ -9,7 +9,11 @@ export const END = Symbol("graph.end");
 
 // ── 节点完成信号 ──
 
-/** 节点执行完毕后产出的结构化信号。Edge.guard 的唯一判断依据。 */
+/**
+ * 节点执行完毕的结构化产出。
+ * 这是 Node 对外的唯一输出 —— 不做折叠，不写 summary。
+ * 如何"记住"这段经历，由 Edge.migrate 决定。
+ */
 export interface NodeCompletion {
   nodeId: string;
   status: string;                      // "ok" | "failed" | "cancelled"
@@ -21,11 +25,13 @@ export interface NodeCompletion {
 
 /**
  * 已完成节点的折叠快照。
- * 节点执行完毕后，中间过程丢弃，只保留此摘要。
+ * 由 Edge.migrate 生成并写入 context[nodeId]。
+ * 不同边可以对同一个 completion 产出不同的快照 ——
+ * 取决于"进入下一阶段时需要记住什么"。
  */
 export interface CompletedNodeSnapshot {
-  status: string;                      // "ok" | "failed" | "cancelled"
-  summary: string;                     // 折叠后的一句话摘要
+  status: string;
+  summary: string;
   result: Record<string, unknown>;
 }
 
@@ -35,40 +41,78 @@ export interface CompletedNodeSnapshot {
  * 回路图中的活动主体。
  *
  * context 约定：
- *   以 nodeId 为 key。顶层字段为初始上下文；已完成节点为 CompletedNodeSnapshot；
- *   当前节点在 execute 内部管理，折叠后写入。
+ *   顶层字段为进入工作流前的初始上下文；
+ *   以 nodeId 为 key 的值为 CompletedNodeSnapshot（已完成节点）；
+ *   当前节点在 execute 内部管理，不写入 context。
  */
 export interface AgentInstance {
   id: string;
   globalGoal: string;
   context: Record<string, unknown>;
+  mechanisms: Mechanism[];             // 全局横切机制，跨节点持续生效
 }
 
 // ── 节点 ──
 
 /**
- * 可运行工作阶段。节点自身声明一切所需：
- *   - subGoal / skill → 引导 agent 行为
- *   - tools            → 本阶段工具白名单
- *   - execute          → 代码或 agent 逻辑
+ * 可运行工作阶段。
  *
- * Runtime 进入节点时直接从 Node 读取配置，不经过 Edge 中转。
+ * 节点只负责完成子目标并产出 NodeCompletion。
+ * 不折叠上下文、不写 summary、不知道接下来去哪。
+ * 配置（tools / subGoal / skill）声明在 Node 自身，Runtime 直接读取。
  */
 export interface Node {
   id: string;
-  subGoal: string;
+  subGoal: string;                     // 特殊机制 — 本节点的身份本身，必须存在
   skill?: string;
-  tools?: string[];                    // 本节点可用的工具 id 列表
+  tools?: string[];
+  mechanisms?: Mechanism[];            // 局部机制 — 可选，仅在本阶段生效
   execute(instance: AgentInstance): Promise<NodeCompletion>;
+}
+
+// ── 机制 ──
+
+/**
+ * 横切面基础设施。
+ *
+ * 全局机制（AgentInstance.mechanisms）跨节点持续生效；
+ * 局部机制（Node.mechanisms）仅在本阶段叠加到全局上。
+ *
+ * subGoal 是特殊的"构造函数"机制 —— 它定义了节点的身份本身，
+ * 因此在 Node 上以顶层字段存在，而非放在 mechanisms 数组里。
+ */
+export interface Mechanism {
+  name: string;
+  /** 检查触发条件是否满足 */
+  check(context: Record<string, unknown>): boolean;
+  /** 执行机制动作 */
+  apply(instance: AgentInstance): Promise<void>;
 }
 
 // ── 边 ──
 
 /**
- * 状态迁移的声明式载体。
+ * 边的迁移产出。
+ * 不同边对同一个 NodeCompletion 可以产出不同的 migrate 策略 ——
+ * 因为每条边代表了"以什么姿态进入下一阶段"的不同意图。
+ */
+export interface MigrationResult {
+  keep: string[];                      // 保留哪些 nodeId 对应的上下文
+  discard: string[];                   // 丢弃哪些
+  inject: Record<string, unknown>;     // 注入新字段
+  snapshot: CompletedNodeSnapshot;     // 如何折叠并记住刚完成的节点
+}
+
+/**
+ * 状态迁移承载者。
  *
- * guard 是函数（需要检查 NodeCompletion）；migrate 是数据声明。
- * 不设 PrepareEntryResult —— 目标节点所需的工具和技能已声明在 Node 自身。
+ * Edge 独占三件事：
+ *   1. guard  —— 什么时候走这条边
+ *   2. migrate —— 怎么清算当前节点、怎么进入下一阶段（函数，可依据 completion 动态决策）
+ *   3. 目标指向 —— to 字段
+ *
+ * 进入目标节点所需的 tools / skill / subGoal 由目标 Node 自行声明，
+ * Edge 不负责 prepareEntry。
  */
 export interface Edge {
   id: string;
@@ -76,27 +120,21 @@ export interface Edge {
   to: string | typeof END;
   priority: number;
 
-  /** 检查迁移条件。 */
+  /** 检查迁移条件是否满足。只依赖 NodeCompletion。 */
   guard(completion: NodeCompletion): boolean;
 
-  /** 上下文迁移规则*/
-  migrate: {
-    keep: string[];                    
-    discard: string[];                 
-    inject: Record<string, unknown>;   // 新注入的上下文字段
-  };
+  /** 清算当前节点 + 准备上下文的迁移规则。 */
+  migrate(instance: AgentInstance, completion: NodeCompletion): MigrationResult;
 }
 
 // ── 路由 ──
 
-/** 路由策略。 */
 export type RouterStrategy =
   | { kind: "priority-first" }
   | { kind: "agent-choice" }
   | { kind: "first-match" }
   | { kind: "all-satisfied" };
 
-/** 节点的出口路由配置。 */
 export interface NodeRouting {
   nodeId: string;
   edges: Edge[];
@@ -105,7 +143,6 @@ export interface NodeRouting {
 
 // ── 触发与图 ──
 
-/** 图的调用触发条件。 */
 export interface Trigger {
   command: string;
   args: string;
@@ -115,14 +152,14 @@ export interface Trigger {
  * 回路图。
  *
  * 入口采用虚拟 START 节点：
- *   routing["START"] 中的 Edge 充当入口边，startNodeId 指向第一个实际节点。
- *   不设独立的 Entry 结构。
+ *   routing["START"] 中的 Edge 充当入口边，
+ *   startNodeId 指向第一个实际节点。
  */
 export interface Graph {
   id: string;
   trigger: Trigger;
   startNodeId: string;
   nodes: Record<string, Node>;
-  routing: Record<string, NodeRouting>;   // 含 "START"
+  routing: Record<string, NodeRouting>;
   fallbackGraph?: Graph;
 }

@@ -550,22 +550,28 @@ entries:
 
 ---
 
-### 修订 5：Edge.migrate 从函数降级为数据声明
+### 修订 5：migrate 保持函数能力，折叠职责从 Node 移到 Edge
 
-**原设计**：`migrate(instance, completion): MigrationResult` — 一个函数，可以在运行时根据 completion 动态决定 keep/discard/inject。
+**原设计**：`migrate(instance, completion): MigrationResult` — 函数形式，Edge 动态决定 keep/discard/inject。
 
-**发现问题**：
-- 90% 的场景中迁移规则是静态的：不管节点返回什么 completion，迁移策略不变。
-- 函数形式暗示了"需要动态计算"，但实际很少用到。
-- 与"声明式优先"的总体方向不一致——如果 Node 以 JSON 声明为主，Edge 也应该尽量数据化。
+**中间尝试**：曾将 migrate 降级为静态数据声明 `{ keep, discard, inject }`，认为 90% 场景迁移规则不依赖 completion。
 
-**决策**：`Edge.migrate` 改为直接的数据对象 `{ keep, discard, inject }`，不再接受参数。
+**发现问题（该尝试被否定）**：
+- 不同边对**同一个** completion 需要产出**不同**的上下文。比如 grade → discuss 需要注入完整错题信息，grade → next_question 只需要更新计数器。
+- 静态数据无法区分——两条边看到同一个 completion，只能产出一模一样的 migrate 结果，丢失了"边的意图"。
+- `snapshot`（如何折叠并记住当前节点）也应该随边的意图不同而变化：答对的快照和答错的快照理应是不同的总结。
 
-**保留空间**：如果将来确实有需要根据 completion 动态计算的场景（如根据答对/答错注入不同信息），该逻辑应由**节点**在折叠时将动态信息写入 `CompletedNodeSnapshot`，Edge 只做节点级别的保留/丢弃。
+**最终决策**：
+- `migrate` 恢复为函数 `migrate(instance, completion): MigrationResult`。
+- `MigrationResult` 新增 `snapshot: CompletedNodeSnapshot` 字段，由 Edge.migrate 生成。
+- **折叠职责从 Node 彻底移出**：Node 只产出原始 `NodeCompletion`，不写 snapshot、不折叠。怎么"记住"这段经历是 Edge 的事。
+
+**设计原则**：边不是路由标记，边是"在什么情况下、以什么方式、带着什么记忆进入下一阶段"的完整决策。不同边对同一经历的"记忆方式"可以也应该不同。
 
 **影响**：
-- Edge 配置更接近 JSON，利于 agent 生成工作流。
-- `migrate` 从方法签名变为数据字段，与 Node 的声明式风格统一。
+- `migrate` 保持函数签名，Edge 具备针对具体 completion 动态决策的能力。
+- `CompletedNodeSnapshot` 的生成位置从 Node 内部移到 Edge.migrate 内部。
+- `MigrationResult` 单独定义，包含 `keep`、`discard`、`inject`、`snapshot` 四个字段。
 
 ---
 
@@ -588,8 +594,9 @@ entries:
 | 2 | 上下文按 nodeId 分层 | 扁平字段 | 按来源组织，非按内容 |
 | 3 | 删 PrepareEntryResult，配置归 Node | Edge 声明节点入口配置 | 谁拥有谁声明 |
 | 4 | 删 Entry，用 START 虚拟节点 | 多入口 Entry 数组 | 统一优于特殊 |
-| 5 | migrate 降级为数据声明 | migrate 为函数 | 声明式优先 |
+| 5 | 折叠归 Edge（migrate 保持函数 + snapshot 字段） | Node 自己折叠；migrate 曾降级为数据 | 边是完整决策，不同边需不同记忆 |
 | 6 | Node 声明式优先 | Node = 纯代码实体 | 降低工作流编写门槛 |
+| 7 | 机制双挂点（AgentInstance + Node），subGoal 为特殊机制 | 机制未定义 | subGoal 是机制的"构造函数"特化 |
 
 ---
 
