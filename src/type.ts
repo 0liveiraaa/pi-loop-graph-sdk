@@ -8,7 +8,8 @@
 //    离开节点时边负责折叠栈顶层。栈只增不减，历史不可篡改。
 //
 //    子图调用是一等公民：Node 可以引用另一个 Graph 作为其实现。
-//    子图执行期间帧继续生长；子图结束时整段帧归约为该 Node 的一次产出。
+//    子图执行使用隔离栈：Runtime 为子图创建新的 AgentInstance，
+//    子图 END 时整段帧归约为父图该 Node 的一次产出。
 //    "顶层调用"只是子图调用的一个特例（无调用者）。
 //
 // ============================================================
@@ -17,19 +18,16 @@
 
 export const END = Symbol("graph.end");
 
-
 // ── 节点完成信号 ──
 
 /**
  * 节点执行完毕的原始产出。
-
  */
 export interface NodeCompletion {
   nodeId: string;
   status: "ok" | "failed" | "cancelled";
   result: Record<string, unknown>;
 }
-
 
 // ── 栈帧 ──
 
@@ -39,12 +37,10 @@ export interface NodeCompletion {
  */
 export interface ContextFrame {
   nodeId: string;
-  graphId: string;                       // 该帧属于哪个图（子图嵌套时区分）
   status: "ok" | "failed" | "cancelled";
   summary: string;
   result: Record<string, unknown>;
 }
-
 
 // ── Agent 实例 ──
 
@@ -53,53 +49,102 @@ export interface ContextFrame {
  *
  *   background  — 进入当前图时的背景上下文（不变）
  *   frames      — 有序执行历史，只增不减
- *   inbox        — 节点间的临时传递（Edge.migrate 产出的 inject 落点，
- *                  进入下一节点时被消费）
  *   mechanisms  — 全局横切机制，跨节点持续生效
+ *
+ * 阶段性工作状态不挂在 AgentInstance 上。节点只能从 background 和 frames
+ * 读取已经显式进入历史的上下文。
  */
 export interface AgentInstance {
   id: string;
   globalGoal: string;
   background: Record<string, unknown>;
   frames: ContextFrame[];
-  inbox: Record<string, unknown>;
   mechanisms: Mechanism[];
 }
 
+// ── 节点输入与执行能力 ──
+
+/**
+ * 当前节点的一次性入参。
+ *
+ * Entry 为第一个节点构造 input；Edge.migrate 为后继节点构造 input。
+ * input 不属于 AgentInstance 的持久状态，节点若希望后续阶段可见某些信息，
+ * 必须在完成信号中产出，并由 Edge 折叠进 ContextFrame。
+ */
+export interface NodeInput {
+  data: Record<string, unknown>;
+  source:
+    | { kind: "entry"; entryId: string }
+    | { kind: "edge"; edgeId: string; fromNodeId: string };
+}
+
+/**
+ * 节点执行所需的运行时能力。
+ *
+ * 这里保持框架级抽象，不绑定 pi 的具体 AgentSession 实现。
+ * pi extension 适配层负责把 runAgent/callTool 映射到真实会话、工具和 UI。
+ */
+export interface NodeContext {
+  signal: AbortSignal;
+  runAgent(request: AgentRunRequest): Promise<AgentRunResult>;
+  callTool(name: string, input: Record<string, unknown>): Promise<unknown>;
+}
+
+export interface AgentRunRequest {
+  prompt: string;
+  tools?: string[];
+  skill?: string;
+  outputSchema?: unknown;
+}
+
+export interface AgentRunResult {
+  text: string;
+  result?: Record<string, unknown>;
+}
 
 // ── 节点 ──
 
 /**
  * 可运行工作阶段。
  *
- * 普通节点（有 execute）和复合节点（有 graph）互斥：
- *   普通节点 → 提供 execute
- *   复合节点 → 提供 graph（子图调用），execute 由 Runtime 自动委托给子图
+ * 普通节点（kind: "code"）和复合节点（kind: "graph"）互斥：
+ *   code  → 提供 execute
+ *   graph → 提供 graph（子图调用），execute 由 Runtime 自动委托给子图
  *
- * 配置声明在 Node 自身：
+ * code 节点的执行配置声明在 Node 自身：
  *   - subGoal     本阶段的子目标（特殊的"构造函数"机制，必须存在）
  *   - skill       关联的 skill 路径（落地为将 skill 文本注入系统提示）
  *   - tools       本阶段工具白名单
  *   - mechanisms  局部横切机制，叠加在全局机制之上
+ *
+ * graph 节点只声明子图调用本身。Runtime 进入子图时创建新的 AgentInstance：
+ *   - background 来自调用点传入的 NodeInput.data
+ *   - frames 从空数组开始，父图 frames 对子图不可见
+ *   - 子图 END 后归约为父图 graph 节点的一次 NodeCompletion
+ *
+ * 子图内部节点拥有各自的 skill/tools/mechanisms；父图 graph 节点的 subGoal
+ * 仅作为调用意图和外层追踪标签。
  */
 export type Node =
   | {
+      kind: "code";
       id: string;
       subGoal: string;
       skill?: string;
       tools?: string[];
       mechanisms?: Mechanism[];
-      execute(instance: AgentInstance): Promise<NodeCompletion>;
+      execute(
+        instance: AgentInstance,
+        input: NodeInput,
+        ctx: NodeContext,
+      ): Promise<NodeCompletion>;
     }
   | {
+      kind: "graph";
       id: string;
       subGoal: string;
-      skill?: string;
-      tools?: string[];
-      mechanisms?: Mechanism[];
       graph: Graph;
     };
-
 
 // ── 机制 ──
 
@@ -114,7 +159,6 @@ export interface Mechanism {
   apply(instance: AgentInstance): Promise<void>;
 }
 
-
 // ── 边 ──
 
 /**
@@ -122,11 +166,11 @@ export interface Mechanism {
  *
  * 边只处置栈顶层（刚刚完成的节点）：
  *   - frame   将该节点的 Completion 折叠为一帧，push 到栈顶
- *   - inject  携带给下一节点的上下文（是节点间的临时传递）
+ *   - input   可选，作为下一节点的一次性入参
  */
 export interface MigrationResult {
-  frame: ContextFrame;                   // 如何折叠栈顶层
-  inject: Record<string, unknown>;       // 节点间的临时传递
+  frame: ContextFrame; // 如何折叠栈顶层
+  input?: Record<string, unknown>; // 下一节点的一次性入参，由 Runtime 包装为 NodeInput
 }
 
 /**
@@ -134,7 +178,7 @@ export interface MigrationResult {
  *
  * Edge 独占三件事：
  *   1. guard   — 什么时候走这条边（只看 NodeCompletion）
- *   2. migrate — 栈顶层怎么折叠、下一节点带什么上下文
+ *   2. migrate — 栈顶层怎么折叠进历史，并可生成下一节点入参
  *   3. to      — 指向哪个节点（或 END 终止）
  */
 export interface Edge {
@@ -147,20 +191,18 @@ export interface Edge {
   migrate(instance: AgentInstance, completion: NodeCompletion): MigrationResult;
 }
 
-
 // ── 路由 ──
 
 export type RouterFn = (
   edges: Edge[],
   completion: NodeCompletion,
   instance: AgentInstance,
-) => Edge | Edge[] | null;
+) => Edge | null;
 
 export type RouterStrategy =
   | { kind: "priority-first" }
   | { kind: "agent-choice" }
   | { kind: "first-match" }
-  | { kind: "all-satisfied" }
   | { kind: "custom"; fn: RouterFn };
 
 export interface NodeRouting {
@@ -169,7 +211,6 @@ export interface NodeRouting {
   router: RouterStrategy;
 }
 
-
 // ── 触发与图 ──
 
 export interface Trigger {
@@ -177,18 +218,28 @@ export interface Trigger {
   args: string;
 }
 
+export interface Entry {
+  id: string;
+  guard(trigger: Trigger, background: Record<string, unknown>): boolean;
+  startNodeId: string;
+  input?: (
+    trigger: Trigger,
+    background: Record<string, unknown>,
+  ) => Record<string, unknown>;
+}
+
 /**
  * 回路图。
  *
- * 入口采用虚拟 START 节点：routing["START"] 中的 Edge 充当入口边，
- * startNodeId 指向第一个实际节点。多入口通过 START 的多条边实现。
+ * 入口由 entries 声明。Entry.guard 判断 trigger/background 是否匹配；
+ * startNodeId 指向第一个实际节点；input 可为第一个节点构造一次性入参。
  *
- * 子图组合：复合 Node 引用另一个 Graph（Node.graph），形成嵌套调用。
+ * 子图组合：复合 Node 引用另一个 Graph（Node.graph），形成隔离栈调用。
  * 顶层图调用 = 没有调用者的子图调用。
  */
 export interface Graph {
   id: string;
-  startNodeId: string;
+  entries: Entry[];
   nodes: Record<string, Node>;
   routing: Record<string, NodeRouting>;
 }

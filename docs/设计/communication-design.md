@@ -392,7 +392,7 @@ Agent 上下文层级结构
 
 - **通讯入站层**：节点执行期间收到的订阅消息、服务请求、action 目标，追加到此层
 - **通讯出站层**：agent 发出的 publish、request、send_goal，记录到此层
-- 通讯层在节点完成时**选择性折叠**：未消费的订阅消息可保留到下一节点（由 Edge.migrate 在 inject 或 ContextFrame 中携带），已消费的消息在 snapshot 生成时丢弃
+- 通讯层在节点完成时**选择性折叠**：未消费的订阅消息可通过 Edge.migrate 写入后继 NodeInput 或 ContextFrame；已消费的消息在 snapshot 生成时丢弃
 
 ### 4.2 通讯记录格式
 
