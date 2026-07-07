@@ -211,34 +211,78 @@ export interface NodeRouting {
   router: RouterStrategy;
 }
 
-// ── 触发与图 ──
+// ── 调用契约 ──
 
-export interface Trigger {
-  command: string;
-  args: string;
+/**
+ * 图的对外调用契约。让同一张图同时可被：
+ *   · 用户像 skill 调用   → Runtime 注册成 /name 命令
+ *   · agent 像 tool 调用  → Runtime 注册成一个 LLM 工具
+ *
+ * 二者共享 name / description / inputSchema。
+ * inputSchema 声明工具入参结构（agent 调用必需）；
+ * parseArgs 将命令调用的裸文本 args 解析成 inputSchema 的形状。
+ */
+export interface GraphInvocation {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>; // 工具入参 schema，agent 调用时 LLM 依此构造
+  /** 命令调用：把裸文本 args 解析成 inputSchema 的形状。默认 { args } */
+  parseArgs?(args: string): Record<string, unknown>;
 }
 
+
+// ── 触发（调用来源归一化）──
+
+/**
+ * 一次图调用的运行时信号。三种来源，Runtime 统一归约为 background：
+ *
+ *   command  — 用户 /name，parseArgs(args) → background
+ *   tool     — agent 工具调用，schema 校验过的 params 即 background
+ *   subgraph — 上游节点（父图中 kind="graph" 的 Node）的 completion.result 即 background
+ *
+ * 三种来源统一后，Entry.guard 只需关注 background 中的内容，
+ * 无需关心来源是用户还是 agent。
+ */
+export type Trigger =
+  | { source: "command"; args: string }
+  | { source: "tool"; params: Record<string, unknown> }
+  | { source: "subgraph"; background: Record<string, unknown> };
+
+
+// ── 入口 ──
+
+/**
+ * 图的入口声明。
+ *
+ * Runtime 将 Trigger 归一为 background 后，遍历 entries 调用 guard。
+ * guard 只根据 background 的内容判断是否匹配，不关心 Trigger 的来源。
+ */
 export interface Entry {
   id: string;
-  guard(trigger: Trigger, background: Record<string, unknown>): boolean;
+  guard(background: Record<string, unknown>): boolean;
   startNodeId: string;
-  input?: (
-    trigger: Trigger,
-    background: Record<string, unknown>,
-  ) => Record<string, unknown>;
+  /** 可选：构造第一个节点的 NodeInput.data。默认 background 原样传入。 */
+  mapInput?(background: Record<string, unknown>): Record<string, unknown>;
 }
+
+
+// ── 回路图 ──
 
 /**
  * 回路图。
  *
- * 入口由 entries 声明。Entry.guard 判断 trigger/background 是否匹配；
- * startNodeId 指向第一个实际节点；input 可为第一个节点构造一次性入参。
+ * invocation?  可选。有 → 可被用户 /agent 直接调用（注册命令 + 工具）；
+ *              无 → 纯内部子图，只能被别的节点引用。天然区分
+ *              "库的公开 API"和"内部实现"。
  *
- * 子图组合：复合 Node 引用另一个 Graph（Node.graph），形成隔离栈调用。
+ * entries 声明入口；guard 只根据 background 内容判断，不关心来源。
+ *
+ * 子图组合：kind="graph" 的 Node 引用另一个 Graph，形成隔离栈调用。
  * 顶层图调用 = 没有调用者的子图调用。
  */
 export interface Graph {
   id: string;
+  invocation?: GraphInvocation;
   entries: Entry[];
   nodes: Record<string, Node>;
   routing: Record<string, NodeRouting>;
