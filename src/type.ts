@@ -2,7 +2,7 @@
 //  Loop Graph SDK — 核心类型定义
 // ============================================================
 //
-//  世界模型：栈式子图编排
+//  栈式子图编排
 //
 //    AgentInstance 持有一个有序帧栈（frames），每进入一个节点就在栈上生长一层，
 //    离开节点时边负责折叠栈顶层。栈只增不减，历史不可篡改。
@@ -28,7 +28,6 @@ export interface NodeCompletion {
   nodeId: string;
   status: "ok" | "failed" | "cancelled";
   result: Record<string, unknown>;
-  agentHint?: string;
 }
 
 
@@ -54,6 +53,8 @@ export interface ContextFrame {
  *
  *   background  — 进入当前图时的背景上下文（不变）
  *   frames      — 有序执行历史，只增不减
+ *   inbox        — 节点间的临时传递（Edge.migrate 产出的 inject 落点，
+ *                  进入下一节点时被消费）
  *   mechanisms  — 全局横切机制，跨节点持续生效
  */
 export interface AgentInstance {
@@ -61,6 +62,7 @@ export interface AgentInstance {
   globalGoal: string;
   background: Record<string, unknown>;
   frames: ContextFrame[];
+  inbox: Record<string, unknown>;
   mechanisms: Mechanism[];
 }
 
@@ -70,22 +72,33 @@ export interface AgentInstance {
 /**
  * 可运行工作阶段。
  *
+ * 普通节点（有 execute）和复合节点（有 graph）互斥：
+ *   普通节点 → 提供 execute
+ *   复合节点 → 提供 graph（子图调用），execute 由 Runtime 自动委托给子图
+ *
  * 配置声明在 Node 自身：
- *   - subGoal     本阶段的子目标（一种特殊的"构造函数"机制，必须存在）
+ *   - subGoal     本阶段的子目标（特殊的"构造函数"机制，必须存在）
  *   - skill       关联的 skill 路径（落地为将 skill 文本注入系统提示）
  *   - tools       本阶段工具白名单
  *   - mechanisms  局部横切机制，叠加在全局机制之上
- *   - graph       若存在则本节点是一个子图调用，execute 委托给该子图
  */
-export interface Node {
-  id: string;
-  subGoal: string;
-  skill?: string;
-  tools?: string[];
-  mechanisms?: Mechanism[];
-  graph?: Graph;                         // 子图调用：本节点的实现
-  execute(instance: AgentInstance): Promise<NodeCompletion>;
-}
+export type Node =
+  | {
+      id: string;
+      subGoal: string;
+      skill?: string;
+      tools?: string[];
+      mechanisms?: Mechanism[];
+      execute(instance: AgentInstance): Promise<NodeCompletion>;
+    }
+  | {
+      id: string;
+      subGoal: string;
+      skill?: string;
+      tools?: string[];
+      mechanisms?: Mechanism[];
+      graph: Graph;
+    };
 
 
 // ── 机制 ──
@@ -109,7 +122,7 @@ export interface Mechanism {
  *
  * 边只处置栈顶层（刚刚完成的节点）：
  *   - frame   将该节点的 Completion 折叠为一帧，push 到栈顶
- *   - inject  携带给下一节点的上下文（不进入栈，是节点间的临时传递）
+ *   - inject  携带给下一节点的上下文（是节点间的临时传递）
  */
 export interface MigrationResult {
   frame: ContextFrame;                   // 如何折叠栈顶层
@@ -168,14 +181,13 @@ export interface Trigger {
  * 回路图。
  *
  * 入口采用虚拟 START 节点：routing["START"] 中的 Edge 充当入口边，
- * startNodeId 指向第一个实际节点。
+ * startNodeId 指向第一个实际节点。多入口通过 START 的多条边实现。
  *
- * 子图组合：Node.graph 可引用另一个 Graph，形成嵌套调用。
+ * 子图组合：复合 Node 引用另一个 Graph（Node.graph），形成嵌套调用。
  * 顶层图调用 = 没有调用者的子图调用。
  */
 export interface Graph {
   id: string;
-  trigger: Trigger;
   startNodeId: string;
   nodes: Record<string, Node>;
   routing: Record<string, NodeRouting>;
