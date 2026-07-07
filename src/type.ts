@@ -16,6 +16,18 @@
 
 // ── 终止标记 ──
 
+/**
+ * 图的终止标记，也是图的「返回」出口。
+ *
+ * 当一条边的 to 指向 END，Runtime 弹出当前图的栈帧，
+ * 并将该边 migrate 产出的 frame.result 作为本图的返回值：
+ *   · 子图调用   → 成为父图 kind="graph" 节点的 NodeCompletion.result
+ *   · tool 调用  → 成为返回给 agent 的工具结果
+ *   · 顶层调用   → 成为整次运行的最终产出
+ *
+ * 即:END 边的 migrate 承担双重身份——既折叠最后一层进历史，
+ * 又通过 frame.result 声明「这张图对外交付什么」。
+ */
 export const END = Symbol("graph.end");
 
 // ── 节点完成信号 ──
@@ -118,9 +130,11 @@ export interface AgentRunResult {
  *   - mechanisms  局部横切机制，叠加在全局机制之上
  *
  * graph 节点只声明子图调用本身。Runtime 进入子图时创建新的 AgentInstance：
+ *   - globalGoal 来自子图 Graph.goal
  *   - background 来自调用点传入的 NodeInput.data
  *   - frames 从空数组开始，父图 frames 对子图不可见
  *   - 子图 END 后归约为父图 graph 节点的一次 NodeCompletion
+ *     （即子图 END 边的 frame.result 成为该节点的 NodeCompletion.result）
  *
  * 子图内部节点拥有各自的 skill/tools/mechanisms；父图 graph 节点的 subGoal
  * 仅作为调用意图和外层追踪标签。
@@ -167,9 +181,12 @@ export interface Mechanism {
  * 边只处置栈顶层（刚刚完成的节点）：
  *   - frame   将该节点的 Completion 折叠为一帧，push 到栈顶
  *   - input   可选，作为下一节点的一次性入参
+ *
+ * 当边的 to 为 END：frame 仍折叠进历史，且 frame.result 同时被 Runtime
+ * 取作本图的返回值（见 END 注释）；input 此时无后继节点，应省略。
  */
 export interface MigrationResult {
-  frame: ContextFrame; // 如何折叠栈顶层
+  frame: ContextFrame; // 如何折叠栈顶层（END 边时 frame.result 兼作图的返回值）
   input?: Record<string, unknown>; // 下一节点的一次性入参，由 Runtime 包装为 NodeInput
 }
 
@@ -197,7 +214,7 @@ export type RouterFn = (
   edges: Edge[],
   completion: NodeCompletion,
   instance: AgentInstance,
-) => Edge | null;
+) => Edge | null | Promise<Edge | null>; // 允许异步：自定义路由可先问模型再裁决
 
 export type RouterStrategy =
   | { kind: "priority-first" }
@@ -282,6 +299,7 @@ export interface Entry {
  */
 export interface Graph {
   id: string;
+  goal: string; // 图的总目标；Runtime 压帧时赋给该图 AgentInstance.globalGoal
   invocation?: GraphInvocation;
   entries: Entry[];
   nodes: Record<string, Node>;
