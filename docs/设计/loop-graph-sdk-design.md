@@ -1,6 +1,6 @@
 # Skill Loop SDK 设计草案
 
-> 基于 context.md 回路图抽象 + LangGraph 参考 
+> 基于 context.md 回路图抽象 + LangGraph 参考
 
 ## 核心理念
 
@@ -17,22 +17,6 @@
 **只做一件事：执行工作，产出完成信号。**
 不定义入口、不定义出口、不感知 Edge、不知道自己会被谁调用、调完去哪。
 
-```typescript
-interface Node {
-  id: string;
-  
-  // 执行体：接收注入后的 AgentInstance，产出完成信号
-  execute(instance: AgentInstance): Promise<NodeCompletion>;
-}
-
-interface NodeCompletion {
-  nodeId: string;
-  status: string;                              // 节点内部的语义状态
-  result: Record<string, unknown>;               // 结构化产出
-  agentHint?: string;                           // agent 可选的语义标注
-}
-```
-
 **职责约束**：
 
 - Node 内部允许 agent 进行 ReAct
@@ -44,120 +28,17 @@ interface NodeCompletion {
 
 **一等公民。独占条件 + 迁移 + 入口准备。**
 
-```typescript
-interface Edge {
-  id: string;
-  from: string;                                 // 源节点 id（不可为 START）
-  to: string | typeof END;                      // 目标节点 id 或终止标记
-  priority: number;                             // 数字越大优先级越高
-
-  // 条件判断：只看 NodeCompletion + AgentInstance 公开状态
-  guard(completion: NodeCompletion, instance: AgentInstance): boolean;
-
-  // 迁移动作：从上一个节点产出中保留/丢弃/注入上下文
-  migrate(instance: AgentInstance, completion: NodeCompletion): {
-    keep: string[];                             // 保留哪些上下文字段
-    discard: string[];                          // 丢弃哪些上下文字段
-    inject: Record<string, unknown>;              // 注入新字段（增量）
-  };
-
-  // 进入目标节点前的准备：skill、工具白名单、注意力引导、阶段约束
-  prepareEntry(instance: AgentInstance): {
-    skills: string[];                           // 注入的 skill 路径
-    tools: string[];                            // 本阶段可调用工具 id
-    contextFocus: string[];                     // 引导 agent 注意力聚焦
-    constraints: Constraint[];                    // 阶段特殊限制
-  };
-}
-```
-
 ### 3. Router（路由策略）
 
 **挂在每个源节点的出口处，从多条 Edge 中裁决出最终选择。**
-
-```typescript
-type RouterStrategy =
-  | { kind: "priority-first" }                 // 最高优先级胜出；同级时取第一个
-  | { kind: "agent-choice" }                   // agent 从所有满足条件的边中选
-  | { kind: "first-match" }                     // 按注册顺序，第一个满足的生效
-  | { kind: "all-satisfied" }                  // 所有满足条件的同时触发（fork）
-  | { kind: "custom"; fn: RouterFn };
-
-type RouterFn = (
-  satisfiedEdges: Edge[],
-  completion: NodeCompletion,
-  instance: AgentInstance,
-) => Edge | Edge[] | null;
-
-// Router 是源节点的一个属性配位
-interface NodeRouting {
-  nodeId: string;
-  edges: Edge[];
-  router: RouterStrategy;
-}
-```
 
 ### 4. Graph（回路图）
 
 **可运行或可复用的 agent 系统图。多入口。**
 
-```typescript
-const END = Symbol("graph.end");
-
-type Trigger = {
-  command: string;
-  args: string;
-  userMessage: string;
-};
-
-interface Entry {
-  guard(trigger: Trigger): boolean;
-  targetNode: string;
-  prepareEntry: {
-    skills: string[];
-    tools: string[];
-    contextFocus: string[];
-    constraints: Constraint[];
-  };
-  initialContext: Record<string, unknown>;
-}
-
-interface Graph {
-  id: string;
-  entries: Entry[];
-  nodes: Record<string, Node>;
-  routing: Record<string, NodeRouting>;        // 每个节点最多一组 routing
-  fallbackGraph?: Graph;                        // 无匹配 Edge 时切入的异常诊断图
-}
-```
-
 ### 5. AgentInstance（agent 实例）
 
 **回路图中的活动主体。承载跨节点的连续状态。**
-
-```typescript
-interface AgentInstance {
-  id: string;
-  
-  // 回路级总体目标
-  globalGoal: string;
-
-  // 累积上下文
-  context: Record<string, unknown>;
-
-  // 全局工具（跨节点可用）
-  globalTools: string[];
-
-  // 全局横切机制
-  mechanisms: Mechanism[];
-
-  // 当前所在节点
-  currentNode: string;
-
-  // 运行记录
-  trace: TraceEntry[];
-}
-```
 
 ---
 
@@ -224,31 +105,6 @@ agent 实例和节点要素两套配置**同时组装**到运行中的 agent 身
 
 ## 运行时（Runtime）
 
-```typescript
-interface Runtime {
-  graph: Graph;
-  
-  // 主循环
-  async run(trigger: Trigger): Promise<AgentInstance>;
-
-  // 单步：执行当前节点 → 评估 Router → 执行 Edge 迁移 → 进入下一节点
-  async step(instance: AgentInstance): Promise<AgentInstance | null>;
-}
-
-// Runtime 的核心循环：
-// while (instance.currentNode !== END) {
-//   const node = graph.nodes[instance.currentNode];
-//   const completion = await node.execute(instance);
-//   const routing = graph.routing[instance.currentNode];
-//   const candidates = routing.edges.filter(e => e.guard(completion, instance));
-//   let edge = resolveRouter(routing.router, candidates, completion, instance);
-//   if (!edge) edge = fallbackGraph.resolve(completion, instance);
-//   instance = applyMigration(edge, completion, instance);
-//   instance = applyEntry(edge, instance);
-//   instance.currentNode = edge.to;
-// }
-```
-
 Runtime 还负责：
 
 - 记录运行证据（节点执行、边迁移、工具调用、agent 输出）
@@ -260,18 +116,6 @@ Runtime 还负责：
 ## card_practice 完整流程映射
 
 ### 图定义
-
-```yaml
-graph: review_loop
-entries:
-  - guard: trigger.command == "/review"
-    targetNode: select_target
-    prepareEntry:
-      skills: []
-      tools: [review_chapter, review_exam_points]
-    initialContext:
-      user_message: trigger.args
-```
 
 ### Node 列表
 
@@ -466,6 +310,7 @@ entries:
 **原设计**：`guard(completion, instance)` — Edge 同时检查节点产出和 agent 累积状态。
 
 **发现问题**：
+
 - 实际所有 guard 条件（`completion.mode == "card_practice"`、`completion.user_action == "next_card"` 等）都只看 completion 字段，`instance` 形参从未被使用。
 - 传入 `instance` 造成 Edge 与 agent 内部状态耦合，降低复用性。
 - 单测需要 mock 两层对象（NodeCompletion + AgentInstance），比只 mock 一层复杂。
@@ -475,6 +320,7 @@ entries:
 **决策**：`guard` 只接收 `NodeCompletion`。如果将来确实有跨节点累积状态的路由需求（如"累计答错 5 题后自动切入诊断子图"），应由节点将累积数据写入 `completion.result`，而非让 Edge 直接读取 `instance.context`。
 
 **影响**：
+
 - Edge 接口简化，测试成本降低
 - 信息隐藏：Edge 不需要知道数据来源（是 instance 状态还是节点本轮的产出）
 
@@ -485,11 +331,13 @@ entries:
 **原设计**：上下文以扁平字段存储，`migrate.keep` 列出需要保留的字段名（如 `profile`、`chapter_id`、`question`）。
 
 **发现问题**：
+
 - 字段名散落，难以追踪"哪个节点产出了什么"。
 - 迁移时需要逐个声明字段，粒度太细，写起来繁琐。
 - 同一个节点可能在上下文中留下多处痕迹，批量丢弃困难。
 
 **新方案**：
+
 - `AgentInstance.context` 以 `nodeId` 为 key 分层组织。
 - 已完成节点的上下文被折叠为 `CompletedNodeSnapshot`（status + summary + result）。
 - 当前节点在 `execute` 内部开设隔离层，不对外暴露中间过程。
@@ -498,6 +346,7 @@ entries:
 **设计原则**：上下文应按**来源**组织而非按**内容**组织。来源可追溯，迁移可批量。
 
 **影响**：
+
 - 上下文结构从"扁平字段"变为"按节点分层"
 - `CompletedNodeSnapshot` 作为节点折叠后的标准输出格式
 - 节点自己负责在完成时折叠上下文（生成 summary），Edge 不参与折叠逻辑
@@ -509,17 +358,20 @@ entries:
 **原设计**：进入节点所需的信息（tools、skills、contextFocus）由 Edge 的 `prepareEntry` 方法产出，以 `PrepareEntryResult` 类型中转。
 
 **发现问题**：
+
 - 同一个节点不管从哪条边进来，它需要的 tools/skills 是一样的。让每条 Edge 重复声明同一组配置，既冗余又容易出现不一致。
 - `Node` 已经有 `subGoal`、`skill`，`PrepareEntryResult` 又有 `skills`、`contextFocus`。信息散落在 Node 和 Edge 两处，Runtime 需要拼装，职责不清。
 
 **设计原则**：谁拥有信息，谁就声明信息。不要为了"可能被覆盖"的假想需求而引入中间层。
 
 **决策**：
+
 - 删除 `PrepareEntryResult` 类型。
 - `tools`、`subGoal`、`skill` 全部声明在 `Node` 自身。
 - Runtime 进入节点时直接读取 `graph.nodes[targetNodeId]`，不经过 Edge 中转。
 
 **影响**：
+
 - 节点成为"自描述"的完整单元：看一眼 Node 定义就知道它需要什么。
 - Edge 的职责收窄为纯粹的**状态迁移**（guard + migrate）。
 - `PrepareEntryResult` 和 `MigrationResult` 两个中间类型被删除，代码量减少。
@@ -531,6 +383,7 @@ entries:
 **原设计决策 3**："不设 START 虚拟节点"，Graph 通过 `entries[]` 声明多入口，Entry 自带 `guard`、`targetNode`、`prepareEntry`、`initialContext`。
 
 **发现问题**：
+
 - Entry 是独立于 Node/Edge 体系的特殊结构，增加了 Runtime 需要处理的特殊情况。
 - 入口边也需要 guard（匹配命令）、migrate（注入初始上下文）、路由（多入口选择），而这些能力已经在 Edge 中实现了。
 - 如果入口也是 Edge，则 Runtime 不需要"入口匹配"和"边匹配"两套逻辑。
@@ -538,12 +391,14 @@ entries:
 **设计原则**：统一优于特殊。如果已有机制能做，就不引入新机制。
 
 **决策**：
+
 - 删除 `Entry` 类型。
 - Graph 增加 `startNodeId`（第一个实际节点）。
 - 入口边放在 `routing["START"]` 中，使用与普通边完全相同的 `Edge` 类型。
 - 入口上下文注入通过 Edge 的 `migrate.inject` 完成（代替原 Entry 的 `initialContext`）。
 
 **影响**：
+
 - 撤销原决策 3。
 - Runtime 只需维护一套"节点 → 路由 → 边 → 迁移"的循环，无入口特判。
 - Graph 的 `entries` 字段替换为 `routing["START"]` + `startNodeId`。
@@ -557,11 +412,13 @@ entries:
 **中间尝试**：曾将 migrate 降级为静态数据声明 `{ keep, discard, inject }`，认为 90% 场景迁移规则不依赖 completion。
 
 **发现问题（该尝试被否定）**：
+
 - 不同边对**同一个** completion 需要产出**不同**的上下文。比如 grade → discuss 需要注入完整错题信息，grade → next_question 只需要更新计数器。
 - 静态数据无法区分——两条边看到同一个 completion，只能产出一模一样的 migrate 结果，丢失了"边的意图"。
 - `snapshot`（如何折叠并记住当前节点）也应该随边的意图不同而变化：答对的快照和答错的快照理应是不同的总结。
 
 **最终决策**：
+
 - `migrate` 恢复为函数 `migrate(instance, completion): MigrationResult`。
 - `MigrationResult` 新增 `snapshot: CompletedNodeSnapshot` 字段，由 Edge.migrate 生成。
 - **折叠职责从 Node 彻底移出**：Node 只产出原始 `NodeCompletion`，不写 snapshot、不折叠。怎么"记住"这段经历是 Edge 的事。
@@ -569,6 +426,7 @@ entries:
 **设计原则**：边不是路由标记，边是"在什么情况下、以什么方式、带着什么记忆进入下一阶段"的完整决策。不同边对同一经历的"记忆方式"可以也应该不同。
 
 **影响**：
+
 - `migrate` 保持函数签名，Edge 具备针对具体 completion 动态决策的能力。
 - `CompletedNodeSnapshot` 的生成位置从 Node 内部移到 Edge.migrate 内部。
 - `MigrationResult` 单独定义，包含 `keep`、`discard`、`inject`、`snapshot` 四个字段。
@@ -584,19 +442,24 @@ entries:
 
 这个方向影响了修订 3、4、5 的所有决策——**删掉中间类型、减少抽象层、让配置靠近声明方**，都服务于"让大多数工作流可以 JSON 描述"的目标。
 
+#### 设计思想:
+
+    我们通过语言来规范和贯彻我们的设计思想,所以我们对某些需求的实现提供了便利,或要求,但大多数情况下,我们都会允许开发者能够利用这套框架根据具体需求实现系统,比如在通常来说,我们认为agent系统在完成上一个node后应该保留node相关信息的summray进入下一个node,所以我们提供了一套抽象能够较为方便的实现此需求,但我们不应该阻拦开发者的可能需求,在不矛盾的情况下,所以我们能够支持完全抛弃上下文,或者开发者自定义自己的需要上下文
+
 ---
 
 ### 设计决策汇总
 
-| 修订 | 做了什么 | 否定的原设计 | 核心原则 |
-|------|----------|-------------|----------|
-| 1 | guard 只收 NodeCompletion | 同时传入 AgentInstance | YAGNI，信息隐藏 |
-| 2 | 上下文按 nodeId 分层 | 扁平字段 | 按来源组织，非按内容 |
-| 3 | 删 PrepareEntryResult，配置归 Node | Edge 声明节点入口配置 | 谁拥有谁声明 |
-| 4 | 删 Entry，用 START 虚拟节点 | 多入口 Entry 数组 | 统一优于特殊 |
-| 5 | 折叠归 Edge（migrate 保持函数 + snapshot 字段） | Node 自己折叠；migrate 曾降级为数据 | 边是完整决策，不同边需不同记忆 |
-| 6 | Node 声明式优先 | Node = 纯代码实体 | 降低工作流编写门槛 |
-| 7 | 机制双挂点（AgentInstance + Node），subGoal 为特殊机制 | 机制未定义 | subGoal 是机制的"构造函数"特化 |
+| 修订 | 做了什么                                                               | 否定的原设计                                             | 核心原则                                  |
+| ---- | ---------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------- |
+| 1    | guard 只收 NodeCompletion                                              | 同时传入 AgentInstance                                   | YAGNI，信息隐藏                           |
+| 2    | 上下文改为有序栈帧（ContextFrame[]），按时间顺序排列                   | 扁平字段 → Record by nodeId → 栈                       | 栈直觉：历史不可篡改，按时间而非 key 检索 |
+| 3    | 删 PrepareEntryResult，配置归 Node                                     | Edge 声明节点入口配置                                    | 谁拥有谁声明                              |
+| 4    | 删 Entry，用 START 虚拟节点                                            | 多入口 Entry 数组                                        | 统一优于特殊                              |
+| 5    | 折叠归 Edge（migrate 保持函数 + snapshot 字段）                        | Node 自己折叠；migrate 曾降级为数据                      | 边是完整决策，不同边需不同记忆            |
+| 6    | Node 声明式优先                                                        | Node = 纯代码实体                                        | 降低工作流编写门槛                        |
+| 7    | 机制双挂点（AgentInstance + Node），subGoal 为特殊机制                 | 机制未定义                                               | subGoal 是机制的"构造函数"特化            |
+| 8    | 删 keep/discard，迁移只产 frame+inject；子图升为一等公民（Node.graph） | keep/discard 按字段/节点操作；fallbackGraph 作为唯一子图 | 栈顶层由边折叠；子图组合是正常原语        |
 
 ---
 
