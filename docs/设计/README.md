@@ -1,8 +1,9 @@
-标准结构格式如下:
-- 设计 
-    - CONTEXT.md:总的术语表
-    - mdname.md:该项目的主要设计
-    - filename: 一个子设计的相关设计文档
-        - CONTEXT.MD 该设计的术语表
-        - 一系列设计文档
-    
+# 设计文档索引
+
+| 文档 | 内容 | 阅读顺序 |
+|------|------|---------|
+| `CONTEXT.md` | 回路图全部术语定义 | 1 |
+| `loop-graph-sdk-design.md` | 核心设计：心智模型、核心概念、关键决策、运行时 | 2 |
+| `entry-message-format.md` | 入口消息格式规范（哨兵切分、COMPLETED/CURRENT 段） | 3 |
+| `developer-guide.md` | 开发者指南：如何用 SDK 定义图、节点、边、路由 | 4 |
+| `communication-design.md` | 多 agent 通讯设计（ROS2 风格） | 远期 |
