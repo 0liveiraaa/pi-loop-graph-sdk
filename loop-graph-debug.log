@@ -1,24 +1,14 @@
-{"ts":"2026-07-08T09:56:09.846Z","type":"graph_start","graphId":"subgraph_test","trigger":{"source":"command","args":"hello"}}
-{"ts":"2026-07-08T09:56:09.848Z","type":"tools_changed","nodeId":"sub_wrapper","tools":["read","__graph_complete__"]}
-{"ts":"2026-07-08T09:56:09.849Z","type":"enter_node","depth":1,"nodeId":"sub_wrapper","marker":"__node_boundary__:sub_wrapper:1:0fd212f2","inputData":{"args":"hello"},"frameCount":0,"frameSummaries":[]}
-{"ts":"2026-07-08T09:56:09.849Z","type":"subgraph_push","parentNodeId":"sub_wrapper","childGraphId":"sub_child"}
-{"ts":"2026-07-08T09:56:09.850Z","type":"enter_node","depth":1,"nodeId":"child_agent","marker":"__node_boundary__:child_agent:1:11bba0c2","inputData":{"args":"hello"},"frameCount":0,"frameSummaries":[]}
-{"ts":"2026-07-08T09:56:09.860Z","type":"projection","messageCount":3,"splitMarker":"__node_boundary__:child_agent:1:11bba0c2","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":1,"messageTypes":["user","loop_graph_prompt"]}
-{"ts":"2026-07-08T09:56:12.839Z","type":"agent_complete","nodeId":"child_agent","status":"ok","resultKeys":["echo","message"]}
-{"ts":"2026-07-08T09:56:12.842Z","type":"projection","messageCount":5,"splitMarker":"__node_boundary__:child_agent:1:11bba0c2","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":3,"messageTypes":["user","loop_graph_prompt","assistant","toolResult"]}
-{"ts":"2026-07-08T09:56:15.171Z","type":"exit_node","depth":1,"nodeId":"child_agent","pushedFrame":{"nodeId":"child_agent","status":"ok","summary":"子图 agent 完成: {\"echo\":\"hello\",\"message\":\"子图 agent 复述完成，输入为: hello\"}"},"totalFrames":1}
-{"ts":"2026-07-08T09:56:15.172Z","type":"subgraph_pop","parentNodeId":"sub_wrapper","childGraphId":"sub_child","resultKeys":["nodeId","status","result"]}
-{"ts":"2026-07-08T09:56:15.173Z","type":"exit_node","depth":1,"nodeId":"sub_wrapper","pushedFrame":{"nodeId":"sub_wrapper","status":"ok","summary":"子图 wrapper 完成"},"totalFrames":1}
-{"ts":"2026-07-08T09:56:15.173Z","type":"graph_end","graphId":"subgraph_test","steps":1,"frameCount":1,"frameSummaries":[{"nodeId":"sub_wrapper","summary":"子图 wrapper 完成"}]}
-{"ts":"2026-07-08T09:56:59.624Z","type":"graph_start","graphId":"subgraph_test","trigger":{"source":"command","args":""}}
-{"ts":"2026-07-08T09:56:59.625Z","type":"tools_changed","nodeId":"sub_wrapper","tools":["read","__graph_complete__"]}
-{"ts":"2026-07-08T09:56:59.625Z","type":"enter_node","depth":1,"nodeId":"sub_wrapper","marker":"__node_boundary__:sub_wrapper:1:9893f80d","inputData":{"args":""},"frameCount":0,"frameSummaries":[]}
-{"ts":"2026-07-08T09:56:59.626Z","type":"subgraph_push","parentNodeId":"sub_wrapper","childGraphId":"sub_child"}
-{"ts":"2026-07-08T09:56:59.627Z","type":"enter_node","depth":1,"nodeId":"child_agent","marker":"__node_boundary__:child_agent:1:b2ac4233","inputData":{"args":""},"frameCount":0,"frameSummaries":[]}
-{"ts":"2026-07-08T09:56:59.628Z","type":"projection","messageCount":11,"splitMarker":"__node_boundary__:child_agent:1:b2ac4233","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":1,"messageTypes":["user","loop_graph_prompt"]}
-{"ts":"2026-07-08T09:57:02.955Z","type":"agent_complete","nodeId":"child_agent","status":"ok","resultKeys":["message","input_args"]}
-{"ts":"2026-07-08T09:57:02.957Z","type":"projection","messageCount":13,"splitMarker":"__node_boundary__:child_agent:1:b2ac4233","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":3,"messageTypes":["user","loop_graph_prompt","assistant","toolResult"]}
-{"ts":"2026-07-08T09:57:04.414Z","type":"exit_node","depth":1,"nodeId":"child_agent","pushedFrame":{"nodeId":"child_agent","status":"ok","summary":"子图 agent 完成: {\"message\":\"子图内部 agent 节点执行完成\",\"input_args\":{}}"},"totalFrames":1}
-{"ts":"2026-07-08T09:57:04.415Z","type":"subgraph_pop","parentNodeId":"sub_wrapper","childGraphId":"sub_child","resultKeys":["nodeId","status","result"]}
-{"ts":"2026-07-08T09:57:04.415Z","type":"exit_node","depth":1,"nodeId":"sub_wrapper","pushedFrame":{"nodeId":"sub_wrapper","status":"ok","summary":"子图 wrapper 完成"},"totalFrames":1}
-{"ts":"2026-07-08T09:57:04.416Z","type":"graph_end","graphId":"subgraph_test","steps":1,"frameCount":1,"frameSummaries":[{"nodeId":"sub_wrapper","summary":"子图 wrapper 完成"}]}
+{"ts":"2026-07-08T10:02:04.628Z","type":"graph_start","graphId":"chain_test","trigger":{"source":"command","args":"hello"}}
+{"ts":"2026-07-08T10:02:04.630Z","type":"tools_changed","nodeId":"echo_a","tools":["read","__graph_complete__"]}
+{"ts":"2026-07-08T10:02:04.630Z","type":"enter_node","depth":1,"nodeId":"echo_a","marker":"__node_boundary__:echo_a:1:57cf08a3","inputData":{"args":"hello"},"frameCount":0,"frameSummaries":[]}
+{"ts":"2026-07-08T10:02:04.632Z","type":"projection","messageCount":18,"splitMarker":"__node_boundary__:echo_a:1:57cf08a3","splitFound":true,"frameCount":0,"currentNode":"echo_a","headCount":0,"activeCount":1,"messageTypes":["user","loop_graph_prompt"]}
+{"ts":"2026-07-08T10:02:07.937Z","type":"agent_complete","nodeId":"echo_a","status":"ok","resultKeys":["message","input","echo"]}
+{"ts":"2026-07-08T10:02:07.939Z","type":"projection","messageCount":20,"splitMarker":"__node_boundary__:echo_a:1:57cf08a3","splitFound":true,"frameCount":0,"currentNode":"echo_a","headCount":0,"activeCount":3,"messageTypes":["user","loop_graph_prompt","assistant","toolResult"]}
+{"ts":"2026-07-08T10:02:10.180Z","type":"exit_node","depth":1,"nodeId":"echo_a","pushedFrame":{"nodeId":"echo_a","status":"ok","summary":"节点 A 完成，输出: {\"message\":\"用户输入已接收并复述\",\"input\":\"hello\",\"echo\":\"hello\"}"},"totalFrames":1}
+{"ts":"2026-07-08T10:02:10.181Z","type":"tools_changed","nodeId":"echo_b","tools":["read","__graph_complete__"]}
+{"ts":"2026-07-08T10:02:10.181Z","type":"enter_node","depth":1,"nodeId":"echo_b","marker":"__node_boundary__:echo_b:2:d1776e05","inputData":{"from_a":{"message":"用户输入已接收并复述","input":"hello","echo":"hello"},"instruction":"请基于节点 A 的输出再做一次复述"},"frameCount":1,"frameSummaries":["节点 A 完成，输出: {\"message\":\"用户输入已接收并复述\",\"input\":\"hello\",\"echo\":\"hello\"}"]}
+{"ts":"2026-07-08T10:02:10.183Z","type":"projection","messageCount":22,"splitMarker":"__node_boundary__:echo_b:2:d1776e05","splitFound":true,"frameCount":1,"currentNode":"echo_b","headCount":1,"activeCount":0,"messageTypes":["user","user"]}
+{"ts":"2026-07-08T10:02:13.434Z","type":"agent_complete","nodeId":"echo_b","status":"ok","resultKeys":["message","from_a","echo_b"]}
+{"ts":"2026-07-08T10:02:13.436Z","type":"projection","messageCount":25,"splitMarker":"__node_boundary__:echo_b:2:d1776e05","splitFound":true,"frameCount":1,"currentNode":"echo_b","headCount":1,"activeCount":3,"messageTypes":["user","user","assistant","toolResult","loop_graph_prompt"]}
+{"ts":"2026-07-08T10:02:16.984Z","type":"exit_node","depth":1,"nodeId":"echo_b","pushedFrame":{"nodeId":"echo_b","status":"ok","summary":"节点 B 完成"},"totalFrames":2}
+{"ts":"2026-07-08T10:02:16.985Z","type":"graph_end","graphId":"chain_test","steps":2,"frameCount":2,"frameSummaries":[{"nodeId":"echo_a","summary":"节点 A 完成，输出: {\"message\":\"用户输入已接收并复述\",\"input\":\"hello\",\"echo\":\"hello\"}"},{"nodeId":"echo_b","summary":"节点 B 完成"}]}
