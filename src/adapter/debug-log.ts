@@ -76,14 +76,16 @@ export const debugLog = {
         : false,
       frameCount: input.frames.length,
       currentNode: input.currentNode?.id ?? null,
-      headCount: output.filter(
+      frameMsgCount: output.filter(
         (m) => typeof m.content === "string" && (m.content as string).startsWith("=== COMPLETED"),
       ).length,
-      activeCount: output.filter(
+      currentMsgCount: output.filter(
+        (m) => typeof m.content === "string" && (m.content as string).startsWith("=== CURRENT"),
+      ).length,
+      otherCount: output.filter(
         (m) => typeof m.content !== "string" || !(m.content as string).startsWith("==="),
       ).length,
-      // 摘要：前 5 条消息的 customType/role
-      messageTypes: output.slice(0, 5).map((m) => m.customType ?? m.role ?? "?"),
+      messageTypes: output.slice(0, 8).map((m) => m.customType ?? m.role ?? "?"),
     });
   },
 

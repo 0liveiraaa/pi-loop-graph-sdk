@@ -1,0 +1,24 @@
+{"ts":"2026-07-08T09:56:09.846Z","type":"graph_start","graphId":"subgraph_test","trigger":{"source":"command","args":"hello"}}
+{"ts":"2026-07-08T09:56:09.848Z","type":"tools_changed","nodeId":"sub_wrapper","tools":["read","__graph_complete__"]}
+{"ts":"2026-07-08T09:56:09.849Z","type":"enter_node","depth":1,"nodeId":"sub_wrapper","marker":"__node_boundary__:sub_wrapper:1:0fd212f2","inputData":{"args":"hello"},"frameCount":0,"frameSummaries":[]}
+{"ts":"2026-07-08T09:56:09.849Z","type":"subgraph_push","parentNodeId":"sub_wrapper","childGraphId":"sub_child"}
+{"ts":"2026-07-08T09:56:09.850Z","type":"enter_node","depth":1,"nodeId":"child_agent","marker":"__node_boundary__:child_agent:1:11bba0c2","inputData":{"args":"hello"},"frameCount":0,"frameSummaries":[]}
+{"ts":"2026-07-08T09:56:09.860Z","type":"projection","messageCount":3,"splitMarker":"__node_boundary__:child_agent:1:11bba0c2","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":1,"messageTypes":["user","loop_graph_prompt"]}
+{"ts":"2026-07-08T09:56:12.839Z","type":"agent_complete","nodeId":"child_agent","status":"ok","resultKeys":["echo","message"]}
+{"ts":"2026-07-08T09:56:12.842Z","type":"projection","messageCount":5,"splitMarker":"__node_boundary__:child_agent:1:11bba0c2","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":3,"messageTypes":["user","loop_graph_prompt","assistant","toolResult"]}
+{"ts":"2026-07-08T09:56:15.171Z","type":"exit_node","depth":1,"nodeId":"child_agent","pushedFrame":{"nodeId":"child_agent","status":"ok","summary":"子图 agent 完成: {\"echo\":\"hello\",\"message\":\"子图 agent 复述完成，输入为: hello\"}"},"totalFrames":1}
+{"ts":"2026-07-08T09:56:15.172Z","type":"subgraph_pop","parentNodeId":"sub_wrapper","childGraphId":"sub_child","resultKeys":["nodeId","status","result"]}
+{"ts":"2026-07-08T09:56:15.173Z","type":"exit_node","depth":1,"nodeId":"sub_wrapper","pushedFrame":{"nodeId":"sub_wrapper","status":"ok","summary":"子图 wrapper 完成"},"totalFrames":1}
+{"ts":"2026-07-08T09:56:15.173Z","type":"graph_end","graphId":"subgraph_test","steps":1,"frameCount":1,"frameSummaries":[{"nodeId":"sub_wrapper","summary":"子图 wrapper 完成"}]}
+{"ts":"2026-07-08T09:56:59.624Z","type":"graph_start","graphId":"subgraph_test","trigger":{"source":"command","args":""}}
+{"ts":"2026-07-08T09:56:59.625Z","type":"tools_changed","nodeId":"sub_wrapper","tools":["read","__graph_complete__"]}
+{"ts":"2026-07-08T09:56:59.625Z","type":"enter_node","depth":1,"nodeId":"sub_wrapper","marker":"__node_boundary__:sub_wrapper:1:9893f80d","inputData":{"args":""},"frameCount":0,"frameSummaries":[]}
+{"ts":"2026-07-08T09:56:59.626Z","type":"subgraph_push","parentNodeId":"sub_wrapper","childGraphId":"sub_child"}
+{"ts":"2026-07-08T09:56:59.627Z","type":"enter_node","depth":1,"nodeId":"child_agent","marker":"__node_boundary__:child_agent:1:b2ac4233","inputData":{"args":""},"frameCount":0,"frameSummaries":[]}
+{"ts":"2026-07-08T09:56:59.628Z","type":"projection","messageCount":11,"splitMarker":"__node_boundary__:child_agent:1:b2ac4233","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":1,"messageTypes":["user","loop_graph_prompt"]}
+{"ts":"2026-07-08T09:57:02.955Z","type":"agent_complete","nodeId":"child_agent","status":"ok","resultKeys":["message","input_args"]}
+{"ts":"2026-07-08T09:57:02.957Z","type":"projection","messageCount":13,"splitMarker":"__node_boundary__:child_agent:1:b2ac4233","splitFound":true,"frameCount":0,"currentNode":"child_agent","headCount":0,"activeCount":3,"messageTypes":["user","loop_graph_prompt","assistant","toolResult"]}
+{"ts":"2026-07-08T09:57:04.414Z","type":"exit_node","depth":1,"nodeId":"child_agent","pushedFrame":{"nodeId":"child_agent","status":"ok","summary":"子图 agent 完成: {\"message\":\"子图内部 agent 节点执行完成\",\"input_args\":{}}"},"totalFrames":1}
+{"ts":"2026-07-08T09:57:04.415Z","type":"subgraph_pop","parentNodeId":"sub_wrapper","childGraphId":"sub_child","resultKeys":["nodeId","status","result"]}
+{"ts":"2026-07-08T09:57:04.415Z","type":"exit_node","depth":1,"nodeId":"sub_wrapper","pushedFrame":{"nodeId":"sub_wrapper","status":"ok","summary":"子图 wrapper 完成"},"totalFrames":1}
+{"ts":"2026-07-08T09:57:04.416Z","type":"graph_end","graphId":"subgraph_test","steps":1,"frameCount":1,"frameSummaries":[{"nodeId":"sub_wrapper","summary":"子图 wrapper 完成"}]}
