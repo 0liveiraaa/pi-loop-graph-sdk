@@ -53,8 +53,9 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
     if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;
     const params = event.details as any;
     if (params?.status) {
-      debugLog.agentComplete(activeNodeContext["currentNodeId"] ?? "?", {
-        nodeId: activeNodeContext["currentNodeId"] ?? "?",
+      const nodeId = activeRuntime?.currentNodeId ?? "?";
+      debugLog.agentComplete(nodeId, {
+        nodeId,
         status: params.status,
         result: params.result ?? {},
       });

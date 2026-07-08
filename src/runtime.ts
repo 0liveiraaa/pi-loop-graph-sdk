@@ -37,6 +37,10 @@ export class GraphRuntime {
     return this.top?.graph ?? null;
   }
 
+  get currentNodeId(): string | null {
+    return this.top?.currentNodeId ?? null;
+  }
+
   pushGraph(graph: Graph, background: Record<string, unknown>): AgentInstance {
     const instance: AgentInstance = {
       id: crypto.randomUUID(),

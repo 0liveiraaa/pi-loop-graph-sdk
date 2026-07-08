@@ -1,5 +1,5 @@
 // ============================================================
-//  PiNodeContext — Promise 桥接（简化版）
+//  PiNodeContext — Promise 桥接
 // ============================================================
 //
 //  不注入 entry message（投影钩子负责），只做两件事：
@@ -23,8 +23,8 @@ export class PiNodeContext implements NodeContext {
   private pi: ExtensionAPI;
   private currentNodeId: string | null = null;
 
-  /** __graph_complete__ 捕获的 completion */
-  private pendingCompletion: NodeCompletion | null = null;
+  /** __graph_complete__ 捕获的 completion 列表（同节点内可能调多次） */
+  private pendingCompletions: NodeCompletion[] = [];
 
   /** 活跃 run 的 resolve */
   private activeResolve: ((c: NodeCompletion) => void) | null = null;
@@ -87,24 +87,45 @@ export class PiNodeContext implements NodeContext {
     }
   }
 
+  /**
+   * 直接执行 pi 平台上的工具。当前占用位，未实现。
+   *
+   * 纯代码节点不需要此方法——你可以在 execute 里直接
+   * import 并使用任何 Node.js 或第三方库：
+   *
+   * ```typescript
+   * execute: async (instance, input, ctx) => {
+   *   const data = fs.readFileSync(input.data.path, "utf-8");
+   *   const result = await fetch("https://api.example.com", {...});
+   *   return { nodeId: "parse", status: "ok", result: { data, result } };
+   * }
+   * ```
+   */
   async callTool(
     _name: string,
     _input: Record<string, unknown>,
   ): Promise<unknown> {
-    throw new Error("PiNodeContext.callTool 尚未实现");
+    throw new Error(
+      "PiNodeContext.callTool 未实现。纯代码节点请直接在 execute 中使用 Node.js API。",
+    );
   }
 
   // ── 供 extension.ts 调用 ──────────────────────────────
+
+  /** 当前节点内调用 __graph_complete__ 的次数 */
+  get completeCount(): number {
+    return this.pendingCompletions.length;
+  }
 
   recordCompletion(params: {
     status: "ok" | "failed" | "cancelled";
     result: Record<string, unknown>;
   }): void {
-    this.pendingCompletion = {
+    this.pendingCompletions.push({
       nodeId: this.currentNodeId ?? "unknown",
       status: params.status,
       result: params.result,
-    };
+    });
   }
 
   onAgentEnd(): void {
@@ -112,27 +133,35 @@ export class PiNodeContext implements NodeContext {
     const resolve = this.activeResolve;
     if (!resolve) return;
 
-    if (this.pendingCompletion) {
-      const completion = this.pendingCompletion;
+    if (this.pendingCompletions.length > 0) {
+      // 取最后一次调用作为主 completion
+      const last = this.pendingCompletions[this.pendingCompletions.length - 1];
+
+      // 如果调了多次，把全部记录附在 result 里
+      const completion: NodeCompletion = {
+        ...last,
+        result: {
+          ...last.result,
+          ...(this.pendingCompletions.length > 1
+            ? { allCompletions: this.pendingCompletions }
+            : {}),
+        },
+      };
 
       // 验证（如果节点声明了 validateCompletion 且 agent 上报 ok）
-      if (
-        this.validateFn &&
-        completion.status === "ok"
-      ) {
-        const result = this.validateFn(completion.result);
-        if (!result.isValid) {
-          // 不通过 → 注入原因，让 agent 继续（不 resolve）
+      if (this.validateFn && completion.status === "ok") {
+        const vr = this.validateFn(completion.result);
+        if (!vr.isValid) {
           this.pi.sendMessage(
             {
               customType: "loop_graph_retry",
-              content: `验证未通过: ${result.reason}\n请修正后再次调用 __graph_complete__`,
+              content: `验证未通过: ${vr.reason}\n请修正后再次调用 __graph_complete__`,
               display: false,
             },
             { triggerTurn: true },
           );
-          debugLog.agentRetry(this.currentNodeId ?? "?", result.reason);
-          this.pendingCompletion = null;
+          debugLog.agentRetry(this.currentNodeId ?? "?", vr.reason);
+          this.pendingCompletions = [];
           return;
         }
       }
@@ -159,7 +188,7 @@ export class PiNodeContext implements NodeContext {
 
   reset(): void {
     this.currentNodeId = null;
-    this.pendingCompletion = null;
+    this.pendingCompletions = [];
     this.activeRunId = 0;
     this.activeResolve = null;
     this.validateFn = undefined;

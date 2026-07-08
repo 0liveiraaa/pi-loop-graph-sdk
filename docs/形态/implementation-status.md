@@ -10,15 +10,21 @@
 src/
 ├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, …）
 ├── runtime.ts              # GraphRuntime（调用栈 + 帧栈 + 哨兵）
+├── validate.ts             # 图校验
+├── router.ts               # 单边裁决
+├── agent-execute.ts        # createAgentExecute 工厂
 ├── adapter/
 │   ├── extension.ts        # pi 入口：context 投影 + 命令注册 + 主循环
 │   ├── projection.ts       # 纯函数：三段重组消息
-│   ├── pi-node-context.ts  # Promise 桥接：runAgent / callTool
-│   └── complete-tool.ts    # __graph_complete__ 工具定义
+│   ├── pi-node-context.ts  # Promise 桥接：runAgent / callTool + 完成度验证
+│   ├── complete-tool.ts    # __graph_complete__ 工具定义
+│   └── debug-log.ts        # 调试日志
 ├── graphs/
-│   ├── review-graph.ts     # 单节点 echo 测试图
+│   ├── review-graph.ts     # echo 测试图
 │   ├── probe-graph.ts      # 哨兵可见性验证图
-│   └── chain-graph.ts      # 双节点链式验证图
+│   ├── chain-graph.ts      # 双节点链式验证图
+│   ├── subgraph-graph.ts   # 子图隔离验证图
+│   └── validate-graph.ts   # 完成度验证测试图
 └── index.ts                # 对外导出
 ```
 
@@ -28,65 +34,103 @@ src/
 
 ### 2.1 哨兵消息
 
-**目的**：在 pi 的 messages 数组中标记"当前节点开始"的切分点，替代原先依赖 `sessionManager.getLeafId()` 的方案。
+**目的**：在 pi 的 messages 数组中标记"当前节点开始"的切分点。
 
 **实现**：
 
-- `GraphRuntime.nextMarker(nodeId)` 生成唯一标记：`__node_boundary__:{nodeId}:{递增计数}`
+- `GraphRuntime.nextMarker(nodeId)` 生成唯一标记：`__node_boundary__:{nodeId}:{递增计数}:{随机8字符}`
+- 随机后缀保证跨调用不重复
 - 进节点前通过 `pi.sendMessage({ customType: "loop_graph_boundary", content: marker, display: false })` 注入
-- 同一节点重复进入（循环边）也能区分，因为计数器递增
+- 同一节点重复进入（循环边）也能区分
 
-**已验证**：`display: false` 的自定义消息出现在 `context` 事件的 `e.messages` 数组中（探针图确认）。
+### 2.2 context 投影（三段重组）
 
-### 2.2 context 投影
+**目的**：每次 LLM 调用前动态重组消息，使 agent 只看到帧栈摘要 + 当前节点工作区，前序节点的 ReAct 被丢弃。
 
-**目的**：每次 LLM 调用时动态重组消息，使 agent 只看到帧栈摘要 + 当前节点工作区，前序节点的 ReAct 被丢弃。
-
-**实现**（`projection.ts`，纯函数）：
+**哨兵切分**：
 
 ```
-原始 messages: [head, 哨兵, node1_ReAct, node1_tools, ...]
-                 ↓ projectMessages()
-投影后:         [head, === COMPLETED === JSON, === CURRENT === key-value, node1_ReAct, ...]
+messages 中的布局：
+[sys, user, S1, 节点A的ReAct..., S2, 节点B的prompt, 节点B的工作...]
+
+投影找两个位置：
+  firstIdx = 第一个哨兵（S1）                  ← 图的 entry 边界
+  currentIdx = 当前节点的哨兵（S2 / nodeMarker）← 当前节点的起点
 ```
 
-- **head**：哨兵之前的消息原样保留（系统提示 + 用户命令 + 前序节点的帧栈消息）
-- **frame 段**：`instance.frames` 渲染为 `=== COMPLETED === [{nodeId, status, summary, result}, ...] === END ===`
-- **current 段**：`=== CURRENT === nodeId, subGoal, input, tools, skill, completeWith === END ===`
-- **active**：哨兵之后的消息（当前节点 live ReAct）原样保留
-- 哨兵本身不渲染给模型（`slice(splitIdx + 1)` 跳过）
+**三段产出**：
 
-### 2.3 Promise 桥接（runAgent）
+```
+head = before firstIdx                          → [sys, user]（图之外的信息）
+active = after currentIdx                       → [prompt, 节点B的工作...]
+S1 ~ S2 之间的原始 ReAct 被丢弃，由帧段替换
+```
 
-**目的**：在 pi 的事件驱动模型中，让 Runtime 能用 `async/await` 等待 agent 完成。
+**投影输出结构**：
+
+```
+--- head ---
+[sys 系统提示]
+[user /chain hello]
+
+--- frame 段 ---
+=== COMPLETED ===
+[{"nodeId":"echo_a","status":"ok","summary":"节点A完成","result":{...}}]
+=== END ===
+
+--- current 段 ---
+=== CURRENT ===
+nodeId: echo_b
+subGoal: 收到节点 A 的输出...
+input:
+  from_a: ...
+completeWith: __graph_complete__(...)
+=== END ===
+
+--- active ---
+(当前节点的 live ReAct)
+```
+
+**head 仅包含图之外的信息**（系统提示 + 用户原始命令）。已完成节点的原始 ReAct 不在投影中——被帧段替换。
+
+### 2.3 完成度验证
+
+节点可声明 `validateCompletion`，agent 调用 `__graph_complete__` 时检查 result：
+
+```
+agent → __graph_complete__({ status: "ok", result: { question: "...", answer: "..." } })
+  ↓ validateCompletion: 检查必填字段
+  ↓ 不通过 → inject "验证未通过: 缺少..." → triggerTurn → agent 继续
+  ↓ agent 补全 → 再次 __graph_complete__
+  ↓ 通过 → resolve Promise → 进入下一节点
+```
+
+### 2.4 createAgentExecute 工厂
+
+替代 `execute: null as any` + `skill: "__probe__"`：
+
+```typescript
+const myNode: Node = {
+  kind: "code",
+  id: "grade",
+  subGoal: "批改答案",
+  execute: createAgentExecute({ skill: "review-grade", tools: ["review_answer"] }),
+  validateCompletion: requireFields(["score", "explanation"]),
+};
+```
+
+`execNode` 对所有 code 节点一律调 `node.execute()`，不再用 `skill`/`tools` 做启发式判断。
+
+### 2.5 Promise 桥接（runAgent）
 
 **实现**（`pi-node-context.ts`）：
 
-1. `runAgent()` 被调用时创建 Promise，存 `resolve` 到 `this.activeResolve`
+1. `runAgent()` 创建 Promise，存 `resolve` 到 `this.activeResolve`
 2. `pi.sendMessage(prompt, { triggerTurn: true })` 触发 agent 运行
-3. pi 全局 `agent_end` handler → `nodeContext.onAgentEnd()` → resolve Promise
-4. `onAgentEnd` 检查 `pendingCompletion`（由 `tool_result` handler 在 agent 调用 `__graph_complete__` 时填充）
-5. 超时保护：5 分钟自动 resolve 为 `status: "failed"`
-6. `runId` + `activeRunId` 令牌机制区分多次调用
+3. `agent_end` → `onAgentEnd()` → 检查验证 → resolve
+4. 超时保护：5 分钟自动 resolve 为 `status: "failed"`
 
-**已验证**：命令 handler 内 `await runAgent()` 能正确等待 agent_end 返回（probe + chain 图确认）。
-
-### 2.4 __graph_complete__ 终止工具
-
-**目的**：agent 节点完成时调用的"上报工具"，参数直接成为 `NodeCompletion`。
-
-**实现**（`complete-tool.ts`）：
-
-- 工具名：`__graph_complete__`
-- 参数：`{ status: "ok"|"failed"|"cancelled", result: {…} }`
-- 注册为 pi tool，通过 `setActiveTools` 控制在节点内可见
-- `tool_result` 钩子捕获参数 → `PiNodeContext.recordCompletion()`
-
-### 2.5 调用栈（GraphRuntime）
-
-**目的**：管理帧栈 + 当前节点状态 + 哨兵标记。
-
-**实现**（`runtime.ts`）：
+### 2.6 调用栈（GraphRuntime）
 
 ```
 GraphRuntime
@@ -99,97 +143,91 @@ GraphRuntime
   pushGraph / popGraph                              // 子图边界
 ```
 
-## 2.6 module级别变量
-
-**目的**：多个extension共享runtime状态
-
-**实现**（`extension.ts`）：
-
-- `activeRuntime`：当前活跃的 GraphRuntime（`context` 钩子读它来投影）
-- `activeNodeContext`：当前活跃的 PiNodeContext（`tool_result` / `agent_end` 钩子用它捕获 completion）
-
-- 主循环执行前设置为局部 runtime/nodeContext
-- 子图执行时切换为子 runtime/nodeContext
-- 结束或异常恢复为默认
-
-### 2.6 模块级单例
+### 2.7 模块级单例
 
 `activeRuntime` / `activeNodeContext` 两个模块级变量，被 `context`、`tool_result`、`agent_end` 钩子和 `executeGraph` 主循环共享。子图执行时切换为子 runtime/nodeContext，退出时恢复。
 
 ---
 
-## 三、已验证
+## 三、上下文隔离契约
+
+### 顶层图
+
+```
+用户输入 /chain hello
+  ↓
+executeGraph 创建 AgentInstance：
+  background: { args: "hello" }    ← 只含 trigger 入参
+  frames: []                       ← 从零开始
+  globalGoal: "验证双节点链式推进"
+```
+
+LLM 看投影后的消息：
+```
+head: [sys, user /chain hello]       ← 图之外的消息（保留）
+=== COMPLETED ===                    ← 帧摘要
+=== CURRENT ===
+active: [当前节点的工作]
+```
+
+`AgentInstance` 不继承图之外的完整上下文。`background` 只有 trigger 入参。head 段让 LLM 能看到图之外的原始消息。
+
+### 子图
+
+```
+execNode 检测到 kind: "graph"
+  ↓
+runSubgraph 创建 childRuntime：
+  childInstance:
+    background: parent.NodeInput.data    ← 只传调用点的输入
+    frames: []                            ← 隔离栈，从零开始
+    globalGoal: 子图的目标
+  activeRuntime = childRt                ← 投影切到子图视角
+```
+
+**子图投影**：
+```
+head: [sys, user /sub]            ← 图之外的原始消息（继承）
+=== COMPLETED ===                  ← 子图自身的帧（空的或子图帧）
+=== CURRENT ===                     ← 子图当前节点
+active: ...
+```
+
+**父图的帧栈对子图不可见。** 父图执行历史不在 `head` 中——head 只到第一个哨兵（图的 entry 边界）。
+
+---
+
+## 四、已验证清单
 
 | 验证项 | 方式 | 结果 |
 |--------|------|------|
-| 命令 handler 内 await agent turn | `/probe` | ✅ 能返回 |
-| 哨兵消息进入 context 数组 | 探针日志 | ✅ `loop_graph_boundary` 出现 |
-| 双节点链式推进 | `/chain` | ✅ 两步串行，自动到 END |
-| TypeScript 编译 | `tsc --noEmit` | ✅ 零错误 |
+| 命令 handler 内 await agent turn | `/probe` | ✅ |
+| 哨兵消息进入 context 数组 | 探针日志 | ✅ |
+| 哨兵跨调用唯一 | debug log | ✅ |
+| 双节点链式推进 | `/chain` | ✅ |
+| 帧栈折叠（前序 ReAct 被丢弃） | debug log projection | ✅ |
+| 子图 push/pop + 隔离 | `/sub` + debug log | ✅ |
+| 图校验 | `assertValidGraph` 编译期 | ✅ |
+| 路由独立模块 | `router.ts` | ✅ |
+| 完成度验证 | `/validate-test` | ✅ |
+| 日志层 | `loop-graph-debug.log` | ✅ |
 
 ---
 
-## 四、已实现但未在 pi 中验证
-
-| 项目 | 说明 |
-|------|------|
-| 帧栈投影折叠 | 代码已实现，但 chain 测试中未显式验证节点 B 的 context 消除了节点 A 的 ReAct |
-| 子图 push/pop | `runSubgraph()` + `activeRuntime` 切换已写完，未建图测试 |
-| 工具 save/restore | `saveActiveTools` / `restoreActiveTools` 已实现 |
-
----
-
-## 五、实现思路
-
-### 设计原则
-
-1. **帧栈是真相源**：`AgentInstance.frames` 存在 JS 内存。投影是"视图"，从 frames 渲染而来，compaction 毁掉视图后从 frames 重建。
-2. **隔离栈**：子图创建新 AgentInstance，`frames = []`。切换 `activeRuntime` 实现自然隔离——context 钩子读的是子图视角。
-3. **声明式折叠**：`Edge.migrate` 函数决定怎么折叠 completion → frame。开发者控制 summary 和 result 的内容，框架不干预。
-4. **不处理 compaction**：投影天然免疫——每次 context 钩子从 frames 重渲染。compaction 毁旧消息不影响帧栈。
-
-### 文件职责边界
-
-| 文件 | 依赖 pi? | 可单测? |
-|------|---------|--------|
-| `type.ts` | 否 | ✅ |
-| `runtime.ts` | 否 | ✅ |
-| `projection.ts` | 否 | ✅ |
-| `pi-node-context.ts` | 是 | ❌（需 mock pi） |
-| `extension.ts` | 是 | ❌ |
-| `complete-tool.ts` | 是 | ❌ |
-
----
-
-## 六、已知缺口
+## 五、已知缺口
 
 | 缺口 | 说明 |
 |------|------|
-| ~~`validate.ts`~~ | ✅ 已实现 |
-| ~~`router.ts`~~ | ✅ 已独立 |
-| ~~复合节点 `kind: "graph"`~~ | ✅ 已实测 |
 | `agent-choice` 路由 | `throw Error` 占位 |
 | `pi-node-context.callTool` | `throw Error` 占位 |
-| error handling 完整性 | 无边匹配、无路由等 throw 被 catch，但行为未详细设计 |
-| `console.error` 探针 | 正式发布前需移除或改为条件日志 |
+| 失败边处理 | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖 |
+| 帧栈太长触发 compaction | 不处理（投影天然免疫，框架不干预） |
+| session 续跑 | 帧栈未持久化到磁盘 |
 
 ---
 
-## 七、验证清单
+## 六、后续
 
-| 验证项 | 状态 |
-|--------|------|
-| 死锁验证（单 agent turn） | ✅ |
-| 双节点链式推进 | ✅ |
-| 哨兵跨调用不重复 | ✅ |
-| 帧栈折叠（前序 ReAct 被丢弃） | ✅ |
-| 子图 push/pop | ✅ |
-| 图校验 + 路由独立模块 | ✅ |
-| 日志层 | ✅ |
-
-## 八、后续
-
-- 补隔离栈契约的类型注释
-- 正式发布前移除 debug log 或不输出到文件
-- `agent-choice` 路由
+- `agent-choice` 路由实现
 - `pi-node-context.callTool` 实现
+- 正式发布前移除 debug log 或不输出到文件
