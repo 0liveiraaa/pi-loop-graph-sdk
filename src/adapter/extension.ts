@@ -12,6 +12,7 @@ import { projectMessages } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { debugLog } from "./debug-log.js";
+import { initRegistry, registerGraph } from "../registry.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
@@ -25,6 +26,10 @@ let activeNodeContext: PiNodeContext | null = null;
 
 export default function loopGraphExtension(pi: ExtensionAPI) {
   pi.registerTool(createCompleteTool());
+
+  // 初始化注册表（注入 Runtime 主循环）
+  initRegistry(executeGraph);
+
   registerGraph(pi, reviewGraph);
   registerGraph(pi, probeGraph);
   registerGraph(pi, chainGraph);
@@ -76,21 +81,6 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
 }
 
 // ═══════════════════════════════════════════════════════════
-
-const graphs = new Map<string, Graph>();
-
-function registerGraph(pi: ExtensionAPI, graph: Graph): void {
-  graphs.set(graph.id, graph);
-  const inv = graph.invocation;
-  if (!inv) return;
-  pi.registerCommand(inv.name, {
-    description: inv.description,
-    handler: async (args, ctx) => {
-      ctx.ui.notify(`启动图: ${graph.id}`, "info");
-      await executeGraph(pi, graph, { source: "command", args });
-    },
-  });
-}
 
 // ═══════════════════════════════════════════════════════════
 

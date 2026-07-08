@@ -1,4 +1,5 @@
 // Loop Graph SDK — exports
+export { registerGraph } from "./registry.js";
 export { createAgentExecute } from "./agent-execute.js";
 export type { AgentExecuteOptions } from "./agent-execute.js";
 export * from "./type.js";
