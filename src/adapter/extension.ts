@@ -1,15 +1,17 @@
 // ============================================================
 //  Loop Graph Extension — pi 入口
 // ============================================================
-//
-//  核心机制：
-//    1. context 钩子投影 — 每次 LLM 调用时动态组装 frame + 活跃段
-//    2. Promise 桥接 — runAgent 内 await agent_end
-//    3. 调用栈 — GraphRuntime.callStack 实现子图隔离
-// ============================================================
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Edge, Graph, NodeCompletion, NodeInput, NodeRouting } from "../type.js";
+import type {
+  AgentInstance,
+  Edge,
+  Graph,
+  Node,
+  NodeCompletion,
+  NodeInput,
+  NodeRouting,
+} from "../type.js";
 import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
 import { projectMessages } from "./projection.js";
@@ -17,48 +19,35 @@ import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 
-// ── 模块级单例（context 钩子 + 命令 handler 共享）───────
+const BOUNDARY_TYPE = "loop_graph_boundary";
+
 let activeRuntime: GraphRuntime | null = null;
 let activeNodeContext: PiNodeContext | null = null;
 
 export default function loopGraphExtension(pi: ExtensionAPI) {
-  const runtime = new GraphRuntime();
-  const nodeContext = new PiNodeContext(pi);
-
   pi.registerTool(createCompleteTool());
   registerGraph(pi, reviewGraph);
 
-  // ═══════════════════════════════════════════════════════
-  //  context 钩子 — 投影
-  // ═══════════════════════════════════════════════════════
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (pi as any).on("context", (_event: any) => {
+  // ── context 钩子：投影 ──
+  (pi as any).on("context", (e: any) => {
     const rt = activeRuntime;
-    if (!rt || !rt.isNodeActive) return;
+    if (!rt?.isNodeActive) return;
 
-    const messages = _event.messages as any[];
-    if (!messages || !Array.isArray(messages)) return;
-
-    const projected = projectMessages({
-      messages,
-      frames: rt.topInstance?.frames ?? [],
-      currentNode: rt.currentNode,
-      currentInput: rt.currentInput,
-      nodeStartEntryId: rt.nodeStartEntryId,
-    });
-
-    return { messages: projected };
+    return {
+      messages: projectMessages({
+        messages: e.messages as any[],
+        frames: rt.topInstance?.frames ?? [],
+        currentNode: rt.currentNode,
+        currentInput: rt.currentInput,
+        nodeMarker: rt.nodeMarker,
+      }),
+    };
   });
 
-  // ═══════════════════════════════════════════════════════
-  //  tool_result — 捕获 __graph_complete__
-  // ═══════════════════════════════════════════════════════
-
   pi.on("tool_result", (event) => {
-    if (event.toolName !== COMPLETE_TOOL_NAME) return;
+    if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;
     const params = event.details as any;
-    if (params?.status && activeNodeContext) {
+    if (params?.status) {
       activeNodeContext.recordCompletion({
         status: params.status,
         result: params.result ?? {},
@@ -66,15 +55,9 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
     }
   });
 
-  // ═══════════════════════════════════════════════════════
-  //  agent_end — Promise 桥接
-  // ═══════════════════════════════════════════════════════
-
   pi.on("agent_end", () => {
-    if (activeNodeContext) activeNodeContext.onAgentEnd();
+    activeNodeContext?.onAgentEnd();
   });
-
-  // ═══════════════════════════════════════════════════════
 
   pi.on("session_start", async (_event, ctx) => {
     ctx.ui.notify("Loop Graph Extension 已加载", "info");
@@ -83,10 +66,7 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
 
 // ═══════════════════════════════════════════════════════════
 
-const graphs = new Map<string, Graph>();
-
 function registerGraph(pi: ExtensionAPI, graph: Graph): void {
-  graphs.set(graph.id, graph);
   const inv = graph.invocation;
   if (!inv) return;
 
@@ -111,18 +91,20 @@ async function executeGraph(
   const runtime = new GraphRuntime();
   const nodeContext = new PiNodeContext(pi);
 
+  const prevRt = activeRuntime;
+  const prevNc = activeNodeContext;
   activeRuntime = runtime;
   activeNodeContext = nodeContext;
 
   try {
-    const background: Record<string, unknown> =
+    const background =
       trigger.source === "tool"
         ? (trigger.params ?? {})
         : { args: trigger.args ?? "" };
 
-    const entry = graph.entries.find((e) => {
-      try { return e.guard(background); } catch { return false; }
-    });
+    const entry = graph.entries.find(
+      (e) => { try { return e.guard(background); } catch { return false; } },
+    );
     if (!entry) {
       pi.sendMessage({
         customType: "loop_graph_error",
@@ -139,40 +121,26 @@ async function executeGraph(
       source: { kind: "entry", entryId: entry.id },
     };
 
-    const MAX = 100;
-    for (let step = 0; step < MAX; step++) {
-      const node = runtime.topGraph?.nodes[nodeId];
+    for (let step = 0; step < 100; step++) {
+      const node = graph.nodes[nodeId];
       if (!node) throw new Error(`节点未找到: ${nodeId}`);
 
-      const nodeTools = node.kind === "code" ? (node.tools ?? []) : [];
-      pi.setActiveTools(["read", ...nodeTools, COMPLETE_TOOL_NAME]);
+      const prevTools = saveActiveTools(pi);
+      setNodeTools(pi, node);
 
-      const leafId = getLeafId(pi);
-      runtime.enterNode(nodeId, input, leafId);
+      // 注入哨兵
+      const marker = runtime.nextMarker(nodeId);
+      pi.sendMessage({
+        customType: BOUNDARY_TYPE,
+        content: marker,
+        display: false,
+      });
+
+      runtime.enterNode(nodeId, marker, input);
       nodeContext.setCurrentNodeId(nodeId);
 
-      let completion: NodeCompletion;
+      const completion = await execNode(pi, runtime, nodeContext, node, input);
 
-      if (node.kind === "code") {
-        const isAgent = !!(node.skill || (node.tools?.length ?? 0) > 0);
-        if (isAgent) {
-          completion = await nodeContext.runAgent({
-            prompt: `开始执行: ${node.subGoal}`,
-            tools: node.tools,
-            skill: node.skill,
-          });
-        } else {
-          completion = await node.execute(
-            runtime.topInstance!,
-            input,
-            nodeContext,
-          );
-        }
-      } else {
-        completion = await runSubgraph(pi, runtime, node);
-      }
-
-      const newLeafId = getLeafId(pi);
       const routing = graph.routing[nodeId];
       if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
 
@@ -180,12 +148,14 @@ async function executeGraph(
       if (!edge) throw new Error(`无边匹配 ${nodeId}: status=${completion.status}`);
 
       const migration = edge.migrate(runtime.topInstance!, completion);
-      runtime.exitNode(migration.frame, newLeafId);
+      runtime.exitNode(migration.frame);
+
+      restoreActiveTools(pi, prevTools);
 
       if (edge.to === END) {
         pi.sendMessage({
           customType: "loop_graph_complete",
-          content: `图完成（${step + 1} 步, ${runtime.topInstance!.frames.length} 帧）`,
+          content: `图完成（${step + 1} 步）`,
           display: true,
         });
         break;
@@ -196,47 +166,70 @@ async function executeGraph(
         data: migration.input ?? {},
         source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
       };
-      pi.setActiveTools(["read"]);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
     pi.sendMessage({
       customType: "loop_graph_error",
-      content: `图运行错误: ${msg}`,
+      content: `图运行错误: ${error instanceof Error ? error.message : String(error)}`,
       display: true,
     });
   } finally {
     runtime.reset();
     nodeContext.reset();
-    pi.setActiveTools(["read"]);
-    activeRuntime = null;
-    activeNodeContext = null;
+    restoreDefaultTools(pi);
+    activeRuntime = prevRt;
+    activeNodeContext = prevNc;
   }
+}
+
+// ── 节点执行 ──────────────────────────────────────────────
+
+async function execNode(
+  pi: ExtensionAPI,
+  runtime: GraphRuntime,
+  nodeContext: PiNodeContext,
+  node: Node,
+  input: NodeInput,
+): Promise<NodeCompletion> {
+  if (node.kind === "graph") {
+    // 隔离栈契约：子图 background = 调用点传入的 NodeInput.data
+    return runSubgraph(pi, node, input.data);
+  }
+
+  if (node.skill || (node.tools?.length ?? 0) > 0) {
+    return nodeContext.runAgent({
+      prompt: `开始执行: ${node.subGoal}`,
+      tools: node.tools,
+      skill: node.skill,
+    });
+  }
+
+  return node.execute(runtime.topInstance!, input, nodeContext);
 }
 
 // ── 子图 ──────────────────────────────────────────────────
 
 async function runSubgraph(
   pi: ExtensionAPI,
-  parentRuntime: GraphRuntime,
   graphNode: { id: string; subGoal: string; graph: Graph },
+  background: Record<string, unknown>,
 ): Promise<NodeCompletion> {
-  const childRuntime = new GraphRuntime();
-  const childNodeContext = new PiNodeContext(pi);
+  const childRt = new GraphRuntime();
+  const childNc = new PiNodeContext(pi);
   const childGraph = graphNode.graph;
-  const background = parentRuntime.currentInput?.data ?? {};
 
-  // 切换活跃 runtime 到子图（context 钩子读 activeRuntime）
-  const prevRuntime = activeRuntime;
-  const prevNodeContext = activeNodeContext;
-  activeRuntime = childRuntime;
-  activeNodeContext = childNodeContext;
+  const prevRt = activeRuntime;
+  const prevNc = activeNodeContext;
+  activeRuntime = childRt;
+  activeNodeContext = childNc;
 
   try {
-    childRuntime.pushGraph(childGraph, background);
+    childRt.pushGraph(childGraph, background);
 
-    const entry = childGraph.entries[0];
-    if (!entry) throw new Error(`子图 ${childGraph.id} 无入口`);
+    const entry = childGraph.entries.find((e) => {
+      try { return e.guard(background); } catch { return false; }
+    });
+    if (!entry) throw new Error(`子图 ${childGraph.id} 无匹配入口`);
 
     let nodeId = entry.startNodeId;
     let input: NodeInput = {
@@ -244,47 +237,30 @@ async function runSubgraph(
       source: { kind: "entry", entryId: entry.id },
     };
 
-    const MAX = 50;
-    for (let step = 0; step < MAX; step++) {
+    for (let step = 0; step < 50; step++) {
       const node = childGraph.nodes[nodeId];
       if (!node) throw new Error(`子图节点未找到: ${nodeId}`);
 
-      const nodeTools = node.kind === "code" ? (node.tools ?? []) : [];
-      pi.setActiveTools(["read", ...nodeTools, COMPLETE_TOOL_NAME]);
+      const prevTools = saveActiveTools(pi);
+      setNodeTools(pi, node);
 
-      const leafId = getLeafId(pi);
-      childRuntime.enterNode(nodeId, input, leafId);
-      childNodeContext.setCurrentNodeId(nodeId);
+      const marker = childRt.nextMarker(nodeId);
+      pi.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
 
-      let completion: NodeCompletion;
-      if (node.kind === "graph") {
-        completion = await runSubgraph(pi, childRuntime, node);
-      } else {
-        const isAgent = !!(node.skill || (node.tools?.length ?? 0) > 0);
-        if (isAgent) {
-          completion = await childNodeContext.runAgent({
-            prompt: `开始执行: ${node.subGoal}`,
-            tools: node.tools,
-            skill: node.skill,
-          });
-        } else {
-          completion = await node.execute(
-            childRuntime.topInstance!,
-            input,
-            childNodeContext,
-          );
-        }
-      }
+      childRt.enterNode(nodeId, marker, input);
+      childNc.setCurrentNodeId(nodeId);
 
-      const newLeafId = getLeafId(pi);
+      const completion = await execNode(pi, childRt, childNc, node, input);
+
       const routing = childGraph.routing[nodeId];
       if (!routing) throw new Error(`子图 ${nodeId} 无路由`);
 
-      const edge = selectEdge(routing, completion, childRuntime.topInstance!);
+      const edge = selectEdge(routing, completion, childRt.topInstance!);
       if (!edge) throw new Error(`子图无边匹配 ${nodeId}`);
 
-      const migration = edge.migrate(childRuntime.topInstance!, completion);
-      childRuntime.exitNode(migration.frame, newLeafId);
+      const migration = edge.migrate(childRt.topInstance!, completion);
+      childRt.exitNode(migration.frame);
+      restoreActiveTools(pi, prevTools);
 
       if (edge.to === END) break;
 
@@ -293,64 +269,64 @@ async function runSubgraph(
         data: migration.input ?? {},
         source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
       };
-      pi.setActiveTools(["read"]);
     }
 
-    const childInstance = childRuntime.topInstance!;
+    const childInstance = childRt.topInstance!;
+    const lastFrame = childInstance.frames[childInstance.frames.length - 1];
     return {
       nodeId: graphNode.id,
-      status: "ok",
+      // 子图 status 来自其最后一帧，而非硬编码
+      status: lastFrame?.status ?? "failed",
       result: {
         childFrames: childInstance.frames,
-        finalResult:
-          childInstance.frames.length > 0
-            ? childInstance.frames[childInstance.frames.length - 1].result
-            : {},
+        finalResult: lastFrame?.result ?? {},
       },
     };
   } finally {
-    childRuntime.reset();
-    childNodeContext.reset();
-    pi.setActiveTools(["read"]);
-    activeRuntime = prevRuntime;
-    activeNodeContext = prevNodeContext;
+    childRt.reset();
+    childNc.reset();
+    restoreDefaultTools(pi);
+    activeRuntime = prevRt;
+    activeNodeContext = prevNc;
   }
 }
 
-// ── 工具函数 ──────────────────────────────────────────────
+// ── 工具管理 ──────────────────────────────────────────────
 
-function getLeafId(pi: ExtensionAPI): string {
-  try {
-    const sm = (pi as any).sessionManager;
-    if (sm?.getLeafEntry) {
-      const leaf = sm.getLeafEntry();
-      return leaf?.id ?? "";
-    }
-  } catch { /* ignore */ }
-  return "";
+function saveActiveTools(pi: ExtensionAPI): string[] {
+  try { return (pi as any).getActiveTools?.() ?? ["read"]; } catch { return ["read"]; }
 }
+
+function setNodeTools(pi: ExtensionAPI, node: Node): void {
+  const t = node.kind === "code" ? (node.tools ?? []) : [];
+  pi.setActiveTools(["read", ...t, COMPLETE_TOOL_NAME]);
+}
+
+function restoreActiveTools(pi: ExtensionAPI, tools: string[]): void {
+  pi.setActiveTools(tools);
+}
+
+function restoreDefaultTools(pi: ExtensionAPI): void {
+  pi.setActiveTools(["read"]);
+}
+
+// ── 路由 ──────────────────────────────────────────────────
 
 function selectEdge(
   routing: NodeRouting,
   completion: NodeCompletion,
-  instance: any,
+  instance: AgentInstance,
 ): Edge | null {
-  const { edges, router } = routing;
-  const matched = edges.filter((e) => {
-    try { return e.guard(completion); } catch { return false; }
-  });
+  const matched = routing.edges.filter(
+    (e) => { try { return e.guard(completion); } catch { return false; } },
+  );
   if (matched.length === 0) return null;
 
-  switch (router.kind) {
-    case "first-match":
-      return matched[0] ?? null;
-    case "priority-first":
-      return [...matched].sort((a, b) => b.priority - a.priority)[0] ?? null;
-    case "custom":
-      return (router.fn(matched, completion, instance) as Edge | null) ?? null;
-    case "agent-choice":
-      throw new Error("agent-choice 未实现");
-    default:
-      return matched[0] ?? null;
+  switch (routing.router.kind) {
+    case "first-match": return matched[0] ?? null;
+    case "priority-first": return [...matched].sort((a, b) => b.priority - a.priority)[0] ?? null;
+    case "custom": return (routing.router.fn(matched, completion, instance) as Edge | null) ?? null;
+    case "agent-choice": throw new Error("agent-choice 未实现");
+    default: return matched[0] ?? null;
   }
 }

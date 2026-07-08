@@ -1,38 +1,27 @@
 // ============================================================
 //  GraphRuntime — 图运行时状态机
 // ============================================================
-//
-//  维护调用栈（callStack），每层一个隔离的 AgentInstance。
-//  投影只看栈顶——子图自动隔离父图 frames。
-//
-//  核心状态：
-//    callStack          — 调用栈，栈底是顶层图，进子图 push，出 pop
-//    isNodeActive       — 当前是否正在执行某个节点
-//    nodeStartEntryId   — 当前节点活跃段的起点（leafId）
-// ============================================================
 
 import type { AgentInstance, ContextFrame, Graph, Node, NodeInput } from "./type.js";
 
-/** 调用栈的一层 */
 export interface CallFrame {
   instance: AgentInstance;
   graph: Graph;
   currentNodeId: string | null;
-  nodeStartEntryId: string | null;
 }
 
 export class GraphRuntime {
   callStack: CallFrame[] = [];
   isNodeActive = false;
 
-  /** 当前节点的 leafId 锚点（活跃段起点） */
-  nodeStartEntryId: string | null = null;
+  /** 当前节点的哨兵标记（customType="loop_graph_boundary" 的 content） */
+  nodeMarker: string | null = null;
 
-  /** 当前节点信息（供投影使用） */
   currentNode: Node | null = null;
   currentInput: NodeInput | null = null;
 
-  // ── 便捷访问 ──────────────────────────────────────────
+  /** 哨兵递增计数，保证同节点重复进入也能区分 */
+  private runCounter = 0;
 
   get top(): CallFrame | null {
     return this.callStack.length > 0
@@ -48,13 +37,6 @@ export class GraphRuntime {
     return this.top?.graph ?? null;
   }
 
-  get currentNodeId(): string | null {
-    return this.top?.currentNodeId ?? null;
-  }
-
-  // ── 图 push/pop（顶层 + 子图）────────────────────────
-
-  /** 推入一张图（顶层图或子图） */
   pushGraph(graph: Graph, background: Record<string, unknown>): AgentInstance {
     const instance: AgentInstance = {
       id: crypto.randomUUID(),
@@ -63,31 +45,23 @@ export class GraphRuntime {
       frames: [],
       mechanisms: [],
     };
-
-    this.callStack.push({
-      instance,
-      graph,
-      currentNodeId: null,
-      nodeStartEntryId: null,
-    });
-
+    this.callStack.push({ instance, graph, currentNodeId: null });
     return instance;
   }
 
-  /** 弹出当前图（子图 END 或顶层图结束） */
   popGraph(): CallFrame | undefined {
     return this.callStack.pop();
   }
 
-  // ── 节点边界 ──────────────────────────────────────────
+  /** 生成下一个哨兵标记 */
+  nextMarker(nodeId: string): string {
+    this.runCounter++;
+    return `__node_boundary__:${nodeId}:${this.runCounter}`;
+  }
 
-  /**
-   * 进入节点。记录锚点、设置活跃标志。
-   * leafId 由外部传入（ctx.sessionManager.getLeafId()）。
-   */
-  enterNode(nodeId: string, input: NodeInput, leafId: string): Node {
+  enterNode(nodeId: string, marker: string, input: NodeInput): Node {
     const graph = this.topGraph;
-    if (!graph) throw new Error("callStack 为空，无法进入节点");
+    if (!graph) throw new Error("callStack 为空");
 
     const node = graph.nodes[nodeId];
     if (!node) throw new Error(`节点未找到: ${nodeId}`);
@@ -96,55 +70,29 @@ export class GraphRuntime {
     top.currentNodeId = nodeId;
     this.currentNode = node;
     this.currentInput = input;
-    this.nodeStartEntryId = leafId;
+    this.nodeMarker = marker;
     this.isNodeActive = true;
 
     return node;
   }
 
-  /**
-   * 离开节点。将 frame push 进栈顶 instance.frames，
-   * 更新 nodeStartEntryId 为当前 leafId（下一节点的活跃段起点）。
-   */
-  exitNode(frame: ContextFrame, leafId: string): void {
+  exitNode(frame: ContextFrame): void {
     const instance = this.topInstance;
-    if (!instance) throw new Error("callStack 为空，无法退出节点");
+    if (!instance) throw new Error("callStack 为空");
 
     instance.frames.push(frame);
-    this.nodeStartEntryId = leafId;
     this.isNodeActive = false;
     this.currentNode = null;
     this.currentInput = null;
+    this.nodeMarker = null;
   }
 
-  // ── 子图专用 ──────────────────────────────────────────
-
-  /**
-   * 子图 END 后，将其整段结果归约为一帧并 push 进父 instance.frames。
-   * 调用此方法前需先 popGraph() 回到父层。
-   */
-  foldSubgraphResult(
-    parentGraphNodeId: string,
-    childResult: { status: "ok" | "failed" | "cancelled"; result: Record<string, unknown> },
-    summary: string,
-  ): void {
-    const parentInstance = this.topInstance;
-    if (!parentInstance) throw new Error("子图 pop 后 callStack 为空");
-
-    parentInstance.frames.push({
-      nodeId: parentGraphNodeId,
-      status: childResult.status,
-      summary,
-      result: childResult.result,
-    });
-  }
-
-  /** 清理（图运行结束时） */
   reset(): void {
     this.callStack = [];
     this.isNodeActive = false;
-    this.nodeStartEntryId = null;
+    this.nodeMarker = null;
     this.currentNode = null;
     this.currentInput = null;
+    this.runCounter = 0;
   }
 }
