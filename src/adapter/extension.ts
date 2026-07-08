@@ -18,8 +18,10 @@ import { projectMessages } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { reviewGraph } from "../graphs/review-graph.js";
+import { debugLog } from "./debug-log.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
+import { subgraphGraph } from "../graphs/subgraph-graph.js";
 
 const BOUNDARY_TYPE = "loop_graph_boundary";
 
@@ -31,6 +33,7 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
   registerGraph(pi, reviewGraph);
   registerGraph(pi, probeGraph);
   registerGraph(pi, chainGraph);
+  registerGraph(pi, subgraphGraph);
 
   // ── context 钩子：投影 ──
   (pi as any).on("context", (e: any) => {

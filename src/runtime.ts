@@ -53,10 +53,10 @@ export class GraphRuntime {
     return this.callStack.pop();
   }
 
-  /** 生成下一个哨兵标记 */
+  /** 生成下一个哨兵标记（含随机后缀，保证跨调用唯一） */
   nextMarker(nodeId: string): string {
     this.runCounter++;
-    return `__node_boundary__:${nodeId}:${this.runCounter}`;
+    return `__node_boundary__:${nodeId}:${this.runCounter}:${crypto.randomUUID().slice(0, 8)}`;
   }
 
   enterNode(nodeId: string, marker: string, input: NodeInput): Node {
