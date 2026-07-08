@@ -1,6 +1,6 @@
-# Loop Graph — pi Agent 编排框架
+# Loop Graph SDK — pi Agent 编排框架
 
-Loop Graph 是一个基于 [pi](https://github.com/earendil-works/pi-mono) extension 的 agent 编排框架。它将 agent 工作流建模为**回路图（Graph）**——由节点（Node）、边（Edge）和路由策略（Router）组成的可执行有向图。
+Loop Graph SDK 是一个基于 [pi](https://github.com/earendil-works/pi-mono) extension 的 agent 编排框架。它将 agent 工作流建模为**回路图（Graph）**——由节点（Node）、边（Edge）和路由策略（Router）组成的可执行有向图。
 
 ## 核心特性
 
@@ -15,14 +15,14 @@ Loop Graph 是一个基于 [pi](https://github.com/earendil-works/pi-mono) exten
 ### 安装
 
 ```bash
-pi install git:github.com/your/loop-graph@v0.1
+pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
 ```
 
 ### 最小组装
 
 ```typescript
-import { registerGraph, createAgentExecute, END } from "pi-loop-graph-extension";
-import type { Graph, Node, Edge, Entry } from "pi-loop-graph-extension";
+import { registerGraph, createAgentExecute, END } from "pi-loop-graph-sdk";
+import type { Graph, Node, Edge, Entry } from "pi-loop-graph-sdk";
 
 const greet: Node = {
   kind: "code",
@@ -55,7 +55,7 @@ export const graph: Graph = {
 在 extension 入口注册：
 
 ```typescript
-import { registerGraph } from "pi-loop-graph-extension";
+import { registerGraph } from "pi-loop-graph-sdk";
 import { graph } from "./graph";
 
 export default function (pi) {
