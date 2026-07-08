@@ -228,7 +228,7 @@ export function createLoopGraphExtension(
 
         const routing = graph.routing[nodeId];
         if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
-        const edge = selectEdge(routing, completion, runtime.topInstance!);
+        const edge = await selectEdge(routing, completion, runtime.topInstance!);
         if (!edge) {
           runtime.exitNode({
             nodeId: completion.nodeId,
@@ -358,7 +358,7 @@ export function createLoopGraphExtension(
 
         const routing = childGraph.routing[nodeId];
         if (!routing) throw new Error(`子图 ${nodeId} 无路由`);
-        const edge = selectEdge(routing, completion, childRt.topInstance!);
+        const edge = await selectEdge(routing, completion, childRt.topInstance!);
         if (!edge) {
           childRt.exitNode({
             nodeId: completion.nodeId,
