@@ -418,16 +418,81 @@ const reviewGraph: Graph = {
 
 ## 后续步骤
 
-1. 实现最小 Runtime：entries 入口、priority-first Router、节点→边→迁移主循环
-2. 实现 Node 的标准 execute 工厂
-3. 实现 2~3 个节点作为概念验证
-4. 在现有 review profile 旁并行运行，验证行为等价
-5. 逐步迁移更多节点
-6. 接入 /review-init 和 /review-fix 为独立子图
-7. 欠缺
-8. Record<string, unknown> 的可靠性债 —— result/background/inject/inputSchema 全是无类型口袋。你 SDK 卖"可靠性",这债迟早还(泛型化 Node<T></t> 或给 result
-   挂运行时 schema 校验)。抽象层可以先欠,具体化时它会第一个找上门。
-9. NodeContext 的落地 —— runAgent/callTool 现在是框架级占位,具体化时要映射到 pi 的 setActiveTools + before_agent_start(注系统提示)+ steer +
-   terminate:true schema tool 捞 result。这条链是架构 A 能不能跑起来的试金石,建议第一个概念验证节点就打通它,别等搭完再验。
-10. agent-choice 的具体形态 —— 内建 kind 声明了,但"agent 怎么选边"仍未落地(注册 choose_next tool?让节点把选择写进 result?)。这是 NodeContext
-    链路之外唯一还虚的内建能力。
+### 已完成的里程碑
+
+1. ✅ 最小 Runtime：entries 入口、priority-first Router、节点→边→迁移主循环
+2. ✅ Node 的标准 execute 工厂（`createAgentExecute`）
+3. ✅ 2~3 个概念验证节点（echo、probe、chain、subgraph、validate）
+4. ✅ pi 单 agent MVP 验证通过（哨兵、投影、帧栈折叠、子图隔离、完成度验证）
+5. ✅ 包边界修复：`createLoopGraphExtension(pi)` 工厂 + 实例级 `GraphRegistry`
+6. ✅ library / debug extension 分离（`"."` vs `"./extension"`）
+7. 🔜 在现有 review profile 旁并行运行，验证行为等价
+
+### 能力债路线图
+
+#### P1：多 skill 支持
+
+目标设计：
+
+```typescript
+interface Graph {
+  skills?: string[];
+}
+
+// CodeNode 增加 skills 数组
+skills?: string[];
+skill?: string; // deprecated compatibility alias
+```
+
+运行时合并规则：
+
+```text
+graph.skills + node.skills + (node.skill ? [node.skill] : [])
+```
+
+先做完 package/runtime factory 后再动，确保 API 兼容性可测试。
+
+#### P1：schema helper 先于泛型
+
+短期目标：提供运行时 schema 校验工具函数
+
+```typescript
+node.inputSchema
+node.outputSchema
+edge.inputSchema
+createRequireFieldsValidator(["question", "answer"])
+```
+
+长期目标：泛型类型安全
+
+```typescript
+Node<TInput, TResult>
+Edge<TFromResult, TToInput>
+```
+
+先做 schema helper，因为它的价值直接体现在 `createAgentExecute` 的验证上，不需要大规模类型系统改写。
+
+#### P2：agent-choice 标记为 experimental
+
+当前 `RouterStrategy` 中 `{ kind: "agent-choice" }` 会 `throw Error`。
+
+在明确实现方案前，用户文档标注为 experimental：
+
+> `agent-choice` is declared for future compatibility and currently experimental. Use `custom` if a graph needs model-assisted route selection.
+
+在确认实现前不暴露为稳定 API。候选方案：
+- `completion.result.next_edge_id`
+- `__graph_choose_edge__` 工具
+- Router prompt over candidate edges
+
+#### P1：callTool 等待 pi API 确认
+
+当前 `PiNodeContext.callTool()` 抛异常。纯代码节点建议直接 import 业务库函数。
+
+在实现前需要确认 pi 是否暴露稳定的 extension-side 工具调用 API。如果没有，保持当前明确错误提示，并强化文档说明：纯代码节点可调 domain services 直接完成动作。
+
+### 潜力探索
+
+- 多 agent 通讯（`communication-design.md` 三层架构）
+- 声明式编译器（JSON → 编译为运行时 Graph）
+- 帧栈持久化（session 续跑）

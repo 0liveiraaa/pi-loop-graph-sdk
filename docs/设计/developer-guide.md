@@ -15,20 +15,56 @@ Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
 
 ---
 
-## 快速开始
+## 两种使用方式
 
-### 安装
+### 方式 A：作为 debug/demo pi extension 使用
 
 ```bash
-npm install pi-loop-graph-extension
+pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
 ```
+
+这会加载 SDK 自带 debug extension（`./extension`），注册测试图（`/echo-test`、`/probe`、`/chain`、`/sub`、`/validate-test`）。用于验证 SDK 是否正常工作、探索图机制。
+
+**注意**：`pi install` 并列安装不等于其它 pi package 可以直接导入 SDK。如果需要以 library 形式使用，请看方式 B。
+
+### 方式 B：作为业务 extension 的 library 依赖
+
+业务 package 在自己的 `package.json` 中声明依赖：
+
+```json
+{
+  "dependencies": {
+    "pi-loop-graph-sdk": "git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1"
+  }
+}
+```
+
+然后创建独立运行时并注册图：
+
+```typescript
+import { createLoopGraphExtension } from "pi-loop-graph-sdk";
+import { myGraph } from "./graphs/my-graph";
+
+export default function myExtension(pi) {
+  const loop = createLoopGraphExtension(pi);
+  loop.registerGraph(myGraph);
+}
+```
+
+**关键区别**：
+- 方式 A：SDK 自带的 debug extension 入口，自动注册测试图
+- 方式 B：业务代码导入 library API，创建自己的运行时实例，不注册测试图
+
+---
+
+## 快速开始
 
 ### 定义第一个图
 
 ```typescript
-import { createAgentExecute } from "pi-loop-graph-extension";
-import type { Edge, Entry, Graph, Node, NodeRouting } from "pi-loop-graph-extension";
-import { END } from "pi-loop-graph-extension";
+import { createAgentExecute, createLoopGraphExtension } from "pi-loop-graph-sdk";
+import type { Edge, Entry, Graph, Node, NodeRouting } from "pi-loop-graph-sdk";
+import { END } from "pi-loop-graph-sdk";
 
 const greetNode: Node = {
   kind: "code",
@@ -81,9 +117,14 @@ export const myGraph: Graph = {
 ### 注册到 extension
 
 ```typescript
-// 在 extension.ts 里
+// 在 extension 入口
+import { createLoopGraphExtension } from "pi-loop-graph-sdk";
 import { myGraph } from "./graphs/my-graph";
-registerGraph(pi, myGraph);
+
+export default function myExtension(pi) {
+  const loop = createLoopGraphExtension(pi);
+  loop.registerGraph(myGraph);
+}
 ```
 
 用户输入 `/hello` 触发图运行。
@@ -189,7 +230,7 @@ type RouterStrategy =
 推荐用 `createAgentExecute` 工厂：
 
 ```typescript
-import { createAgentExecute } from "pi-loop-graph-extension";
+import { createAgentExecute } from "pi-loop-graph-sdk";
 
 const myNode: Node = {
   kind: "code",
@@ -283,6 +324,7 @@ const validateNode: Node = {
     return { nodeId: "validate_input", status: "ok", result: { name, valid: true } };
   },
 };
+```
 
 ### 复合节点（子图）
 
@@ -528,8 +570,8 @@ tail -f loop-graph-debug.log  # 实时观察
 一个两节点复习图：选择科目 → 生成题目 → END。
 
 ```typescript
-import { END, createAgentExecute } from "pi-loop-graph-extension";
-import type { Edge, Entry, Graph, Node, NodeCompletion, NodeRouting } from "pi-loop-graph-extension";
+import { END, createAgentExecute } from "pi-loop-graph-sdk";
+import type { Edge, Entry, Graph, Node, NodeCompletion, NodeRouting } from "pi-loop-graph-sdk";
 
 // ── 节点 ──
 
@@ -635,9 +677,11 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项                    | 说明                                     |
-| --------------------- | ---------------------------------------- |
-| `agent-choice` 路由 | 未实现，可用`custom` 替代              |
-| `callTool`          | 未实现，纯代码节点可直接 import pi 工具  |
-| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始 |
-| 声明式编译器          | 暂不开发，所有定制点为函数               |
+| 项 | 当前策略 |
+| --- | --- |
+| `callTool` | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。 |
+| `agent-choice` 路由 | 暂缓 / experimental。短期使用 `priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。 |
+| 多 skill | 当前只有 `node.skill?: string`；下一阶段引入 `graph.skills + node.skills`，运行时合并。 |
+| schema / 泛型类型 | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。 |
+| session 续跑 | 当前不持久化帧栈，图运行中断后需重新开始。 |
+| 声明式编译器 | 暂不开发，所有定制点为函数。 |

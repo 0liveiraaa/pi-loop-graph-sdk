@@ -10,18 +10,50 @@ Loop Graph SDK 是一个基于 [pi](https://github.com/earendil-works/pi-mono) e
 - **纯函数定制**——所有扩展点都是函数（`guard`、`migrate`、`execute`、`validateCompletion`）
 - **可分发**——作为 pi package 发布，其它开发者可在自己的 extension 中导入使用
 
-## 快速开始
+## 两种使用方式
 
-### 安装
+### 方式 A：作为 debug/demo pi extension 使用
 
 ```bash
 pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
 ```
 
-### 最小组装
+这种方式会加载 SDK 自带 extension（`./extension`），用于运行 SDK demo/test graphs。加载后可使用以下测试命令：`/echo-test`、`/probe`、`/chain`、`/sub`、`/validate-test`。
+
+**注意**：这种方式不等于其它 pi package 可以直接在自己的代码中导入 SDK。如果你需要在自己的业务 extension 中调用 SDK API，请看方式 B。
+
+### 方式 B：作为业务 extension 的 library 依赖使用
+
+业务 package 必须在自己的 `package.json` 中声明依赖：
+
+```json
+{
+  "dependencies": {
+    "pi-loop-graph-sdk": "git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1"
+  }
+}
+```
+
+然后在业务 extension 中创建独立运行时：
 
 ```typescript
-import { registerGraph, createAgentExecute, END } from "pi-loop-graph-sdk";
+import { createLoopGraphExtension } from "pi-loop-graph-sdk";
+import { reviewSingleTurnGraph } from "./graphs/review-single-turn";
+
+export default function reviewExtension(pi) {
+  // 创建独立的 Loop Graph 运行时
+  const loop = createLoopGraphExtension(pi);
+
+  // 注册业务图
+  loop.registerGraph(reviewSingleTurnGraph);
+}
+```
+
+业务 extension 自己的图定义：
+
+```typescript
+// graphs/review-single-turn.ts
+import { createAgentExecute, END } from "pi-loop-graph-sdk";
 import type { Graph, Node, Edge, Entry } from "pi-loop-graph-sdk";
 
 const greet: Node = {
@@ -42,7 +74,7 @@ const done: Edge = {
   },
 };
 
-export const graph: Graph = {
+export const reviewSingleTurnGraph: Graph = {
   id: "hello",
   goal: "问候",
   invocation: { name: "hello", description: "问候", inputSchema: {}, parseArgs: (a) => ({ args: a }) },
@@ -52,35 +84,23 @@ export const graph: Graph = {
 };
 ```
 
-在 extension 入口注册：
-
-```typescript
-import { registerGraph } from "pi-loop-graph-sdk";
-import { graph } from "./graph";
-
-export default function (pi) {
-  registerGraph(pi, graph);
-}
-```
-
-输入 `/hello` 触发图运行。
-
 ## 项目结构
 
 ```
 src/
 ├── type.ts                  # 核心类型
 ├── runtime.ts               # 运行时状态机
-├── registry.ts              # 图注册表（公开 API）
+├── registry.ts              # 图注册表（GraphRegistry 实例）
 ├── router.ts                # 单边路由裁决
 ├── validate.ts              # 图校验
 ├── agent-execute.ts         # execute 工厂
 ├── adapter/
-│   ├── extension.ts         # pi extension 入口
-│   ├── projection.ts        # context 投影
-│   ├── pi-node-context.ts   # Promise 桥接
-│   ├── complete-tool.ts     # __graph_complete__
-│   └── debug-log.ts         # 调试日志
+│   ├── loop-graph-extension.ts  # 可实例化运行时工厂（推荐 API）
+│   ├── extension.ts             # debug/demo extension 入口（可选）
+│   ├── projection.ts            # context 投影
+│   ├── pi-node-context.ts       # Promise 桥接
+│   ├── complete-tool.ts         # __graph_complete__
+│   └── debug-log.ts             # 调试日志
 └── graphs/                  # 测试图
 ```
 

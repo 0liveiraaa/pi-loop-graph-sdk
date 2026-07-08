@@ -1,6 +1,8 @@
-# Loop Graph Extension 实现形态
+# Loop Graph SDK 实现形态
 
-> 2026-07-08 | 单 agent MVP 阶段
+> 2026-07-08 | 单 agent MVP 阶段 (v0.1.0)
+>
+> 上次更新：library boundary 演进完成（`createLoopGraphExtension` 工厂 + 实例级 Registry）
 
 ---
 
@@ -11,22 +13,42 @@ src/
 ├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, …）
 ├── runtime.ts              # GraphRuntime（调用栈 + 帧栈 + 哨兵）
 ├── validate.ts             # 图校验
+├── registry.ts             # GraphRegistry 实例级图注册表（+ deprecated 全局兼容层）
 ├── router.ts               # 单边裁决
 ├── agent-execute.ts        # createAgentExecute 工厂
 ├── adapter/
-│   ├── extension.ts        # pi 入口：context 投影 + 命令注册 + 主循环
-│   ├── projection.ts       # 纯函数：三段重组消息
-│   ├── pi-node-context.ts  # Promise 桥接：runAgent / callTool + 完成度验证
-│   ├── complete-tool.ts    # __graph_complete__ 工具定义
-│   └── debug-log.ts        # 调试日志
+│   ├── loop-graph-extension.ts  # ★ 可实例化运行时工厂 createLoopGraphExtension()
+│   ├── extension.ts             # debug/demo extension 入口（可选，{ demoGraphs: true }）
+│   ├── projection.ts            # 纯函数：三段重组消息
+│   ├── projection.test.ts       # 投影测试
+│   ├── pi-node-context.ts       # Promise 桥接：runAgent / callTool + 完成度验证
+│   ├── complete-tool.ts         # __graph_complete__ 工具定义
+│   ├── debug-log.ts             # 调试日志
+│   └── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent 测试
+├── registry.test.ts       # GraphRegistry parseArgs + 闭包绑定测试
 ├── graphs/
 │   ├── review-graph.ts     # echo 测试图
 │   ├── probe-graph.ts      # 哨兵可见性验证图
 │   ├── chain-graph.ts      # 双节点链式验证图
 │   ├── subgraph-graph.ts   # 子图隔离验证图
 │   └── validate-graph.ts   # 完成度验证测试图
-└── index.ts                # 对外导出
+└── index.ts                # 对外导出（library API + deprecated 兼容层）
 ```
+
+### 包入口结构
+
+```json
+{
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",                     // Library API
+    "./extension": "./src/adapter/extension.ts"  // Debug/demo extension
+  }
+}
+```
+
+- `"."` → library API：`createLoopGraphExtension`、`createAgentExecute`、types、runtime、validation
+- `"./extension"` → 可选 debug extension，只注册 demo graphs 和基础钩子
 
 ---
 
@@ -66,32 +88,7 @@ active = after currentIdx                       → [prompt, 节点B的工作...
 S1 ~ S2 之间的原始 ReAct 被丢弃，由帧段替换
 ```
 
-**投影输出结构**：
-
-```
---- head ---
-[sys 系统提示]
-[user /chain hello]
-
---- frame 段 ---
-=== COMPLETED ===
-[{"nodeId":"echo_a","status":"ok","summary":"节点A完成","result":{...}}]
-=== END ===
-
---- current 段 ---
-=== CURRENT ===
-nodeId: echo_b
-subGoal: 收到节点 A 的输出...
-input:
-  from_a: ...
-completeWith: __graph_complete__(...)
-=== END ===
-
---- active ---
-(当前节点的 live ReAct)
-```
-
-**head 仅包含图之外的信息**（系统提示 + 用户原始命令）。已完成节点的原始 ReAct 不在投影中——被帧段替换。
+投影输出结构不变，见原文档。
 
 ### 2.3 完成度验证
 
@@ -130,22 +127,36 @@ const myNode: Node = {
 3. `agent_end` → `onAgentEnd()` → 检查验证 → resolve
 4. 超时保护：5 分钟自动 resolve 为 `status: "failed"`
 
-### 2.6 调用栈（GraphRuntime）
+### 2.6 可实例化运行时工厂（★ 新增）
 
+**替代原模块级单例**。每个 `createLoopGraphExtension(pi, options?)` 返回独立 `LoopGraphExtension`：
+
+```typescript
+export function createLoopGraphExtension(pi, options?) {
+  let activeRuntime = null;    // 实例级，不再模块全局
+  let activeNodeContext = null;
+  const registry = new GraphRegistry(pi, executeGraph);
+
+  // 注册钩子（引用实例级 activeRuntime/activeNodeContext）
+  // 注册 __graph_complete__（WeakSet per-pi 幂等）
+  // 注册 demo graphs（仅当 options.demoGraphs）
+
+  return {
+    registerGraph: (graph) => registry.registerGraph(graph),
+    executeGraph: (graph, trigger) => executeGraph(pi, graph, trigger),
+  };
+}
 ```
-GraphRuntime
-  callStack: [{ instance, graph, currentNodeId }]  // 子图 push/pop
-  isNodeActive: boolean                             // context 钩子判断是否投影
-  nodeMarker: string | null                         // 当前哨兵标记
-  currentNode / currentInput                        // 供投影使用
-  nextMarker(nodeId) → string                       // 生成唯一哨兵
-  enterNode / exitNode                              // 节点边界
-  pushGraph / popGraph                              // 子图边界
-```
 
-### 2.7 模块级单例
+**关键变更**：
+- `activeRuntime`/`activeNodeContext` 从模块级单例 → 工厂闭包内的实例变量
+- 子图执行时切换 `activeRuntime`/`activeNodeContext`（push/pop 模式）
+- `GraphRegistry` 为实例级 class，业务 extension 间不互相污染
+- `__graph_complete__` 用 `WeakSet` 去重，同 pi 多实例不重复注册
 
-`activeRuntime` / `activeNodeContext` 两个模块级变量，被 `context`、`tool_result`、`agent_end` 钩子和 `executeGraph` 主循环共享。子图执行时切换为子 runtime/nodeContext，退出时恢复。
+### 2.7 调用栈（GraphRuntime）
+
+同前，`GraphRuntime.callStack` 支持子图 push/pop。
 
 ---
 
@@ -153,47 +164,23 @@ GraphRuntime
 
 ### 顶层图
 
-```
-用户输入 /chain hello
-  ↓
-executeGraph 创建 AgentInstance：
-  background: { args: "hello" }    ← 只含 trigger 入参
-  frames: []                       ← 从零开始
-  globalGoal: "验证双节点链式推进"
-```
+同前设计。`AgentInstance` 不继承图之外的完整上下文。`background` 只有 trigger 入参。
 
-LLM 看投影后的消息：
-```
-head: [sys, user /chain hello]       ← 图之外的消息（保留）
-=== COMPLETED ===                    ← 帧摘要
-=== CURRENT ===
-active: [当前节点的工作]
-```
+### 子图（★ 修复）
 
-`AgentInstance` 不继承图之外的完整上下文。`background` 只有 trigger 入参。head 段让 LLM 能看到图之外的原始消息。
-
-### 子图
+子图执行时正确切换工厂级 `activeRuntime`/`activeNodeContext`：
 
 ```
 execNode 检测到 kind: "graph"
   ↓
-runSubgraph 创建 childRuntime：
-  childInstance:
-    background: parent.NodeInput.data    ← 只传调用点的输入
-    frames: []                            ← 隔离栈，从零开始
-    globalGoal: 子图的目标
-  activeRuntime = childRt                ← 投影切到子图视角
+runSubgraphInExtension 创建 childRuntime：
+  prevRt = activeRuntime; prevNc = activeNodeContext
+  activeRuntime = childRt; activeNodeContext = childNc
+  ↓ 执行子图主线
+  ↓ finally: activeRuntime = prevRt; activeNodeContext = prevNc
 ```
 
-**子图投影**：
-```
-head: [sys, user /sub]            ← 图之外的原始消息（继承）
-=== COMPLETED ===                  ← 子图自身的帧（空的或子图帧）
-=== CURRENT ===                     ← 子图当前节点
-active: ...
-```
-
-**父图的帧栈对子图不可见。** 父图执行历史不在 `head` 中——head 只到第一个哨兵（图的 entry 边界）。
+这确保了子图内的 agent 节点调用 `__graph_complete__` 时，完成信号被正确的 `PiNodeContext`（子图的）捕获，而非父图的。
 
 ---
 
@@ -211,6 +198,13 @@ active: ...
 | 路由独立模块 | `router.ts` | ✅ |
 | 完成度验证 | `/validate-test` | ✅ |
 | 日志层 | `loop-graph-debug.log` | ✅ |
+| 工厂实例隔离 | `loop-graph-extension.test.ts` | ✅ |
+| 子图 agent 节点完成 | `loop-graph-extension.test.ts` | ✅ |
+| parseArgs 命令入口 | `registry.test.ts` | ✅ |
+| tool execute 闭包绑定 | `registry.test.ts` | ✅ |
+| demo graphs 门控 | `loop-graph-extension.test.ts` | ✅ |
+| defaultTools 合并 | `loop-graph-extension.test.ts` | ✅ |
+| 多实例 `__graph_complete__` 幂等 | `loop-graph-extension.test.ts` | ✅ |
 
 ---
 
@@ -218,8 +212,10 @@ active: ...
 
 | 缺口 | 说明 |
 |------|------|
-| `agent-choice` 路由 | `throw Error` 占位 |
-| `pi-node-context.callTool` | `throw Error` 占位 |
+| `agent-choice` 路由 | `throw Error` 占位；标记为 experimental，短期用 `custom` |
+| `pi-node-context.callTool` | `throw Error` 占位；等待 pi stable extension-side tool API |
+| 多 skill | 当前单 `node.skill?: string`；下一阶段 `graph.skills + node.skills` |
+| schema helper | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段先补 runtime schema 校验 |
 | 失败边处理 | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖 |
 | 帧栈太长触发 compaction | 不处理（投影天然免疫，框架不干预） |
 | session 续跑 | 帧栈未持久化到磁盘 |
@@ -228,6 +224,9 @@ active: ...
 
 ## 六、后续
 
-- `agent-choice` 路由实现
-- `pi-node-context.callTool` 实现
-- 正式发布前移除 debug log 或不输出到文件
+- `agent-choice` 路由实现（或标记 stable-unsupported）
+- `pi-node-context.callTool` 实现（等待 pi API 确认）
+- 多 skill 支持
+- schema helper 工具函数
+- Pi Review Agent `/review-turn` 验证
+- 正式发布前移除 debug log 文件输出
