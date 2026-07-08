@@ -98,7 +98,7 @@ export interface NodeInput {
  */
 export interface NodeContext {
   signal: AbortSignal;
-  runAgent(request: AgentRunRequest): Promise<AgentRunResult>;
+  runAgent(request: AgentRunRequest): Promise<NodeCompletion>;
   callTool(name: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -109,10 +109,7 @@ export interface AgentRunRequest {
   outputSchema?: unknown;
 }
 
-export interface AgentRunResult {
-  text: string;
-  result?: Record<string, unknown>;
-}
+
 
 // ── 节点 ──
 
