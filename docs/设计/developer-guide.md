@@ -52,8 +52,30 @@ export default function myExtension(pi) {
 ```
 
 **关键区别**：
-- 方式 A：SDK 自带的 debug extension 入口，自动注册测试图
-- 方式 B：业务代码导入 library API，创建自己的运行时实例，不注册测试图
+- 方式 A：SDK 自带的 debug extension 入口，等价于 `createLoopGraphExtension(pi, { demoGraphs: true })`
+- 方式 B：业务代码导入 library API，创建自己的运行时实例，demo graphs 不注册
+
+### 运行时工厂选项
+
+`createLoopGraphExtension(pi, options?)` 支持以下选项：
+
+```typescript
+interface LoopGraphExtensionOptions {
+  /** 是否注册 SDK 自带测试图。默认 false。只有 debug extension 入口设为 true。 */
+  demoGraphs?: boolean;
+  /** 所有节点默认可用的工具列表。为空时只保留 read + __graph_complete__。
+   *  例如业务包可传入 ["review_card", "review_chapter"] 作为全局工具。 */
+  defaultTools?: string[];
+}
+```
+
+`defaultTools` 在进入每个节点时与节点自身的 `tools` 合并：
+
+```text
+activeTools = ["read", ...defaultTools, ...node.tools, "__graph_complete__"]
+```
+
+这样业务包不需要在每个节点重复声明全局可用工具。
 
 ---
 
@@ -62,8 +84,8 @@ export default function myExtension(pi) {
 ### 定义第一个图
 
 ```typescript
-import { createAgentExecute, createLoopGraphExtension } from "pi-loop-graph-sdk";
-import type { Edge, Entry, Graph, Node, NodeRouting } from "pi-loop-graph-sdk";
+import { createAgentExecute } from "pi-loop-graph-sdk";
+import type { Edge, Entry, Graph, Node } from "pi-loop-graph-sdk";
 import { END } from "pi-loop-graph-sdk";
 
 const greetNode: Node = {
@@ -103,8 +125,9 @@ export const myGraph: Graph = {
   invocation: {
     name: "hello",
     description: "问候测试",
-    inputSchema: { type: "object", properties: { args: { type: "string" } } },
-    parseArgs: (a) => ({ args: a || "世界" }),
+    inputSchema: { type: "object", properties: { name: { type: "string" } } },
+    // parseArgs 将 /hello 世界 → { name: "世界" }
+    parseArgs: (a) => ({ name: a || "世界" }),
   },
   entries: [entry],
   nodes: { greet: greetNode },
@@ -531,7 +554,9 @@ interface NodeCompletion {
 ```typescript
 interface NodeInput {
   data: Record<string, unknown>;    // 当前节点的一次性入参
-  source: "entry" | "edge";        // 来源
+  source:
+    | { kind: "entry"; entryId: string }                // 来自入口
+    | { kind: "edge"; edgeId: string; fromNodeId: string }; // 来自边
 }
 ```
 
@@ -542,6 +567,25 @@ Edge.migrate 的 input 字段 → 下一节点的 NodeInput.data
 ```
 
 `input` 只传递给直接后继节点。如果后续节点需要某些信息，必须在 `result` 中产出，经 `Edge.migrate` 折叠进帧。
+
+### GraphInvocation 与命令入参
+
+```typescript
+interface GraphInvocation {
+  name: string;                          // 命令名（/xxx）和工具名
+  description: string;
+  inputSchema: Record<string, unknown>;  // 工具入参 schema（agent tool-call 用）
+  parseArgs?(args: string): Record<string, unknown>; // 命令调用：把裸文本解析为结构化入参
+}
+```
+
+当用户输入 `/hello 世界` 时：
+
+1. `GraphRegistry` 调用 `inv.parseArgs("世界")`，产出 `{ subject: "世界" }`
+2. `params` 随 trigger 传入 `executeGraph`
+3. `executeGraph` 以 `params` 构造 `background` → `Entry.guard(background)` → `Entry.mapInput(background)`
+
+如果 `parseArgs` 未定义，命令 handler 默认传入 `{ args: rawString }`。
 
 ---
 
@@ -571,7 +615,7 @@ tail -f loop-graph-debug.log  # 实时观察
 
 ```typescript
 import { END, createAgentExecute } from "pi-loop-graph-sdk";
-import type { Edge, Entry, Graph, Node, NodeCompletion, NodeRouting } from "pi-loop-graph-sdk";
+import type { Edge, Entry, Graph, Node } from "pi-loop-graph-sdk";
 
 // ── 节点 ──
 
@@ -636,13 +680,13 @@ const questionDone: Edge = {
   },
 };
 
-// ── 入口 ──
+// ── 入口：parseArgs 将 /r 数学 → { subject: "数学" }，直接作为 background ──
 
 const entry: Entry = {
   id: "review_cmd",
-  guard: (bg) => !!(bg as any).args,
+  guard: (bg) => typeof bg.subject === "string" && bg.subject.length > 0,
   startNodeId: "select_target",
-  mapInput: (bg) => ({ subject: (bg as any).args || "" }),
+  mapInput: (bg) => ({ subject: bg.subject }),
 };
 
 // ── 图 ──
@@ -653,8 +697,9 @@ export const reviewGraph: Graph = {
   invocation: {
     name: "r",
     description: "快速复习",
-    inputSchema: { type: "object", properties: { args: { type: "string" } } },
-    parseArgs: (a) => ({ args: a }),
+    inputSchema: { type: "object", properties: { subject: { type: "string" } } },
+    // parseArgs 将 /r 数学 → { subject: "数学" }，直接作为 background
+    parseArgs: (a) => ({ subject: a || "" }),
   },
   entries: [entry],
   nodes: { select_target: selectNode, generate_question: questionNode },
