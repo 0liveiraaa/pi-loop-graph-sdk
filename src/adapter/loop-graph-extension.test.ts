@@ -345,4 +345,96 @@ describe("createLoopGraphExtension", () => {
       ])).resolves.toBeUndefined();
     });
   });
+
+  describe("路由契约", () => {
+    it("执行图时等待异步 custom router 再迁移到下一节点", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const visited: string[] = [];
+
+      const startNode: Node = {
+        kind: "code",
+        id: "start",
+        subGoal: "起点",
+        async execute() {
+          visited.push("start");
+          return { nodeId: "start", status: "ok", result: { next: true } };
+        },
+      };
+      const nextNode: Node = {
+        kind: "code",
+        id: "next",
+        subGoal: "后继",
+        async execute() {
+          visited.push("next");
+          return { nodeId: "next", status: "ok", result: { done: true } };
+        },
+      };
+      const toNext: Edge = {
+        id: "to_next",
+        from: "start",
+        to: "next",
+        priority: 1,
+        guard: () => true,
+        migrate(_instance, completion) {
+          return {
+            frame: {
+              nodeId: completion.nodeId,
+              status: completion.status,
+              summary: "to next",
+              result: completion.result,
+            },
+            input: { fromStart: true },
+          };
+        },
+      };
+      const done: Edge = {
+        id: "done",
+        from: "next",
+        to: END,
+        priority: 1,
+        guard: () => true,
+        migrate(_instance, completion) {
+          return {
+            frame: {
+              nodeId: completion.nodeId,
+              status: completion.status,
+              summary: "done",
+              result: completion.result,
+            },
+          };
+        },
+      };
+
+      await loop.executeGraph({
+        id: "async_custom_router_graph",
+        goal: "验证异步自定义路由",
+        entries: [{ id: "main", guard: () => true, startNodeId: "start" }],
+        nodes: { start: startNode, next: nextNode },
+        routing: {
+          start: {
+            nodeId: "start",
+            edges: [toNext],
+            router: {
+              kind: "custom",
+              async fn(edges) {
+                await Promise.resolve();
+                return edges[0] ?? null;
+              },
+            },
+          },
+          next: {
+            nodeId: "next",
+            edges: [done],
+            router: { kind: "first-match" },
+          },
+        },
+      }, { source: "command", args: "" });
+
+      expect(visited).toEqual(["start", "next"]);
+      expect(pi.sendMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ customType: "loop_graph_error" }),
+      );
+    });
+  });
 });

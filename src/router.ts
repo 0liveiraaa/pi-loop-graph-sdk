@@ -4,11 +4,11 @@
 
 import type { Edge, NodeRouting, NodeCompletion, AgentInstance } from "./type.js";
 
-export function selectEdge(
+export async function selectEdge(
   routing: NodeRouting,
   completion: NodeCompletion,
   instance: AgentInstance,
-): Edge | null {
+): Promise<Edge | null> {
   const matched = routing.edges.filter((e) => {
     try { return e.guard(completion); } catch { return false; }
   });
@@ -18,9 +18,11 @@ export function selectEdge(
     case "first-match":
       return matched[0] ?? null;
     case "priority-first":
-      return [...matched].sort((a, b) => b.priority - a.priority)[0] ?? null;
+      return matched
+        .map((edge, index) => ({ edge, index }))
+        .sort((a, b) => b.edge.priority - a.edge.priority || a.index - b.index)[0]?.edge ?? null;
     case "custom":
-      return (routing.router.fn(matched, completion, instance) as Edge | null) ?? null;
+      return (await routing.router.fn(matched, completion, instance)) ?? null;
     case "agent-choice":
       throw new Error("agent-choice 未实现");
     default:
