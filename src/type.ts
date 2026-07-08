@@ -107,6 +107,11 @@ export interface AgentRunRequest {
   tools?: string[];
   skill?: string;
   outputSchema?: unknown;
+  /** 可选：验证 __graph_complete__ 的 result 是否满足节点要求。
+   *  不通过 → inject reason → agent 继续 → 再次调用 __graph_complete__ */
+  validateCompletion?: (
+    result: Record<string, unknown>,
+  ) => { isValid: true } | { isValid: false; reason: string };
 }
 
 
@@ -149,6 +154,8 @@ export type Node =
         input: NodeInput,
         ctx: NodeContext,
       ): Promise<NodeCompletion>;
+      /** 可选：验证 __graph_complete__ 的 result。不通过则驳回让 agent 重试 */
+      validateCompletion?: AgentRunRequest["validateCompletion"];
     }
   | {
       kind: "graph";

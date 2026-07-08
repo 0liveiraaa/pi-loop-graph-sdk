@@ -104,6 +104,11 @@ export const debugLog = {
     log({ type: "agent_incomplete", nodeId });
   },
 
+  /** 完成验证不通过，触发重试 */
+  agentRetry(nodeId: string, reason: string): void {
+    log({ type: "agent_retry", nodeId, reason });
+  },
+
   /** 图结束 */
   graphEnd(graphId: string, steps: number, frames: ContextFrame[]): void {
     log({

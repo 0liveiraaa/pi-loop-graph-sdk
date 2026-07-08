@@ -15,6 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { NodeCompletion, NodeContext, NodeInput } from "../type.js";
 import type { AgentRunRequest } from "../type.js";
+import { debugLog } from "./debug-log.js";
 
 export class PiNodeContext implements NodeContext {
   readonly signal: AbortSignal;
@@ -37,9 +38,12 @@ export class PiNodeContext implements NodeContext {
 
   // ── NodeContext 接口 ──────────────────────────────────
 
+  private validateFn: AgentRunRequest["validateCompletion"] = undefined;
+
   async runAgent(request: AgentRunRequest): Promise<NodeCompletion> {
     const runId = this.nextRunId++;
     this.activeRunId = runId;
+    this.validateFn = request.validateCompletion;
 
     const promise = new Promise<NodeCompletion>((res) => {
       const timeout = setTimeout(() => {
@@ -109,7 +113,31 @@ export class PiNodeContext implements NodeContext {
     if (!resolve) return;
 
     if (this.pendingCompletion) {
-      resolve(this.pendingCompletion);
+      const completion = this.pendingCompletion;
+
+      // 验证（如果节点声明了 validateCompletion 且 agent 上报 ok）
+      if (
+        this.validateFn &&
+        completion.status === "ok"
+      ) {
+        const result = this.validateFn(completion.result);
+        if (!result.isValid) {
+          // 不通过 → 注入原因，让 agent 继续（不 resolve）
+          this.pi.sendMessage(
+            {
+              customType: "loop_graph_retry",
+              content: `验证未通过: ${result.reason}\n请修正后再次调用 __graph_complete__`,
+              display: false,
+            },
+            { triggerTurn: true },
+          );
+          debugLog.agentRetry(this.currentNodeId ?? "?", result.reason);
+          this.pendingCompletion = null;
+          return;
+        }
+      }
+
+      resolve(completion);
     } else {
       resolve({
         nodeId: this.currentNodeId ?? "unknown",
@@ -122,6 +150,7 @@ export class PiNodeContext implements NodeContext {
 
     this.activeResolve = null;
     this.activeRunId = 0;
+    this.validateFn = undefined;
   }
 
   setCurrentNodeId(nodeId: string): void {
@@ -133,5 +162,6 @@ export class PiNodeContext implements NodeContext {
     this.pendingCompletion = null;
     this.activeRunId = 0;
     this.activeResolve = null;
+    this.validateFn = undefined;
   }
 }

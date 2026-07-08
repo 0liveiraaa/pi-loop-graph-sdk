@@ -19,6 +19,7 @@ import type {
   NodeRouting,
 } from "../type.js";
 import { END } from "../type.js";
+import { createAgentExecute } from "../agent-execute.js";
 
 // ── 子图 ──────────────────────────────────────────────────
 
@@ -26,8 +27,7 @@ const childAgent: Node = {
   kind: "code",
   id: "child_agent",
   subGoal: "这是子图内部的 agent 节点，复述输入并上报",
-  skill: "__probe_skill__",
-  execute: null as any,
+  execute: createAgentExecute(),
 };
 
 const childEntry: Entry = {

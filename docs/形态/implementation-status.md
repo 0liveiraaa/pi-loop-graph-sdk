@@ -165,9 +165,9 @@ GraphRuntime
 
 | 缺口 | 说明 |
 |------|------|
-| `validate.ts` | 图校验未实现 |
-| `router.ts` | 路由逻辑内联在 extension.ts，未独立模块 |
-| 复合节点 `kind: "graph"` | 代码已写但未实测 |
+| ~~`validate.ts`~~ | ✅ 已实现 |
+| ~~`router.ts`~~ | ✅ 已独立 |
+| ~~复合节点 `kind: "graph"`~~ | ✅ 已实测 |
 | `agent-choice` 路由 | `throw Error` 占位 |
 | `pi-node-context.callTool` | `throw Error` 占位 |
 | error handling 完整性 | 无边匹配、无路由等 throw 被 catch，但行为未详细设计 |
@@ -175,13 +175,21 @@ GraphRuntime
 
 ---
 
-## 七、后续步骤（待验证）
+## 七、验证清单
 
-按设计清单的顺序：
+| 验证项 | 状态 |
+|--------|------|
+| 死锁验证（单 agent turn） | ✅ |
+| 双节点链式推进 | ✅ |
+| 哨兵跨调用不重复 | ✅ |
+| 帧栈折叠（前序 ReAct 被丢弃） | ✅ |
+| 子图 push/pop | ✅ |
+| 图校验 + 路由独立模块 | ✅ |
+| 日志层 | ✅ |
 
-1. ~~死锁验证：单 agent 节点 runAgent 能返回~~ ✅
-2. ~~多节点 agent 链式实跑~~ ✅
-3. 帧栈投影折叠效果验证（显式检查 context 数组）
-4. 子图 push/pop 实跑
-5. 补 validate.ts + router.ts 独立模块
-6. 补隔离栈契约的类型注释
+## 八、后续
+
+- 补隔离栈契约的类型注释
+- 正式发布前移除 debug log 或不输出到文件
+- `agent-choice` 路由
+- `pi-node-context.callTool` 实现

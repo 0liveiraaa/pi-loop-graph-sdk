@@ -4,13 +4,13 @@
 
 import type { Edge, Entry, Graph, Node, NodeCompletion, NodeRouting } from "../type.js";
 import { END } from "../type.js";
+import { createAgentExecute } from "../agent-execute.js";
 
 const probeNode: Node = {
   kind: "code",
   id: "probe",
   subGoal: "验证哨兵消息是否出现在 context 数组里",
-  skill: "__probe_skill__",
-  execute: null as any,
+  execute: createAgentExecute(),
 };
 
 const probeEntry: Entry = {

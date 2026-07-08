@@ -6,6 +6,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentInstance, Edge, Graph, Node, NodeCompletion, NodeInput, NodeRouting } from "../type.js";
 import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
+import { assertValidGraph } from "../validate.js";
+import { selectEdge } from "../router.js";
 import { projectMessages } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
@@ -14,6 +16,7 @@ import { reviewGraph } from "../graphs/review-graph.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
 import { subgraphGraph } from "../graphs/subgraph-graph.js";
+import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 
 const BOUNDARY_TYPE = "loop_graph_boundary";
 
@@ -26,6 +29,7 @@ export default function loopGraphExtension(pi: ExtensionAPI) {
   registerGraph(pi, probeGraph);
   registerGraph(pi, chainGraph);
   registerGraph(pi, subgraphGraph);
+  registerGraph(pi, validateTestGraph);
 
   // context 投影
   (pi as any).on("context", (e: any) => {
@@ -94,6 +98,8 @@ async function executeGraph(
   graph: Graph,
   trigger: { source: string; args?: string; params?: Record<string, unknown> },
 ): Promise<void> {
+  assertValidGraph(graph);
+
   const runtime = new GraphRuntime();
   const nodeContext = new PiNodeContext(pi);
 
@@ -139,7 +145,20 @@ async function executeGraph(
       const routing = graph.routing[nodeId];
       if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
       const edge = selectEdge(routing, completion, runtime.topInstance!);
-      if (!edge) throw new Error(`无边匹配 ${nodeId}: status=${completion.status}`);
+      if (!edge) {
+        runtime.exitNode({
+          nodeId: completion.nodeId,
+          status: completion.status,
+          summary: `${nodeId} 完成(${completion.status})，无匹配边，图结束`,
+          result: completion.result,
+        });
+        pi.sendMessage({
+          customType: "loop_graph_complete",
+          content: `图结束（无边匹配 ${nodeId}）`,
+          display: true,
+        });
+        break;
+      }
 
       const migration = edge.migrate(runtime.topInstance!, completion);
       runtime.exitNode(migration.frame);
@@ -184,9 +203,6 @@ async function execNode(
     return result;
   }
 
-  if (node.skill || (node.tools?.length ?? 0) > 0) {
-    return nodeContext.runAgent({ prompt: `开始执行: ${node.subGoal}`, tools: node.tools, skill: node.skill });
-  }
   return node.execute(runtime.topInstance!, input, nodeContext);
 }
 
@@ -236,7 +252,15 @@ async function runSubgraph(
       const routing = childGraph.routing[nodeId];
       if (!routing) throw new Error(`子图 ${nodeId} 无路由`);
       const edge = selectEdge(routing, completion, childRt.topInstance!);
-      if (!edge) throw new Error(`子图无边匹配 ${nodeId}`);
+      if (!edge) {
+        childRt.exitNode({
+          nodeId: completion.nodeId,
+          status: completion.status,
+          summary: `子图 ${nodeId} 完成(${completion.status})，无匹配边`,
+          result: completion.result,
+        });
+        break;
+      }
 
       const migration = edge.migrate(childRt.topInstance!, completion);
       childRt.exitNode(migration.frame);
@@ -277,16 +301,4 @@ function setNodeTools(pi: ExtensionAPI, node: Node): void {
 function restoreActiveTools(pi: ExtensionAPI, tools: string[]): void { pi.setActiveTools(tools); }
 function restoreDefaultTools(pi: ExtensionAPI): void { pi.setActiveTools(["read"]); }
 
-// ── 路由 ──
 
-function selectEdge(routing: NodeRouting, completion: NodeCompletion, instance: AgentInstance): Edge | null {
-  const matched = routing.edges.filter((e) => { try { return e.guard(completion); } catch { return false; } });
-  if (matched.length === 0) return null;
-  switch (routing.router.kind) {
-    case "first-match": return matched[0] ?? null;
-    case "priority-first": return [...matched].sort((a, b) => b.priority - a.priority)[0] ?? null;
-    case "custom": return (routing.router.fn(matched, completion, instance) as Edge | null) ?? null;
-    case "agent-choice": throw new Error("agent-choice 未实现");
-    default: return matched[0] ?? null;
-  }
-}

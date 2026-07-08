@@ -14,13 +14,13 @@
 
 import type { Edge, Entry, Graph, Node, NodeCompletion, NodeRouting } from "../type.js";
 import { END } from "../type.js";
+import { createAgentExecute } from "../agent-execute.js";
 
 const nodeA: Node = {
   kind: "code",
   id: "echo_a",
   subGoal: "接收用户输入，复述一遍，然后调用 __graph_complete__ 上报",
-  skill: "__probe_skill__",
-  execute: null as any,
+  execute: createAgentExecute(),
 };
 
 const edgeA: Edge = {
@@ -49,8 +49,7 @@ const nodeB: Node = {
   kind: "code",
   id: "echo_b",
   subGoal: "收到节点 A 的输出，复述并上报",
-  skill: "__probe_skill__",
-  execute: null as any,
+  execute: createAgentExecute(),
 };
 
 const edgeB: Edge = {

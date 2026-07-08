@@ -425,10 +425,9 @@ const reviewGraph: Graph = {
 5. 逐步迁移更多节点
 6. 接入 /review-init 和 /review-fix 为独立子图
 7. 欠缺
-
-1. Record<string, unknown> 的可靠性债 —— result/background/inject/inputSchema 全是无类型口袋。你 SDK 卖"可靠性",这债迟早还(泛型化 Node<T></t> 或给 result
+8. Record<string, unknown> 的可靠性债 —— result/background/inject/inputSchema 全是无类型口袋。你 SDK 卖"可靠性",这债迟早还(泛型化 Node<T></t> 或给 result
    挂运行时 schema 校验)。抽象层可以先欠,具体化时它会第一个找上门。
-2. NodeContext 的落地 —— runAgent/callTool 现在是框架级占位,具体化时要映射到 pi 的 setActiveTools + before_agent_start(注系统提示)+ steer +
+9. NodeContext 的落地 —— runAgent/callTool 现在是框架级占位,具体化时要映射到 pi 的 setActiveTools + before_agent_start(注系统提示)+ steer +
    terminate:true schema tool 捞 result。这条链是架构 A 能不能跑起来的试金石,建议第一个概念验证节点就打通它,别等搭完再验。
-3. agent-choice 的具体形态 —— 内建 kind 声明了,但"agent 怎么选边"仍未落地(注册 choose_next tool?让节点把选择写进 result?)。这是 NodeContext
-   链路之外唯一还虚的内建能力。
+10. agent-choice 的具体形态 —— 内建 kind 声明了,但"agent 怎么选边"仍未落地(注册 choose_next tool?让节点把选择写进 result?)。这是 NodeContext
+    链路之外唯一还虚的内建能力。
