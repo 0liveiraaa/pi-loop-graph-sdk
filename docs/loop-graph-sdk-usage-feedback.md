@@ -419,7 +419,7 @@ SDK 可以提供一段“常见接入错误”文档，尤其说明：
 
 ## 本次接入暴露的核心问题
 
-SDK 作为“图语言运行时”的抽象已经能表达业务流程。
+SDK 作为"图语言运行时"的抽象已经能表达业务流程。
 
 当前最大问题不是图抽象，而是包使用边界：
 
@@ -429,3 +429,38 @@ SDK 作为“图语言运行时”的抽象已经能表达业务流程。
 ```
 
 先解决这个问题，再继续推进 Pi Review Agent 迁移会更稳。
+
+---
+
+## SDK 响应计划（2026-07-08 更新）
+
+> 详见：`docs/计划/2026-07-08_sdk-library-boundary-evolution-plan.md`
+
+### 已修复（2026-07-08）
+
+| 项目 | 优先级 | 状态 | 修复方式 |
+| --- | --- | --- | --- |
+| 包入口不可用 | P0 | ✅ 已修复 | `package.json` 增加 `main` + `exports["."]` + `exports["./extension"]` |
+| 缺少依赖安装说明 | P0 | ✅ 已修复 | README / developer-guide 新增两种安装方式 |
+| 库入口和 debug extension 分离 | P1 | ✅ 已修复 | `"."` 暴露 library API；`"./extension"` 为可选 debug entry |
+| registerGraph 依赖全局初始化 | P1 | ✅ 已修复 | `createLoopGraphExtension(pi)` 工厂 + 实例级 `GraphRegistry` |
+| 测试图污染命令空间 | P2 | ✅ 已修复 | `{ demoGraphs: true }` 门控；默认不注册 demo graphs |
+| parseArgs 命令入口 | - | ✅ 已修复 | 命令 handler 先调 `parseArgs(args)` 再执行图 |
+| tool execute 闭包绑定 | - | ✅ 已修复 | 工具注册用局部常量而非 `this` |
+| 子图 agent 节点挂起 | - | ✅ 已修复 | `runSubgraphInExtension` 收回工厂闭包，恢复 push/pop |
+| 多实例重复注册完成工具 | - | ✅ 已修复 | `WeakSet` per-pi 幂等 |
+
+### 延后处理
+
+| 项目 | 优先级 | 计划 |
+| --- | --- | --- |
+| `callTool` | P1 | 等 pi 公开稳定 extension-side tool 调用 API；当前代码节点可直接 import 业务库 |
+| 多 skill | P1 | 下一阶段引入 `graph.skills + node.skills` |
+| schema / 泛型 | P1 | 先补 schema helper（`createRequireFieldsValidator`），再泛型化 |
+| `agent-choice` | P2 | 标记为 experimental；短期用 `custom` 替代 |
+
+### Pi Review Agent 下一步
+
+等待 Tasks 1-4 完成后（已完成），启动单题回路验证：
+- `/review-turn` 并行运行，不替换 `/review`
+- 验收标准见 `docs/计划/2026-07-08_review-agent-single-turn-validation.md`
