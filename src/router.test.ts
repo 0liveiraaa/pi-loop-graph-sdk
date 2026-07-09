@@ -15,6 +15,7 @@ const instance: AgentInstance = {
   background: {},
   frames: [],
   mechanisms: [],
+  scratch: {},
 };
 
 function edge(id: string, priority: number, guard = true): Edge {

@@ -11,7 +11,9 @@ Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
 - **帧栈折叠**：已完成节点的 ReAct 过程被折叠为摘要帧，后续节点只看到摘要，不看到原始展开过程
 - **隔离栈**：子图创建独立的 AgentInstance，帧栈从零开始，父图的帧对子图不可见
 - **不干预 ReAct**：框架只编排"什么时候跑什么节点"，不干涉节点内部的 LLM 推理循环
-- **纯函数定制点**：所有定制都是函数（`guard`、`migrate`、`execute`、`validateCompletion`），无黑盒限制
+- **全员函数扩展**：所有定制点都是函数（`guard`、`migrate`、`execute`、`validateCompletion`、`custom router`），无黑盒限制
+- **框架不引入全局隐式状态**：所有跨节点数据流经帧栈显式传递，不依赖闭包或模块变量
+- **框架不修改 system prompt**：所有上下文操作在消息流追加侧进行，不破坏 pi 原生 prompt 管理
 
 ---
 
@@ -65,15 +67,19 @@ interface LoopGraphExtensionOptions {
   /** 是否注册 SDK 自带测试图。默认 false。只有 debug extension 入口设为 true。 */
   demoGraphs?: boolean;
   /** 所有节点默认可用的工具列表。为空时只保留 read + __graph_complete__。
-   *  例如业务包可传入 ["review_card", "review_chapter"] 作为全局工具。 */
+   *  例如业务包可传入 ["review_card", "review_chapter"] 作为全局工具。
+   *  注意：工具集最终由 resolveNodeTools(defaultTools, node.tools) 合并并去重。 */
   defaultTools?: string[];
+  /** skill 目录的根路径。node.skill 的 SKILL.md 在此路径下按 {name}/SKILL.md 查找。
+   *  默认 process.cwd() + "/skills"。参见 §skill 集成。 */
+  skillBasePath?: string;
 }
 ```
 
-`defaultTools` 在进入每个节点时与节点自身的 `tools` 合并：
+`defaultTools` 在注册期通过 `resolveNodeTools` 与每个节点的 `tools` 合并并去重：
 
 ```text
-activeTools = ["read", ...defaultTools, ...node.tools, "__graph_complete__"]
+最终工具集 = read + defaultTools ∪ node.tools + __graph_complete__（去重，read 强制首位）
 ```
 
 这样业务包不需要在每个节点重复声明全局可用工具。
@@ -249,117 +255,129 @@ type RouterStrategy =
 
 ## 创建节点
 
-### Agent 节点（声明式）
+Node 有两个 kind：
 
-推荐用 `createAgentExecute` 工厂：
+| kind | 含义 |
+|------|------|
+| `"code"` | JS 函数。execute 内可以调 `ctx.runAgent()`，也可以不调。框架不区分 |
+| `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行 |
+
+---
+
+### code 节点：三种典型写法
+
+**同一个 `kind: "code"` 节点，execute 函数体内自由组合代码和 agent**。
+
+#### agent-only（只有 LLM 推理）
 
 ```typescript
-import { createAgentExecute } from "pi-loop-graph-sdk";
+execute: createAgentExecute({
+  skill: "review-grade",
+  prompt: (input) => `请批改：${input.data.question}`,
+})
+```
 
-const myNode: Node = {
-  kind: "code",
-  id: "grade",
-  subGoal: "批改用户答案",
-  execute: createAgentExecute({
+`createAgentExecute` 是语法糖——等价于 `execute = (_, input, ctx) => ctx.runAgent({ prompt, skill })`。**不是一种新的节点类型**。
+
+> **注意**：agent 需要知道的信息必须在 `prompt` 中显式传入。框架不会自动 dump `input.data` 进上下文。如果你用 `createAgentExecute` 不带 `prompt`，agent 只能看到 CURRENT 段的 subGoal 和 skill 名。
+
+#### code-only（只走代码，不调 LLM）
+
+```typescript
+execute: async (_instance, input, _ctx) => {
+  fs.writeFileSync(input.data.path, JSON.stringify(input.data.payload));
+  return { nodeId: "save", status: "ok", result: { saved: true } };
+}
+```
+
+不需要 `callTool`，不需要 pi 的工具系统。`execute` 就是普通 async 函数，可以用任何 Node.js 或第三方库。
+
+#### hybrid（代码 + agent 穿插）
+
+```typescript
+execute: async (instance, input, ctx) => {
+  // 代码侧准备
+  const fileContent = fs.readFileSync(input.data.filePath, "utf-8");
+  const schema = await externalAPI.getValidationSchema();
+
+  // agent 推理
+  const result = await ctx.runAgent({
+    prompt: `按以下 schema 校验数据：
+${JSON.stringify(schema)}
+
+数据：
+${fileContent}`,
     skill: "review-grade",
-    tools: ["review_answer"],
-  }),
-};
+  });
+
+  // 代码侧善后
+  if (result.status === "ok") {
+    fs.writeFileSync(input.data.outputPath, JSON.stringify(result.result));
+  }
+  return result;
+}
 ```
 
-工厂函数内部调 `ctx.runAgent()`，触发 LLM 推理。节点完成后 LLM 必须调用 `__graph_complete__` 工具上报结果。
+#### 完成度验证
 
-### Agent 节点（自定义 prompt）
+验证函数可以声明在节点上（`validateCompletion`），也可以写在 `ctx.runAgent({ validateCompletion })` 里：
 
 ```typescript
 execute: createAgentExecute({
-  prompt: (input) => `请批改以下答案：\n${input.data.user_answer}`,
-  skill: "review-grade",
-  tools: ["review_answer"],
-}),
-```
-
-### Agent 节点 + 完成度验证
-
-```typescript
-execute: createAgentExecute({
-  skill: "review-grade",
-  tools: ["review_answer"],
   validateCompletion(result) {
     if (!result.score) return { isValid: false, reason: "缺少 score" };
-    if (typeof result.score !== "number") return { isValid: false, reason: "score 应为数字" };
     return { isValid: true };
   },
 }),
 ```
 
-验证不通过时，引擎会自动注入一条重试消息让 LLM 继续工作。
+验证不通过时，引擎自动注入重试消息让 LLM 继续工作。
 
-### 纯代码节点（无 LLM）
-
-纯代码节点的 `execute` 就是普通 async 函数，可以直接使用 Node.js 或任何库：
+### graph 节点（子图）
 
 ```typescript
-import fs from "node:fs";
-
-const readFileNode: Node = {
-  kind: "code",
-  id: "read",
-  subGoal: "读取文件内容",
-  execute: async (_instance, input, _ctx) => {
-    const path = input.data.path as string;
-    const content = fs.readFileSync(path, "utf-8");
-    return {
-      nodeId: "read",
-      status: "ok",
-      result: { path, content, lineCount: content.split("\n").length },
-    };
-  },
-};
-
-const apiCaller: Node = {
-  kind: "code",
-  id: "fetch",
-  subGoal: "调外部 API",
-  execute: async (_instance, input, _ctx) => {
-    const res = await fetch(input.data.url as string);
-    const json = await res.json() as Record<string, unknown>;
-    return { nodeId: "fetch", status: "ok", result: json };
-  },
-};
-```
-
-**原则**：`execute` 就是一个 JavaScript 异步函数。
-不需要 `callTool`，不需要 pi 的工具系统，不需要 LLM。
-传入 `input.data`，产出 `NodeCompletion`。
-如果某个操作纯代码做不了，就交给 agent 节点（`createAgentExecute` 工厂）去调 LLM。
-
-```typescript
-// 示例：纯校验节点
-const validateNode: Node = {
-  kind: "code",
-  id: "validate_input",
-  subGoal: "校验用户输入",
-  execute: async (_instance, input, _ctx) => {
-    const name = input.data.name;
-    if (!name || typeof name !== "string") {
-      return { nodeId: "validate_input", status: "failed", result: { reason: "name 无效" } };
-    }
-    return { nodeId: "validate_input", status: "ok", result: { name, valid: true } };
-  },
-};
-```
-
-### 复合节点（子图）
-
-```typescript
-const subGraph: Node = {
+const subNode: Node = {
   kind: "graph",
-  id: "sub_process",
-  subGoal: "委托子图处理",
-  graph: mySubGraph,  // 另一个 Graph 对象
+  id: "delegate",
+  subGoal: "委托子图执行子任务",
+  graph: mySubGraph,
 };
 ```
+
+子图采用隔离栈（新 AgentInstance，frames = []）。父图只看调用结果，不偷看子图内部历史。
+
+---
+
+## skill 集成
+
+### 机制
+
+`node.skill` 将对应的 SKILL.md 文件内容在节点进入时（哨兵之后）追加到消息流中。追加在哨兵之后，投影三段切分将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。
+
+底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
+
+### 位置约定
+
+`skillBasePath/{skill名称}/SKILL.md`。默认 `skillBasePath` 为 `cwd/skills`，可通过 `createLoopGraphExtension(pi, { skillBasePath: "..." })` 配置。SDK 通过 `resources_discover` 事件将 `skillBasePath` 注册到 pi 的原生 skill 系统，pi 自动扫描 frontmatter 并在系统提示中以 XML 形式列出可用 skill。
+
+### 多 skill 支持
+
+**当前状态**：一个节点一次只能关联一个 skill（`node.skill?: string` 单值字段）。图级 `skills?: string[]` 数组未实现。
+
+如果你需要在一个节点中使用多个 skill，有以下策略：
+
+| 策略                             | 做法                                                                                                                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **拆到不同节点**           | 将不同 skill 的任务拆成多个串行/并行节点，各自的`node.skill` 指向不同的 skill                                                                                                             |
+| **手动组合 prompt**        | 在`createAgentExecute({ prompt: input => ... })` 中自行读取并合并多个 skill 文件内容到 prompt 中                                                                                          |
+| **纯代码绕过**             | `kind: "code"` 节点的 `execute` 是普通 async 函数，可以直接 import 和调用任何 domain 代码，不依赖 `node.skill` 机制                                                                   |
+| **节点级 tools（最常用）** | 大多数场景下，你需要的不是多 skill，而是在当前节点附加一组专用工具。声明`tools: ["tool_a", "tool_b"]`，配合 `prompt` 字段告知 agent 如何协作即可。`tools` 和 `skill` 可以同时使用。 |
+
+如果一条图中不同节点需要不同的 skill，这是完全支持的——每个节点声明各自的 `node.skill` 即可。
+
+### 投影中的 skill 行
+
+在 CURRENT 段中，`skill: {名称}` 行仅保留名称作为上下文提示。完整 skill 内容由主循环在进入节点时追加。projection 是纯函数，不接触 IO。
 
 ---
 
@@ -727,7 +745,6 @@ export const reviewGraph: Graph = {
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `callTool`          | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。                              |
 | `agent-choice` 路由 | 暂缓 / experimental。短期使用`priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。       |
-| 多 skill              | 当前只有`node.skill?: string`；下一阶段引入 `graph.skills + node.skills`，运行时合并。                                                                              |
+| 多 skill              | 当前只有 node.skill?: string 单值字段，图级 skills?: string[] 未实现。多 skill 策略：拆到不同节点、手动组合prompt、纯代码绕过。参见 §skill 集成。                      |
 | schema / 泛型类型     | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。 |
 | session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                              |
-| 声明式编译器          | 暂不开发，所有定制点为函数。                                                                                                                                            |

@@ -10,7 +10,9 @@ const probeNode: Node = {
   kind: "code",
   id: "probe",
   subGoal: "验证哨兵消息是否出现在 context 数组里",
-  execute: createAgentExecute(),
+  execute: createAgentExecute({
+    prompt: "请列出现在你看到的上下文信息，包括 COMPLETED 段和 CURRENT 段的内容，然后调用 __graph_complete__ 上报",
+  }),
 };
 
 const probeEntry: Entry = {

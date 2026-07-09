@@ -23,6 +23,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
   AgentInstance,
   Graph,
+  Mechanism,
+  MechanismContext,
   Node,
   NodeCompletion,
   NodeInput,
@@ -114,7 +116,6 @@ export function createLoopGraphExtension(
       messages: e.messages as any[],
       frames: rt.topInstance?.frames ?? [],
       currentNode: rt.currentNode,
-      currentInput: rt.currentInput,
       nodeMarker: rt.nodeMarker,
     };
     const projected = projectMessages(input);
@@ -249,6 +250,9 @@ export function createLoopGraphExtension(
           runtime.topInstance?.frames ?? [],
         );
         nodeContext.setCurrentNodeId(nodeId);
+
+        // 横切机制：节点进入后、execute 之前分派（预处理 scratch 等）
+        await applyMechanisms(runtime.topInstance!, node, input);
 
         const completion = await execNodeInGraph(
           piInner,
@@ -387,6 +391,9 @@ export function createLoopGraphExtension(
         );
         childNc.setCurrentNodeId(nodeId);
 
+        // 横切机制：子图节点同样在进入后、execute 之前分派
+        await applyMechanisms(childRt.topInstance!, node, input);
+
         const completion = await execNodeInGraph(
           piInner,
           childRt,
@@ -491,6 +498,39 @@ export function createLoopGraphExtension(
 
 // ── 内部辅助函数 ────────────────────────────────────────────
 //  （封装在模块作用域，由工厂函数内调用，不暴露给外部）
+
+/**
+ * 节点进入后、execute 之前分派横切机制。
+ *
+ * 顺序：全局机制（instance.mechanisms）→ 局部机制（node.mechanisms）。
+ * 每个 mechanism 先 check，通过则 await apply（数据预处理必须先于 execute
+ * 完成，故串行 await）。apply 抛错统一记日志后继续，不中止节点。
+ */
+async function applyMechanisms(
+  instance: AgentInstance,
+  node: Node,
+  input: NodeInput,
+): Promise<void> {
+  const mechanisms: Mechanism[] = [
+    ...instance.mechanisms,
+    ...(node.kind === "code" ? (node.mechanisms ?? []) : []),
+  ];
+  if (mechanisms.length === 0) return;
+
+  const ctx: MechanismContext = { instance, node, input };
+  for (const m of mechanisms) {
+    try {
+      if (m.check(ctx)) {
+        await m.apply(ctx);
+      }
+    } catch (err) {
+      debugLog.graphError(
+        `mechanism:${m.name}`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+}
 
 async function execNodeInGraph(
   pi: ExtensionAPI,

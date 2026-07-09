@@ -33,7 +33,8 @@ export function createAgentExecute(
     const prompt =
       typeof options.prompt === "function"
         ? options.prompt(input)
-        : options.prompt ?? "开始执行当前阶段";
+        : options.prompt ??
+          "[无显式 prompt] 请根据当前 CURRENT 段中的 subGoal 和 skill 信息完成本阶段任务，完成后调用 __graph_complete__ 上报。";
     return ctx.runAgent({
       prompt,
       skill: options.skill,

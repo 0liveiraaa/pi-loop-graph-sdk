@@ -2,13 +2,12 @@
 //  投影 — context 钩子的消息组装（纯函数）
 // ============================================================
 
-import type { ContextFrame, Node, NodeInput } from "../type.js";
+import type { ContextFrame, Node } from "../type.js";
 
 export interface ProjectionInput {
   messages: MessageEntry[];
   frames: ContextFrame[];
   currentNode: Node | null;
-  currentInput: NodeInput | null;
   /** 哨兵标记：customType="loop_graph_boundary" 的 content */
   nodeMarker: string | null;
 }
@@ -22,7 +21,7 @@ export interface MessageEntry {
 }
 
 export function projectMessages(input: ProjectionInput): MessageEntry[] {
-  const { messages, frames, currentNode, currentInput, nodeMarker } = input;
+  const { messages, frames, currentNode, nodeMarker } = input;
 
   const isBoundary = (m: MessageEntry) =>
     m.customType === "loop_graph_boundary";
@@ -68,24 +67,17 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
 
   // 当前节点段
   if (currentNode) {
-    result.push(buildNodeInfo(currentNode, currentInput));
+    result.push(buildNodeInfo(currentNode));
   }
 
   result.push(...active);
   return result;
 }
 
-function buildNodeInfo(node: Node, input: NodeInput | null): MessageEntry {
+function buildNodeInfo(node: Node): MessageEntry {
   const lines: string[] = ["=== CURRENT ==="];
   lines.push(`nodeId: ${node.id}`);
   lines.push(`subGoal: ${node.subGoal}`);
-
-  if (input && Object.keys(input.data).length > 0) {
-    lines.push("input:");
-    for (const [k, v] of Object.entries(input.data)) {
-      lines.push(`  ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
-    }
-  }
 
   if (node.kind === "code") {
     if (node.tools?.length) lines.push(`tools: ${node.tools.join(", ")}`);

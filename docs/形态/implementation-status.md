@@ -138,6 +138,7 @@ export function createLoopGraphExtension(pi, options?) {
 ```
 
 **关键变更**：
+
 - `activeRuntime`/`activeNodeContext` 从模块级单例 → 工厂闭包内的实例变量
 - 子图执行时切换 `activeRuntime`/`activeNodeContext`（push/pop 模式）
 - `GraphRegistry` 为实例级 class，业务 extension 间不互相污染
@@ -149,6 +150,7 @@ export function createLoopGraphExtension(pi, options?) {
 全仓库只有 `resolveNodeTools(defaultTools, nodeTools)` 产出最终工具列表。`setActiveTools` 调它，debug 日志也调它（通过 `pi.getActiveTools()` 读真值）。
 
 **契约**：
+
 - 去重（保留首次出现位置）
 - `read` 强制首位
 - `__graph_complete__` 强制末位
@@ -203,55 +205,58 @@ runSubgraphInExtension 创建 childRuntime：
 
 ## 四、已验证清单
 
-| 验证项 | 方式 | 结果 |
-|--------|------|------|
-| 命令 handler 内 await agent turn | `/probe` | ✅ |
-| 哨兵消息进入 context 数组 | 探针日志 | ✅ |
-| 哨兵跨调用唯一 | debug log | ✅ |
-| 双节点链式推进 | `/chain` | ✅ |
-| 帧栈折叠（前序 ReAct 被丢弃） | debug log projection | ✅ |
-| 子图 push/pop + 隔离 | `/sub` + debug log | ✅ |
-| 图校验 | `assertValidGraph` 编译期 | ✅ |
-| 路由独立模块 | `router.ts` | ✅ |
-| 完成度验证 | `/validate-test` | ✅ |
-| 日志层 | `loop-graph-debug.log` | ✅ |
-| 工厂实例隔离 | `loop-graph-extension.test.ts` | ✅ |
-| 子图 agent 节点完成 | `loop-graph-extension.test.ts` | ✅ |
-| parseArgs 命令入口 | `registry.test.ts` | ✅ |
-| tool execute 闭包绑定 | `registry.test.ts` | ✅ |
-| demo graphs 门控 | `loop-graph-extension.test.ts` | ✅ |
-| defaultTools 合并 | `loop-graph-extension.test.ts` | ✅ |
-| 多实例 `__graph_complete__` 幂等 | `loop-graph-extension.test.ts` | ✅ |
-| **resolveNodeTools 去重 + 排序** | `tools-resolve.test.ts`（14 条） | ✅ |
-| **注册期节点内工具重复检测** | `validate.test.ts` + `loop-graph-extension.test.ts` | ✅ |
-| **首次执行未注册工具检测** | `loop-graph-extension.test.ts` | ✅ |
-| **skill 追加不触发额外 turn** | 代码审查 + `sendMessage`（无 triggerTurn） | ✅ |
-| **after_provider_response 错误回流** | 代码审查（构造函数单一监听） | ✅ |
-| **图终止信号注入 agent** | 代码审查（`executeGraph` catch） | ✅ |
+| 验证项                                     | 方式                                                    | 结果 |
+| ------------------------------------------ | ------------------------------------------------------- | ---- |
+| 命令 handler 内 await agent turn           | `/probe`                                              | ✅   |
+| 哨兵消息进入 context 数组                  | 探针日志                                                | ✅   |
+| 哨兵跨调用唯一                             | debug log                                               | ✅   |
+| 双节点链式推进                             | `/chain`                                              | ✅   |
+| 帧栈折叠（前序 ReAct 被丢弃）              | debug log projection                                    | ✅   |
+| 子图 push/pop + 隔离                       | `/sub` + debug log                                    | ✅   |
+| 图校验                                     | `assertValidGraph` 编译期                             | ✅   |
+| 路由独立模块                               | `router.ts`                                           | ✅   |
+| 完成度验证                                 | `/validate-test`                                      | ✅   |
+| 日志层                                     | `loop-graph-debug.log`                                | ✅   |
+| 工厂实例隔离                               | `loop-graph-extension.test.ts`                        | ✅   |
+| 子图 agent 节点完成                        | `loop-graph-extension.test.ts`                        | ✅   |
+| parseArgs 命令入口                         | `registry.test.ts`                                    | ✅   |
+| tool execute 闭包绑定                      | `registry.test.ts`                                    | ✅   |
+| demo graphs 门控                           | `loop-graph-extension.test.ts`                        | ✅   |
+| defaultTools 合并                          | `loop-graph-extension.test.ts`                        | ✅   |
+| 多实例`__graph_complete__` 幂等          | `loop-graph-extension.test.ts`                        | ✅   |
+| **resolveNodeTools 去重 + 排序**     | `tools-resolve.test.ts`（14 条）                      | ✅   |
+| **注册期节点内工具重复检测**         | `validate.test.ts` + `loop-graph-extension.test.ts` | ✅   |
+| **首次执行未注册工具检测**           | `loop-graph-extension.test.ts`                        | ✅   |
+| **skill 追加不触发额外 turn**        | 代码审查 +`sendMessage`（无 triggerTurn）             | ✅   |
+| **after_provider_response 错误回流** | 代码审查（构造函数单一监听）                            | ✅   |
+| **图终止信号注入 agent**             | 代码审查（`executeGraph` catch）                      | ✅   |
+| **input 不进 agent 上下文**          | projection 删 input 渲染 + 显式 prompt                  | ✅   |
+| **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`（4 条）                | ✅   |
+| **全局机制（Graph.mechanisms）接线** | `loop-graph-extension.test.ts`                        | ✅   |
 
 ---
 
 ## 五、已知缺口
 
-| 缺口 | 说明 |
-|------|------|
-| `agent-choice` 路由 | `throw Error` 占位；标记为 experimental，短期用 `custom` |
-| `pi-node-context.callTool` | `throw Error` 占位；等待 pi stable extension-side tool API |
-| schema helper | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
-| 失败边处理 | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖 |
-| 帧栈太长触发 compaction | 不处理（投影天然免疫，框架不干预） |
-| session 续跑 | 帧栈未持久化到磁盘 |
+| 缺口                         | 说明                                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------------------- |
+| `agent-choice` 路由        | `throw Error` 占位；短期用 `custom`;                                                     |
+| `pi-node-context.callTool` | `throw Error` 占位                                                                         |
+| schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
+| 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
+| 帧栈太长触发 compaction      | 不处理（投影天然免疫，框架不干预）                                                           |
+| session 续跑                 | 帧栈未持久化到磁盘                                                                           |
 
 ### 已关闭的缺口
 
-| 缺口 | 说明 | 关闭版本 |
-|------|------|---------|
-| 多 skill | 当前单 `node.skill?: string`；已通过 `resources_discover` + 运行时追加实现原生 skill 集成 | v0.1.0+stage3 |
-| defaultTools 流入 skill 节点 | 证实为观测造假（debug log 未包含 defaultTools）。`resolveNodeTools` + `getActiveTools()` 真值日志已修复 | v0.1.0+stage1 |
-| `createAgentExecute(options).tools` 误导 | 已 deprecated，不消费 | v0.1.0+stage1 |
-| `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验 | v0.1.0+stage1/2 |
-| 注册期无校验 | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查 | v0.1.0+stage2 |
-| 400 后僵尸状态 | `after_provider_response` 错误回流 + 图终止信号 `sendUserMessage` | v0.1.0+stage4 |
+| 缺口                                            | 说明                                                                                                        | 关闭版本        |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------- |
+| 多 skill                                        | 当前单`node.skill?: string`；已通过 `resources_discover` + 运行时追加实现原生 skill 集成                | v0.1.0+stage3   |
+| defaultTools 流入 skill 节点                    | 证实为观测造假（debug log 未包含 defaultTools）。`resolveNodeTools` + `getActiveTools()` 真值日志已修复 | v0.1.0+stage1   |
+| `createAgentExecute(options).tools` 误导      | 已 deprecated，不消费                                                                                       | v0.1.0+stage1   |
+| `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                          | v0.1.0+stage1/2 |
+| 注册期无校验                                    | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查                                            | v0.1.0+stage2   |
+| 400 后僵尸状态                                  | `after_provider_response` 错误回流 + 图终止信号 `sendUserMessage`                                       | v0.1.0+stage4   |
 
 ---
 

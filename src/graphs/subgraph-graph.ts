@@ -27,7 +27,10 @@ const childAgent: Node = {
   kind: "code",
   id: "child_agent",
   subGoal: "这是子图内部的 agent 节点，复述输入并上报",
-  execute: createAgentExecute(),
+  execute: createAgentExecute({
+    prompt: (input) =>
+      `当前输入: ${JSON.stringify(input.data)}\n请复述你看到的内容，确认子图隔离是否生效，然后调用 __graph_complete__ 上报`,
+  }),
 };
 
 const childEntry: Entry = {

@@ -47,7 +47,8 @@ export class GraphRuntime {
       globalGoal: graph.goal,
       background,
       frames: [],
-      mechanisms: [],
+      mechanisms: graph.mechanisms ?? [],
+      scratch: {},
     };
     this.callStack.push({ instance, graph, currentNodeId: null });
     return instance;

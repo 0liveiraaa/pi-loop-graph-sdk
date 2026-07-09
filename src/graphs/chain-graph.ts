@@ -20,7 +20,10 @@ const nodeA: Node = {
   kind: "code",
   id: "echo_a",
   subGoal: "接收用户输入，复述一遍，然后调用 __graph_complete__ 上报",
-  execute: createAgentExecute(),
+  execute: createAgentExecute({
+    prompt: (input) =>
+      `用户输入: ${JSON.stringify(input.data)}\n请复述一遍，然后调用 __graph_complete__ 上报`,
+  }),
 };
 
 const edgeA: Edge = {
@@ -49,7 +52,10 @@ const nodeB: Node = {
   kind: "code",
   id: "echo_b",
   subGoal: "收到节点 A 的输出，复述并上报",
-  execute: createAgentExecute(),
+  execute: createAgentExecute({
+    prompt: (input) =>
+      `上一节点产出: ${JSON.stringify(input.data.from_a)}\n指令: ${input.data.instruction}\n请基于此做一次复述并上报`,
+  }),
 };
 
 const edgeB: Edge = {

@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { projectMessages, type MessageEntry } from "./projection.js";
-import type { ContextFrame, Node, NodeInput } from "../type.js";
+import type { ContextFrame, Node } from "../type.js";
 
 const B = "loop_graph_boundary";
 
@@ -14,11 +14,6 @@ const agentNode = (id: string): Node => ({
   subGoal: `子目标-${id}`,
   tools: ["some_tool"],
   execute: async () => ({ nodeId: id, status: "ok", result: {} }),
-});
-
-const input = (data: Record<string, unknown>): NodeInput => ({
-  data,
-  source: { kind: "entry", entryId: "e" },
 });
 
 /** 一段模拟的两节点 transcript：node1 已完成，正处于 node2 的 turn */
@@ -55,7 +50,7 @@ describe("projectMessages 折叠", () => {
       messages,
       frames: [],
       currentNode: agentNode("node1"),
-      currentInput: input({ topic: "x" }),
+      
       nodeMarker: "__node_boundary__:node1:1",
     });
 
@@ -85,7 +80,7 @@ describe("projectMessages 折叠", () => {
       messages,
       frames: [frame1],
       currentNode: agentNode("node2"),
-      currentInput: input({ q: "Q1" }),
+      
       nodeMarker: "__node_boundary__:node2:2",
     });
 
@@ -127,7 +122,7 @@ describe("projectMessages 折叠", () => {
         { nodeId: "n1", status: "ok", summary: "s1", result: {} },
       ],
       currentNode: null,
-      currentInput: null,
+      
       nodeMarker: "__node_boundary__:missing:9",
     });
 
@@ -143,7 +138,7 @@ describe("projectMessages 折叠", () => {
       messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
       frames: [{ nodeId: "n1", status: "ok", summary: "s", result: {} }],
       currentNode: agentNode("node1"),
-      currentInput: input({}),
+      
       nodeMarker: "__node_boundary__:node1:1",
     });
     for (const m of out) {

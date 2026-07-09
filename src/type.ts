@@ -60,11 +60,22 @@ export interface ContextFrame {
  * 回路图中的活动主体，持有一个有序帧栈。
  *
  *   background  — 进入当前图时的背景上下文（不变）
- *   frames      — 有序执行历史，只增不减
+ *   frames      — 有序执行历史，只增不减，只由 Edge.migrate 折叠
  *   mechanisms  — 全局横切机制，跨节点持续生效
+ *   scratch     — mechanism 的唯一合法可变区（见下）
  *
- * 阶段性工作状态不挂在 AgentInstance 上。节点只能从 background 和 frames
+ * 阶段性业务状态不挂在 AgentInstance 上。节点只能从 background 和 frames
  * 读取已经显式进入历史的上下文。
+ *
+ * scratch 的契约（宪法原则 2 的显式例外）：
+ *   1. 只有 Mechanism.apply 可写 scratch。execute 可读，不应写——
+ *      写了就是绕过声明式机制。
+ *   2. scratch 不进 agent 上下文。projection 永不渲染它，
+ *      它与 input 同侧（代码侧横切状态）。
+ *   3. scratch 随 AgentInstance 生命周期。子图新实例 = 新 scratch，
+ *      与 frames 隔离契约一致。
+ *   4. 跨节点的业务状态迁移仍走 Edge/frame，不走 scratch。scratch 只承载
+ *      横切基础设施的工作状态（计时器起点、重试计数等），不是业务迁移通道。
  */
 export interface AgentInstance {
   id: string;
@@ -72,6 +83,7 @@ export interface AgentInstance {
   background: Record<string, unknown>;
   frames: ContextFrame[];
   mechanisms: Mechanism[];
+  scratch: Record<string, unknown>;
 }
 
 // ── 节点输入与执行能力 ──
@@ -170,14 +182,33 @@ export type Node =
 // ── 机制 ──
 
 /**
- * 横切面基础设施。
- * 全局机制（AgentInstance.mechanisms）跨节点持续生效；
- * 局部机制（Node.mechanisms）仅在本阶段叠加到全局上。
+ * Mechanism 运行时上下文。check/apply 通过它读取节点、入参与实例状态。
+ *
+ *   instance  — 当前 AgentInstance（apply 可写 instance.scratch）
+ *   node      — 当前节点
+ *   input     — 代码侧一次性入参（apply 据此做数据预处理）
+ */
+export interface MechanismContext {
+  instance: AgentInstance;
+  node: Node;
+  input: NodeInput;
+}
+
+/**
+ * 横切面基础设施。声明式，框架在节点进入后、execute 之前自动分派：
+ * 对每个 mechanism 先 check，通过则 await apply。
+ *
+ * 全局机制（Graph.mechanisms → AgentInstance.mechanisms）跨节点持续生效；
+ * 局部机制（Node.mechanisms）仅在本阶段叠加到全局之上。
+ *
+ * apply 的唯一合法产出落点是 ctx.instance.scratch（见 AgentInstance.scratch
+ * 契约）。不得写 frames/background，不得依赖闭包/模块变量传递跨节点状态。
+ * apply 抛错统一记日志后继续（不中止节点）。
  */
 export interface Mechanism {
   name: string;
-  check(instance: AgentInstance): boolean;
-  apply(instance: AgentInstance): Promise<void>;
+  check(ctx: MechanismContext): boolean;
+  apply(ctx: MechanismContext): Promise<void>;
 }
 
 // ── 边 ──
@@ -311,4 +342,6 @@ export interface Graph {
   entries: Entry[];
   nodes: Record<string, Node>;
   routing: Record<string, NodeRouting>;
+  /** 全局横切机制。Runtime 压帧时赋给 AgentInstance.mechanisms，跨节点持续生效。 */
+  mechanisms?: Mechanism[];
 }

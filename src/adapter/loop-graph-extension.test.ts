@@ -538,4 +538,111 @@ describe("createLoopGraphExtension", () => {
       );
     });
   });
+
+  describe("横切机制", () => {
+    it("mechanism.apply 在 execute 之前跑，且写入 scratch 对 execute 可见", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      let seenScratch: unknown = undefined;
+
+      const g = minimalGraph("mech_scratch");
+      g.mechanisms = [
+        {
+          name: "prep",
+          check: () => true,
+          async apply(ctx) {
+            order.push("apply");
+            ctx.instance.scratch.prepared = 42;
+          },
+        },
+      ];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "读 scratch",
+        async execute(instance) {
+          order.push("execute");
+          seenScratch = instance.scratch.prepared;
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(order).toEqual(["apply", "execute"]);
+      expect(seenScratch).toBe(42);
+    });
+
+    it("check 返回 false 时跳过 apply", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const applied: string[] = [];
+
+      const g = minimalGraph("mech_skip");
+      g.mechanisms = [
+        { name: "yes", check: () => true, async apply() { applied.push("yes"); } },
+        { name: "no", check: () => false, async apply() { applied.push("no"); } },
+      ];
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(applied).toEqual(["yes"]);
+    });
+
+    it("apply 抛错记日志但不中止节点", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let executed = false;
+
+      const g = minimalGraph("mech_throw");
+      g.mechanisms = [
+        { name: "boom", check: () => true, async apply() { throw new Error("mech failed"); } },
+      ];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "抛错后仍执行",
+        async execute() {
+          executed = true;
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(executed).toBe(true);
+      expect(pi.sendMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ customType: "loop_graph_error" }),
+        expect.anything(),
+      );
+    });
+
+    it("全局机制先于局部机制执行", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+
+      const g = minimalGraph("mech_order");
+      g.mechanisms = [
+        { name: "global", check: () => true, async apply() { order.push("global"); } },
+      ];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "顺序",
+        mechanisms: [
+          { name: "local", check: () => true, async apply() { order.push("local"); } },
+        ],
+        async execute() {
+          order.push("execute");
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(order).toEqual(["global", "local", "execute"]);
+    });
+  });
 });
