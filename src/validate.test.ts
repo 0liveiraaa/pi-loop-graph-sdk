@@ -14,12 +14,13 @@ function node(id: string): Node {
   };
 }
 
-function edge(id: string, from: string, to: string | typeof END): Edge {
+function edge(id: string, from: string, to: string | typeof END, description?: string): Edge {
   return {
     id,
     from,
     to,
     priority: 1,
+    description,
     guard: () => true,
     migrate(_instance, completion) {
       return {
@@ -127,6 +128,78 @@ describe("validateGraph", () => {
 
   it("assertValidGraph includes all validation issue paths in its error", () => {
     expect(() => assertValidGraph(graph({ routing: {} }))).toThrow("nodes.start");
+  });
+
+  describe("agent-choice edge description", () => {
+    it("passes when all edges under agent-choice have non-empty description", () => {
+      expect(validateGraph(graph({
+        routing: {
+          start: {
+            nodeId: "start",
+            edges: [
+              edge("a", "start", END, "正常完成"),
+              edge("b", "start", END, "进入讨论"),
+            ],
+            router: { kind: "agent-choice" },
+          },
+        },
+      }))).toEqual([]);
+    });
+
+    it("reports missing description on edges under agent-choice", () => {
+      const issues = validateGraph(graph({
+        routing: {
+          start: {
+            nodeId: "start",
+            edges: [
+              edge("no_desc", "start", END), // 缺少 description
+            ],
+            router: { kind: "agent-choice" },
+          },
+        },
+      }));
+      expect(issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION",
+            path: "routing.start.edges[no_desc].description",
+          }),
+        ]),
+      );
+    });
+
+    it("reports empty description the same as missing", () => {
+      const issues = validateGraph(graph({
+        routing: {
+          start: {
+            nodeId: "start",
+            edges: [
+              edge("empty_desc", "start", END, "   "), // 空白
+            ],
+            router: { kind: "agent-choice" },
+          },
+        },
+      }));
+      expect(issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION",
+          }),
+        ]),
+      );
+    });
+
+    it("does not report for edges under non-agent-choice routers", () => {
+      expect(validateGraph(graph({
+        routing: {
+          start: {
+            nodeId: "start",
+            edges: [edge("no_desc", "start", END)], // priority-first 下 description 可选
+            router: { kind: "priority-first" },
+          },
+        },
+      }))).toEqual([]);
+    });
   });
 });
 

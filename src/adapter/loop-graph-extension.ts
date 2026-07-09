@@ -22,6 +22,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
   AgentInstance,
+  Edge,
   Graph,
   Mechanism,
   MechanismContext,
@@ -112,11 +113,25 @@ export function createLoopGraphExtension(
     const rt = activeRuntime;
     if (!rt?.isNodeActive) return;
 
+    // agent-choice 路由：提取可用边描述供 projection 渲染
+    const nodeId = rt.currentNodeId;
+    const routing = nodeId ? rt.topGraph?.routing[nodeId] : undefined;
+    const availableEdges =
+      routing?.router.kind === "agent-choice"
+        ? routing.edges.map((ed) => ({
+            id: ed.id,
+            description: ed.description ?? "",
+            priority: ed.priority,
+            target: typeof ed.to === "symbol" ? "END" : String(ed.to),
+          }))
+        : undefined;
+
     const input = {
       messages: e.messages as any[],
       frames: rt.topInstance?.frames ?? [],
       currentNode: rt.currentNode,
       nodeMarker: rt.nodeMarker,
+      availableEdges,
     };
     const projected = projectMessages(input);
     debugLog.projection(input, projected as any[]);
@@ -254,11 +269,14 @@ export function createLoopGraphExtension(
         // 横切机制：节点进入后、execute 之前分派（预处理 scratch / 追加上下文）
         await applyMechanisms(piInner, runtime.topInstance!, node, input);
 
+        // agent-choice 路由：注入边选择校验，agent 未正确声明 chosen_edge_id 时驳回重试
+        const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
+
         const completion = await execNodeInGraph(
           piInner,
           runtime,
           nodeContext,
-          node,
+          effectiveNode,
           input,
           runSubgraphInExtension,
         );
@@ -394,11 +412,14 @@ export function createLoopGraphExtension(
         // 横切机制：子图节点同样在进入后、execute 之前分派
         await applyMechanisms(piInner, childRt.topInstance!, node, input);
 
+        // agent-choice 路由：注入边选择校验
+        const effectiveNode = wrapWithAgentChoiceValidator(childGraph, nodeId, node);
+
         const completion = await execNodeInGraph(
           piInner,
           childRt,
           childNc,
-          node,
+          effectiveNode,
           input,
           runSubgraphInExtension,
         );
@@ -498,6 +519,92 @@ export function createLoopGraphExtension(
 
 // ── 内部辅助函数 ────────────────────────────────────────────
 //  （封装在模块作用域，由工厂函数内调用，不暴露给外部）
+
+/**
+ * 为 agent-choice 路由合成 validateCompletion 校验器。
+ *
+ * 当路由策略为 agent-choice 且 node 为 code 节点时，此函数产出一个
+ * 合成 validateCompletion：先运行节点自身的校验（如有），再检查
+ * completion.result[agentChoiceField] 是否声明了有效的边 ID。
+ *
+ * 不通过时 reason 中列出所有可选边及其描述，由 PiNodeContext 的
+ * 驳回→重试机制将消息注入 agent 工作流。
+ */
+function createAgentChoiceValidator(
+  edges: Edge[],
+  agentChoiceField: string | undefined,
+  existingValidator?: (
+    result: Record<string, unknown>,
+  ) => { isValid: true } | { isValid: false; reason: string },
+): (result: Record<string, unknown>) => { isValid: true } | { isValid: false; reason: string } {
+  const field = agentChoiceField ?? "chosen_edge_id";
+
+  return (result: Record<string, unknown>) => {
+    // 先跑原始校验
+    if (existingValidator) {
+      const vr = existingValidator(result);
+      if (!vr.isValid) return vr;
+    }
+
+    const chosenId = result[field];
+
+    // 未声明
+    if (typeof chosenId !== "string" || chosenId.trim().length === 0) {
+      const edgeList = edges
+        .map(
+          (e) =>
+            `  • ${e.id} (priority: ${e.priority})${e.to === END ? " → END" : ` → ${String(e.to)}`}\n    ${e.description || "(无描述)"}`,
+        )
+        .join("\n");
+      return {
+        isValid: false,
+        reason: `当前节点使用 agent-choice 路由，请通过 result.${field} 声明选择哪条边。可选边:\n${edgeList}`,
+      };
+    }
+
+    // 边不存在
+    const found = edges.find((e) => e.id === chosenId);
+    if (!found) {
+      const edgeList = edges
+        .map(
+          (e) =>
+            `  • ${e.id} (priority: ${e.priority})${e.to === END ? " → END" : ` → ${String(e.to)}`}\n    ${e.description || "(无描述)"}`,
+        )
+        .join("\n");
+      return {
+        isValid: false,
+        reason: `边 "${chosenId}" 不存在。可选边:\n${edgeList}`,
+      };
+    }
+
+    return { isValid: true };
+  };
+}
+
+/**
+ * 如果节点使用 agent-choice 路由，返回一个包装后的节点，
+ * 其 validateCompletion 被替换为 agent-choice 边选择校验器。
+ * 否则返回原节点。
+ */
+function wrapWithAgentChoiceValidator(
+  graph: Graph,
+  nodeId: string,
+  node: Node,
+): Node {
+  if (node.kind !== "code") return node;
+
+  const routing = graph.routing[nodeId];
+  if (!routing || routing.router.kind !== "agent-choice") return node;
+
+  return {
+    ...node,
+    validateCompletion: createAgentChoiceValidator(
+      routing.edges,
+      routing.agentChoiceField,
+      node.validateCompletion,
+    ),
+  };
+}
 
 /**
  * 节点进入后、execute 之前分派横切机制。

@@ -14,7 +14,8 @@ export interface GraphValidationIssue {
     | "EDGE_TARGET_MISSING"
     | "NODE_ROUTING_MISSING"
     | "DUPLICATE_TOOL_IN_NODE"
-    | "TOOL_NOT_REGISTERED";
+    | "TOOL_NOT_REGISTERED"
+    | "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION";
   message: string;
   path: string;
 }
@@ -64,6 +65,9 @@ export function validateGraph(graph: Graph): GraphValidationIssue[] {
       });
     }
 
+    // agent-choice 路由：边 description 必填校验
+    const isAgentChoice = routing.router.kind === "agent-choice";
+
     for (const edge of routing.edges) {
       // edge.from 必须等于 routing 的 nodeId
       if (edge.from !== nodeId) {
@@ -80,6 +84,15 @@ export function validateGraph(graph: Graph): GraphValidationIssue[] {
           code: "EDGE_TARGET_MISSING",
           message: `边 "${edge.id}" 的 to "${String(edge.to)}" 不存在`,
           path: `routing.${nodeId}.edges[${edge.id}]`,
+        });
+      }
+
+      // agent-choice 路由下每条边必须有非空 description
+      if (isAgentChoice && (!edge.description || edge.description.trim().length === 0)) {
+        issues.push({
+          code: "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION",
+          message: `节点 "${nodeId}" 使用 agent-choice 路由，边 "${edge.id}" 缺少 description。请为每条边声明可读描述，供 agent 决策时参考。`,
+          path: `routing.${nodeId}.edges[${edge.id}].description`,
         });
       }
     }

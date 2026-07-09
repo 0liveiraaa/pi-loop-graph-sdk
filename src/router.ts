@@ -18,14 +18,33 @@ export async function selectEdge(
     case "first-match":
       return matched[0] ?? null;
     case "priority-first":
-      return matched
-        .map((edge, index) => ({ edge, index }))
-        .sort((a, b) => b.edge.priority - a.edge.priority || a.index - b.index)[0]?.edge ?? null;
+      return priorityFirst(matched);
     case "custom":
       return (await routing.router.fn(matched, completion, instance)) ?? null;
-    case "agent-choice":
-      throw new Error("agent-choice 未实现");
+    case "agent-choice": {
+      // 单边匹配 → 无需 agent 选择，直接返回
+      if (matched.length === 1) return matched[0];
+
+      // 从 completion.result 读取 agent 声明的边 ID
+      const field = routing.agentChoiceField ?? "chosen_edge_id";
+      const chosenId = completion.result?.[field];
+
+      if (typeof chosenId === "string") {
+        const edge = matched.find((e) => e.id === chosenId);
+        if (edge) return edge;
+      }
+
+      // 降级：agent 未声明或声明了不存在的边 → priority-first
+      return priorityFirst(matched);
+    }
     default:
       return matched[0] ?? null;
   }
+}
+
+function priorityFirst(matched: Edge[]): Edge | null {
+  return matched
+    .map((edge, index) => ({ edge, index }))
+    .sort((a, b) => b.edge.priority - a.edge.priority || a.index - b.index)[0]
+    ?.edge ?? null;
 }

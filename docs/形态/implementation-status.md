@@ -202,6 +202,53 @@ enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → e
 
 onNodeEnter 是注册钩子的入口——机制在里面用 `ctx.pi.on()` 注册 pi 原生事件，这些事件在 agent 运行期间持续触发。pi 没有 off，回调需自限条件。
 
+### 2.12 agent-choice 路由
+
+agent-choice 路由允许 agent 在 completion 中声明 `chosen_edge_id`，router 据此选择边。
+
+```typescript
+completion.result.chosen_edge_id = "to_discuss";  // agent 自主决策走哪条边
+```
+
+**设计要点**：
+- **不调 LLM**：router 只是从 `completion.result` 读字段，不做任何推理（编排不推理）
+- **CURRENT 段渲染**：projection 在 agent-choice 节点的 CURRENT 段追加 `availableEdges` 列表，含每条边的 `id`、`description`、`priority`、`target`
+- **description 必填**：agent-choice 路由下每条边必须有非空 `description`，`validateGraph` 注册期校验（`AGENT_CHOICE_EDGE_MISSING_DESCRIPTION`）
+- **驳回重试**：agent 未声明 `chosen_edge_id` 或声明了不存在的边 → 利用 `validateCompletion` 驳回机制，reason 中列出所有可选边及描述，触发 agent 重试
+- **降级安全网**：`selectEdge` 在 agent-choice 下仍做 priority-first fallback（防御性，正常路径被 validator 拦截）
+- **单边优化**：只有一条边匹配 guard 时直接返回，不等 agent 声明
+
+**校验注入机制**：
+
+`executeGraph` / `runSubgraphInExtension` 在调用 `execNodeInGraph` 前检测路由策略，若为 agent-choice 则通过 `wrapWithAgentChoiceValidator` 将节点包装：
+
+```typescript
+// 伪代码
+const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
+// effectiveNode.validateCompletion 已合成 agent-choice 边选择校验
+```
+
+`createAgentChoiceValidator` 产出的校验器：
+1. 先跑节点自身的 `validateCompletion`（如有）
+2. 检查 `result.chosen_edge_id` 非空且匹配已知边 ID
+3. 失败时 reason 列出所有可选边：`  • to_archive (priority: 10) → archive_node\n    答对，归档结果`
+
+**Edge 扩展**：
+```typescript
+export interface Edge {
+  // ... 原有字段 ...
+  /** 边的可读描述。agent-choice 路由下必填，渲染给 agent 辅助决策。 */
+  description?: string;
+}
+```
+
+**ProjectionInput 扩展**：
+```typescript
+availableEdges?: Array<{ id: string; description: string; priority: number; target: string }>;
+```
+
+`agentChoiceField` 允许自定义字段名（默认 `"chosen_edge_id"`）。
+
 ---
 
 ## 三、上下文隔离契约
@@ -258,7 +305,7 @@ runSubgraphInExtension 创建 childRuntime：
 | **input 不进 agent 上下文**          | projection 删 input 渲染 + 显式 prompt                  | ✅   |
 | **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`                        | ✅   |
 | **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                        | ✅   |
-| **全局机制（Graph.mechanisms）接线** | `loop-graph-extension.test.ts`                        | ✅   |
+| **agent-choice 路由** | `router.test.ts` + `validate.test.ts` + `projection.test.ts` | ✅ |
 
 ---
 
@@ -266,7 +313,6 @@ runSubgraphInExtension 创建 childRuntime：
 
 | 缺口                         | 说明                                                                                         |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `agent-choice` 路由        | `throw Error` 占位；短期用 `custom`;                                                     |
 | `pi-node-context.callTool` | `throw Error` 占位                                                                         |
 | schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
 | 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
@@ -282,13 +328,12 @@ runSubgraphInExtension 创建 childRuntime：
 | `createAgentExecute(options).tools` 误导      | 已 deprecated，不消费                                                                                       | v0.1.0+stage1   |
 | `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                          | v0.1.0+stage1/2 |
 | 注册期无校验                                    | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查                                            | v0.1.0+stage2   |
-| 400 后僵尸状态                                  | `after_provider_response` 错误回流 + 图终止信号 `sendUserMessage`                                       | v0.1.0+stage4   |
+| `agent-choice` 路由未实现 | agent 通过 `completion.result.chosen_edge_id` 声明边选择；CURRENT 段渲染 `availableEdges`；`description` 注册期必填校验 | v0.1.0+stage5 |
 
 ---
 
 ## 六、后续
 
-- `agent-choice` 路由实现（或标记 stable-unsupported）
 - `pi-node-context.callTool` 实现（等待 pi API 确认）
 - schema helper 工具函数
 - Pi Review Agent `/review-turn` 验证

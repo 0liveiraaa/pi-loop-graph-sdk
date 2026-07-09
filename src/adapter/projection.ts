@@ -4,12 +4,21 @@
 
 import type { ContextFrame, Node } from "../type.js";
 
+export interface EdgeChoice {
+  id: string;
+  description: string;
+  priority: number;
+  target: string;
+}
+
 export interface ProjectionInput {
   messages: MessageEntry[];
   frames: ContextFrame[];
   currentNode: Node | null;
   /** 哨兵标记：customType="loop_graph_boundary" 的 content */
   nodeMarker: string | null;
+  /** agent-choice 路由下可供 agent 选择的边列表，渲染在 CURRENT 段 */
+  availableEdges?: EdgeChoice[];
 }
 
 export interface MessageEntry {
@@ -67,14 +76,14 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
 
   // 当前节点段
   if (currentNode) {
-    result.push(buildNodeInfo(currentNode));
+    result.push(buildNodeInfo(currentNode, input.availableEdges));
   }
 
   result.push(...active);
   return result;
 }
 
-function buildNodeInfo(node: Node): MessageEntry {
+function buildNodeInfo(node: Node, availableEdges?: EdgeChoice[]): MessageEntry {
   const lines: string[] = ["=== CURRENT ==="];
   lines.push(`nodeId: ${node.id}`);
   lines.push(`subGoal: ${node.subGoal}`);
@@ -82,6 +91,17 @@ function buildNodeInfo(node: Node): MessageEntry {
   if (node.kind === "code") {
     if (node.tools?.length) lines.push(`tools: ${node.tools.join(", ")}`);
     if (node.skill) lines.push(`skill: ${node.skill}`);
+  }
+
+  // agent-choice 路由：渲染可用边列表供 agent 决策
+  if (availableEdges && availableEdges.length > 0) {
+    lines.push("");
+    lines.push("availableEdges（请在 __graph_complete__ 的 result.chosen_edge_id 中选择一条）:");
+    for (const e of availableEdges) {
+      const targetLabel = e.target === "Symbol(graph.end)" ? "END" : (e.target || "?");
+      lines.push(`  • ${e.id} (priority: ${e.priority}) → ${targetLabel}`);
+      lines.push(`    ${e.description}`);
+    }
   }
 
   lines.push("completeWith: __graph_complete__({ status, result })");

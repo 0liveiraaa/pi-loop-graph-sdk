@@ -147,4 +147,52 @@ describe("projectMessages 折叠", () => {
       }
     }
   });
+
+  it("CURRENT 段渲染 agent-choice 可用边列表", () => {
+    const out = projectMessages({
+      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
+      frames: [],
+      currentNode: agentNode("node1"),
+      nodeMarker: "__node_boundary__:node1:1",
+      availableEdges: [
+        { id: "to_archive", description: "答对，归档结果", priority: 10, target: "archive_node" },
+        { id: "to_discuss", description: "答错，进入讨论", priority: 10, target: "discuss_node" },
+        { id: "to_end", description: "退出复习", priority: 1, target: "END" },
+      ],
+    });
+
+    const text = joined(out);
+    expect(text).toContain("availableEdges");
+    expect(text).toContain("to_archive");
+    expect(text).toContain("答对，归档结果");
+    expect(text).toContain("to_discuss");
+    expect(text).toContain("答错，进入讨论");
+    expect(text).toContain("chosen_edge_id");
+  });
+
+  it("不传 availableEdges 时不渲染该段（向后兼容）", () => {
+    const out = projectMessages({
+      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
+      frames: [],
+      currentNode: agentNode("node1"),
+      nodeMarker: "__node_boundary__:node1:1",
+    });
+
+    const text = joined(out);
+    expect(text).not.toContain("availableEdges");
+    expect(text).not.toContain("chosen_edge_id");
+  });
+
+  it("空 availableEdges 数组不渲染该段", () => {
+    const out = projectMessages({
+      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
+      frames: [],
+      currentNode: agentNode("node1"),
+      nodeMarker: "__node_boundary__:node1:1",
+      availableEdges: [],
+    });
+
+    const text = joined(out);
+    expect(text).not.toContain("availableEdges");
+  });
 });

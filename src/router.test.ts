@@ -18,12 +18,13 @@ const instance: AgentInstance = {
   scratch: {},
 };
 
-function edge(id: string, priority: number, guard = true): Edge {
+function edge(id: string, priority: number, guard = true, description?: string): Edge {
   return {
     id,
     from: "start",
     to: END,
     priority,
+    description,
     guard: () => guard,
     migrate(_instance, nodeCompletion) {
       return {
@@ -108,13 +109,82 @@ describe("selectEdge", () => {
     ).resolves.toBe(selected);
   });
 
-  it("keeps agent-choice explicit until the strategy is implemented", async () => {
-    await expect(
-      selectEdge(
-        routing([edge("candidate", 1)], { kind: "agent-choice" }),
-        completion,
-        instance,
-      ),
-    ).rejects.toThrow("agent-choice 未实现");
+  describe("agent-choice", () => {
+    it("returns the only matched edge when exactly one passes guard", async () => {
+      const only = edge("only", 10, true, "唯一可用边");
+
+      await expect(
+        selectEdge(
+          routing([only, edge("closed", 1, false, "不会匹配")], { kind: "agent-choice" }),
+          completion,
+          instance,
+        ),
+      ).resolves.toBe(only);
+    });
+
+    it("selects the edge declared by agent in completion.result.chosen_edge_id", async () => {
+      const first = edge("first", 1, true, "低优先级但被选择");
+      const second = edge("second", 10, true, "高优先级但未被选择");
+
+      const withChoice = {
+        ...completion,
+        result: { ...completion.result, chosen_edge_id: "first" },
+      };
+
+      await expect(
+        selectEdge(
+          routing([first, second], { kind: "agent-choice" }),
+          withChoice,
+          instance,
+        ),
+      ).resolves.toBe(first);
+    });
+
+    it("respects custom agentChoiceField name", async () => {
+      const chosen = edge("chosen", 10, true, "被选中");
+      const other = edge("other", 1, true, "未被选中");
+
+      const withCustomField = {
+        ...completion,
+        result: { ...completion.result, my_choice: "chosen" },
+      };
+
+      await expect(
+        selectEdge(
+          { nodeId: "start", edges: [chosen, other], router: { kind: "agent-choice" }, agentChoiceField: "my_choice" },
+          withCustomField,
+          instance,
+        ),
+      ).resolves.toBe(chosen);
+    });
+
+    it("falls back to priority-first when agent does not declare chosen_edge_id", async () => {
+      const low = edge("low", 1, true, "低优先级");
+      const high = edge("high", 10, true, "高优先级");
+
+      await expect(
+        selectEdge(
+          routing([low, high], { kind: "agent-choice" }),
+          completion, // no chosen_edge_id in result
+          instance,
+        ),
+      ).resolves.toBe(high);
+    });
+
+    it("falls back to priority-first when agent declares a non-existent edge id", async () => {
+      const real = edge("real", 10, true, "真实边");
+      const withBadChoice = {
+        ...completion,
+        result: { ...completion.result, chosen_edge_id: "nonexistent" },
+      };
+
+      await expect(
+        selectEdge(
+          routing([real], { kind: "agent-choice" }),
+          withBadChoice,
+          instance,
+        ),
+      ).resolves.toBe(real);
+    });
   });
 });

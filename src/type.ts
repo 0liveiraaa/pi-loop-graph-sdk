@@ -252,12 +252,19 @@ export interface MigrationResult {
  *   1. guard   — 什么时候走这条边（只看 NodeCompletion）
  *   2. migrate — 栈顶层怎么折叠进历史，并可生成下一节点入参
  *   3. to      — 指向哪个节点（或 END 终止）
+ *
+ * description 是边的可读描述，由开发者定义。
+ * 当路由策略为 agent-choice 时 description 必填——
+ * 它会被渲染进 CURRENT 段，供 agent 判断"此时该走哪条边"。
+ * 其他路由策略下 description 可选，仅作文档用途。
  */
 export interface Edge {
   id: string;
   from: string;
   to: string | typeof END;
   priority: number;
+  /** 边的可读描述。agent-choice 路由下必填，渲染给 agent 辅助决策。 */
+  description?: string;
 
   guard(completion: NodeCompletion): boolean;
   migrate(instance: AgentInstance, completion: NodeCompletion): MigrationResult;
@@ -281,6 +288,8 @@ export interface NodeRouting {
   nodeId: string;
   edges: Edge[];
   router: RouterStrategy;
+  /** agent-choice 路由下，从 completion.result 读取边选择的字段名。默认 "chosen_edge_id"。 */
+  agentChoiceField?: string;
 }
 
 // ── 调用契约 ──
