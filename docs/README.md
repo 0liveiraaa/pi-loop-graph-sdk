@@ -42,6 +42,7 @@
 - 想看当前做到哪了 → [实现形态](%E5%BD%A2%E6%80%81/implementation-status.md)
 - 想看设计理念 → [核心设计](%E8%AE%BE%E8%AE%A1/loop-graph-sdk-design.md)
 - 想看术语定义 → [CONTEXT](%E8%AE%BE%E8%AE%A1/CONTEXT.md)
+- 想看 defaultTools 与 skill 节点的行为差异 → [defaultTools 与 skill 节点工具丢失问题记录](%E8%AE%BE%E8%AE%A1/default-tools-skill-gap.md)
 - 想了解接入反馈和修复进度 → [使用反馈](loop-graph-sdk-usage-feedback.md)
 - 想了解 Pi Review Agent 验证计划 → [Review Agent 单题验证](%E8%AE%A1%E5%88%92/2026-07-08_review-agent-single-turn-validation.md)
 - 想看 library boundary 演进计划 → [SDK Boundary Evolution Plan](%E8%AE%A1%E5%88%92/2026-07-08_sdk-library-boundary-evolution-plan.md)

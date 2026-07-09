@@ -8,11 +8,7 @@
     ".": "./src/index.ts",
     "./extension": "./src/adapter/extension.ts"
   },
-  "pi": {
-    "extensions": [
-      "./src/adapter/extension.ts"
-    ]
-  },
+  "pi": {},
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
