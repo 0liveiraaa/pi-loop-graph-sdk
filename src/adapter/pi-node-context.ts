@@ -34,6 +34,25 @@ export class PiNodeContext implements NodeContext {
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
     this.signal = new AbortController().signal;
+
+    // ── Provider 错误回流通道（单一监听器，生命周期跟实例走）──
+    // pi 没有 off，监听器只增不减。挪到构造函数注册一次，
+    // 回调读实例当前的 activeRunId/activeResolve，避免闭包泄漏。
+    // 排除 429（限流，pi 内部可能重试成功）。
+    pi.on("after_provider_response", (event, _ctx) => {
+      if (
+        event.status >= 400 &&
+        event.status !== 429 &&
+        this.activeRunId !== 0 &&
+        this.activeResolve
+      ) {
+        this.activeResolve({
+          nodeId: this.currentNodeId ?? "unknown",
+          status: "failed",
+          result: { reason: `Provider error: HTTP ${event.status}` },
+        });
+      }
+    });
   }
 
   // ── NodeContext 接口 ──────────────────────────────────
@@ -60,6 +79,7 @@ export class PiNodeContext implements NodeContext {
       this.activeResolve = (c: NodeCompletion) => {
         clearTimeout(timeout);
         this.activeRunId = 0;
+        this.activeResolve = null;
         res(c);
       };
     });
@@ -129,7 +149,18 @@ export class PiNodeContext implements NodeContext {
   }
 
   onAgentEnd(): void {
-    if (this.activeRunId === 0) return;
+    if (this.activeRunId === 0) {
+      // 图已终止，agent 仍在跑 → 追加消息告知
+      this.pi.sendMessage(
+        {
+          customType: "loop_graph_dead",
+          content: "[系统] 当前图已终止，你的后续操作不会被接收。",
+          display: false,
+        },
+        {},
+      );
+      return;
+    }
     const resolve = this.activeResolve;
     if (!resolve) return;
 

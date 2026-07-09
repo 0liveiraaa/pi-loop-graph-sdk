@@ -6,7 +6,7 @@
 1. 设计/CONTEXT.md                  ← 术语表，先读
 2. 设计/loop-graph-sdk-design.md    ← 核心设计
 3. 设计/entry-message-format.md     ← 入口消息格式
-4. 设计/developer-guide.md          ← 开发者指南（怎么用）
+4. 形态/developer-guide.md          ← 开发者指南（怎么用）
 5. 形态/implementation-status.md    ← 当前实现状态
 6. 设计/communication-design.md     ← 多 agent 通讯（远期设计，可选）
 ```
@@ -38,7 +38,7 @@
 
 ## 快速链接
 
-- 想了解怎么用 → [开发者指南](%E8%AE%BE%E8%AE%A1/developer-guide.md)
+- 想了解怎么用 → [开发者指南](%E5%BD%A2%E6%80%81/developer-guide.md)
 - 想看当前做到哪了 → [实现形态](%E5%BD%A2%E6%80%81/implementation-status.md)
 - 想看设计理念 → [核心设计](%E8%AE%BE%E8%AE%A1/loop-graph-sdk-design.md)
 - 想看术语定义 → [CONTEXT](%E8%AE%BE%E8%AE%A1/CONTEXT.md)

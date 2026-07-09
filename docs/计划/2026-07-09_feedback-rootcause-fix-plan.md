@@ -3,6 +3,12 @@
 > 基于 `docs/审查/loop-graph-sdk-feedback.md` 根因研判 + pi API 逐接口核实。
 > v1 被否决：阶段 3/4 对 pi API 的假设不成立（role 字段、turn_error 事件、自建 skill loader）。
 > v2 所有方案落在真实 pi API 上。
+>
+> ✅ **全部阶段已于 2026-07-09 实施完成**。实际落地方案与计划有以下差异：
+>   - 阶段 3 skill 追加从 `sendUserMessage` 改为 `sendMessage({ display: false })`，避免触发额外 turn
+>   - 阶段 4 `after_provider_response` 监听器从 `runAgent` 移至构造函数、单例注册，消除泄漏
+>   - 阶段 4 status 判据收窄为 `>= 400 && !== 429`，排除限流误杀
+>   - 阶段 4 `activeResolve` wrapper 补了 `this.activeResolve = null`
 
 ---
 

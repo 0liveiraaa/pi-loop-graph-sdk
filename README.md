@@ -112,7 +112,7 @@ src/
 |------|------|
 | [CONTEXT](docs/%E8%AE%BE%E8%AE%A1/CONTEXT.md) | 术语表 |
 | [核心设计](docs/%E8%AE%BE%E8%AE%A1/loop-graph-sdk-design.md) | 心智模型与关键设计决策 |
-| [开发者指南](docs/%E8%AE%BE%E8%AE%A1/developer-guide.md) | SDK 使用指南 |
+| [开发者指南](docs/%E5%BD%A2%E6%80%81/developer-guide.md) | SDK 使用指南 |
 | [实现形态](docs/%E5%BD%A2%E6%80%81/implementation-status.md) | 当前实现状态 |
 
 ## License

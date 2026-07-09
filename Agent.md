@@ -77,8 +77,10 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 | 查看待实施的能力计划和验证计划                   | `docs/计划/`                                            |
 | 查看 SDK 使用反馈、已知问题和处理建议            | `docs/审查/loop-graph-sdk-feedback.md`                  |
 | 了解 defaultTools 与 skill 节点的行为差异        | `docs/审查/default-tools-skill-gap.md`                  |
+| 了解反馈根因修复计划和状态                       | `docs/计划/2026-07-09_feedback-rootcause-fix-plan.md`  |
+| 阅读/修改源代码（从类型定义开始）                | `src/type.ts` → `src/tools-resolve.ts` → `src/runtime.ts` → `src/adapter/` |
+| 工具解析单一真相源（去重 + 排序）                | `src/tools-resolve.ts`                                   |
 | 追溯历史设计/已废弃计划                          | `docs/归档/`                                            |
-| 阅读/修改源代码（从类型定义开始）                | `src/type.ts` → `src/runtime.ts` → `src/adapter/` |
 
 ### 文档生命周期
 

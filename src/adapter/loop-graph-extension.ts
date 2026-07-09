@@ -305,13 +305,17 @@ export function createLoopGraphExtension(
         };
       }
     } catch (error) {
-      debugLog.graphError(
-        graph.id,
-        error instanceof Error ? error.message : String(error),
+      const reason = error instanceof Error ? error.message : String(error);
+      debugLog.graphError(graph.id, reason);
+
+      // 向 agent 注入终止信号，让机制层的事被 agent 感知
+      piInner.sendUserMessage(
+        `[系统] 图 "${graph.id}" 因错误意外终止：${reason}。当前节点已失效，请停止推理。`,
       );
+
       piInner.sendMessage({
         customType: "loop_graph_error",
-        content: `图运行错误: ${error instanceof Error ? error.message : String(error)}`,
+        content: `图运行错误: ${reason}`,
         display: true,
       });
     } finally {
@@ -468,9 +472,14 @@ export function createLoopGraphExtension(
 
     try {
       const content = fs.readFileSync(skillFile, "utf-8");
-      piInner.sendUserMessage(
-        `[skill: ${node.skill}]\n\n${content}`,
-      );
+      // 用 sendMessage 追加入消息流，不触发 turn。
+      // sendUserMessage 语义是"发起一轮"，会触发额外 turn，
+      // 在 runAgent 之前调用会造成 turn 竞跑。
+      piInner.sendMessage({
+        customType: "loop_graph_skill",
+        content: `[skill: ${node.skill}]\n\n${content}`,
+        display: false,
+      });
     } catch (err) {
       debugLog.graphError(
         `skill:${node.skill}`,
