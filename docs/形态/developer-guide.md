@@ -52,6 +52,7 @@ export default function myExtension(pi) {
 ```
 
 **关键区别**：
+
 - 方式 A：SDK 自带的 debug extension 入口，等价于 `createLoopGraphExtension(pi, { demoGraphs: true })`
 - 方式 B：业务代码导入 library API，创建自己的运行时实例，demo graphs 不注册
 
@@ -722,11 +723,11 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项 | 当前策略 |
-| --- | --- |
-| `callTool` | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。 |
-| `agent-choice` 路由 | 暂缓 / experimental。短期使用 `priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。 |
-| 多 skill | 当前只有 `node.skill?: string`；下一阶段引入 `graph.skills + node.skills`，运行时合并。 |
-| schema / 泛型类型 | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。 |
-| session 续跑 | 当前不持久化帧栈，图运行中断后需重新开始。 |
-| 声明式编译器 | 暂不开发，所有定制点为函数。 |
+| 项                    | 当前策略                                                                                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `callTool`          | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。                              |
+| `agent-choice` 路由 | 暂缓 / experimental。短期使用`priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。       |
+| 多 skill              | 当前只有`node.skill?: string`；下一阶段引入 `graph.skills + node.skills`，运行时合并。                                                                              |
+| schema / 泛型类型     | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。 |
+| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                              |
+| 声明式编译器          | 暂不开发，所有定制点为函数。                                                                                                                                            |
