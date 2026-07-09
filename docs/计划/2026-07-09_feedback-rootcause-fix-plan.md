@@ -146,32 +146,37 @@ pi 自动扫描目录、提取 frontmatter、在系统提示中以 XML 渐进式
 
 #### 3.2.2 节点进入时追加完整 skill 内容
 
-当节点声明了 `node.skill`，SDK 在**进入节点时**读取对应的 `SKILL.md`，将其完整内容**追加**到消息流中——和 COMPLETED / CURRENT 段同样的追加模式：
+当节点声明了 `node.skill`，SDK 在主循环中读取对应的 `SKILL.md`，用 `sendUserMessage` 追加到消息流。
 
-- 读取文件发生在主循环的 `setNodeToolsForInstance` 之后、`sendMessage(marker)` 之前
-- 将 skill 内容作为一条独立的 `sendUserMessage` 追加，或拼入 CURRENT 段的 `skill:` 区域
-- 不动 system prompt，不走 `before_agent_start`
+**关键：追加顺序必须在哨兵之后**，否则会被 projection 的三段切分（head / frames / active）切到 head 里，污染全局上下文。正确的进节点顺序是：
 
-**skill 路径解析**：`node.skill = "review-question"` → 在 `skillBasePath` 下查找 `review-question/SKILL.md`。
+```
+setNodeToolsForInstance → sendMessage(marker 哨兵) → sendUserMessage(skillContent) → runAgent(prompt)
+```
+
+skill 消息落在哨兵之后的 active 段，属于当前节点的工作区。节点完成后，该段随节点 ReAct 一起被帧摘要折叠，不泄漏到下一节点。
+
+**skill 路径解析**：`node.skill = "review-question"` → 在 `skillBasePath` 下查找 `review-question/SKILL.md`。文件不存在时，在日志中警告但不阻塞节点执行。
+
+**为什么选 `sendUserMessage` 而不是拼入 CURRENT 段**：
+
+- **守住 projection 的纯函数契约**。`projectMessages` 是无 IO 的纯函数，在 CURRENT 段塞文件内容意味着要么读磁盘（破坏可测性），要么把全文透传进 `ProjectionInput`（污染投影输入契约）。`sendUserMessage` 让 skill 内容作为普通消息进入 messages 流，projection 照常处理，边界不动。
+- **符合"追加不注入"原则**。skill 内容作为一次性追加到消息流，和 COMPLETED / CURRENT 同构。
+- **KV cache 友好**。skill 全文仅在进节点时追加一次，成为历史前缀，后续 turn 命中缓存。拼入 CURRENT 段会随每次投影重组而漂移。
+- **职责归位**。读文件是运行时 IO，属于主循环的活；重组消息视图是 projection 的活。各司其职。
 
 #### 3.2.3 修改 type 注释
 
 `type.ts` 中关于 skill 的注释从"落地为将 skill 文本注入系统提示"改为：
 
 ```
-skill 关联的 skill 名称。节点进入时，对应的 SKILL.md 完整内容被追加到消息流中
-（不动 system prompt），辅助 agent 完成本阶段任务。
+skill 关联的 skill 名称。节点进入时，对应的 SKILL.md 完整内容通过 sendUserMessage
+追加到消息流中（不动 system prompt），辅助 agent 完成本阶段任务。
 ```
 
 #### 3.2.4 projection.ts 的 CURRENT 段调整
 
-`skill: xxx` 行保留（告诉 agent 用哪个 skill），但不再只放一个名字——改为**追加完整 skill 内容**作为 CURRENT 段的一部分，或作为 CURRENT 段之前的独立消息块。
-
-**具体实现需在两处选择**：
-- 选项 1：projection 的 CURRENT 段中，`skill:` 行改为 `skill (完整内容):` + 缩进全文
-- 选项 2：在主循环中，进入节点时 `sendUserMessage(skillContent)` 作为独立消息，projection 中 `skill:` 仅保留名称
-
-选项 2 更干净——技能内容是运行时追加的，不混入投影逻辑。推荐选项 2。
+`skill: xxx` 行保留（告知 agent 关联哪个 skill），仅输出名称。完整 skill 内容由主循环的 `sendUserMessage` 提前追加，projection 不负责。
 
 ---
 
@@ -260,5 +265,5 @@ onAgentEnd(): void {
 
 ## 已决策项
 
-- **skill**：走方案 A — 接入 pi 原生 skill 系统（`resources_discover` 注册路径）。但不动 system prompt，skill 内容通过消息流追加。
+- **skill**：走方案 A — 接入 pi 原生 skill 系统（`resources_discover` 注册路径）。但不动 system prompt，skill 内容通过 `sendUserMessage` 追加到消息流。追加在哨兵之后，属于当前节点 active 段，离开节点后随 ReAct 折叠。projection 保持纯函数，`skill:` 行仅保留名称。
 - **system prompt**：写入宪法 — SDK 永远不修改 system prompt。上下文操作只在消息流追加侧进行。

@@ -11,6 +11,7 @@
 // ============================================================
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { validateGraphTools } from "./validate.js";
 import type { Entry, Graph } from "./type.js";
 
 export type ExecuteGraph = (
@@ -33,10 +34,21 @@ export class GraphRegistry {
     private readonly executeGraph: ExecuteGraph,
   ) {}
 
-  /** 注册一张图。有 invocation 的图自动注册为 pi 命令 + 工具。 */
-  registerGraph(graph: Graph): void {
+  /** 注册一张图。有 invocation 的图自动注册为 pi 命令 + 工具。
+   *
+   * @param defaultTools 全局默认工具列表，用于校验节点工具配置。 */
+  registerGraph(graph: Graph, defaultTools: string[] = []): void {
     if (this.graphs.has(graph.id)) {
       throw new Error(`图 "${graph.id}" 已注册`);
+    }
+
+    // 注册期校验：节点内工具重复
+    const toolIssues = validateGraphTools(graph, defaultTools);
+    if (toolIssues.length > 0) {
+      throw new Error(
+        `图 "${graph.id}" 工具校验失败:\n` +
+          toolIssues.map((i) => `  ${i.path}: ${i.message}`).join("\n"),
+      );
     }
 
     this.graphs.set(graph.id, graph);

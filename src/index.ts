@@ -31,7 +31,7 @@ export * from "./type.js";
 // ── 运行时与路由 ──
 export { GraphRuntime } from "./runtime.js";
 export type { CallFrame } from "./runtime.js";
-export { validateGraph, assertValidGraph } from "./validate.js";
+export { validateGraph, assertValidGraph, validateGraphTools } from "./validate.js";
 export type { GraphValidationIssue } from "./validate.js";
 export { selectEdge } from "./router.js";
 

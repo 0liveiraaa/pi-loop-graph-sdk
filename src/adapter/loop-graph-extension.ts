@@ -29,7 +29,7 @@ import type {
 } from "../type.js";
 import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
-import { assertValidGraph } from "../validate.js";
+import { assertValidGraph, validateGraphTools } from "../validate.js";
 import { selectEdge } from "../router.js";
 import { projectMessages } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
@@ -43,6 +43,9 @@ import { chainGraph } from "../graphs/chain-graph.js";
 import { subgraphGraph } from "../graphs/subgraph-graph.js";
 import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 const BOUNDARY_TYPE = "loop_graph_boundary";
 const completeToolRegistered = new WeakSet<object>();
 
@@ -55,6 +58,9 @@ export interface LoopGraphExtensionOptions {
   /** 节点内默认可用工具列表。为空时只保留 read + __graph_complete__。
    *  业务 extension 可按需传入全局工具。 */
   defaultTools?: string[];
+  /** skill 目录的根路径。node.skill 的 SKILL.md 在此路径下按 `{name}/SKILL.md` 查找。
+   *  默认 `process.cwd() + "/skills"`。 */
+  skillBasePath?: string;
 }
 
 export interface LoopGraphExtension {
@@ -81,6 +87,10 @@ export function createLoopGraphExtension(
   let activeRuntime: GraphRuntime | null = null;
   let activeNodeContext: PiNodeContext | null = null;
   const defaultTools = options.defaultTools ?? [];
+  const skillBasePath = options.skillBasePath ?? path.join(process.cwd(), "skills");
+
+  /** 已完成工具存在性校验的图 ID（首次 executeGraph 时校验一次） */
+  const toolValidated = new Set<string>();
 
   // ── 实例级图注册表（替代原全局 graphs Map）──
 
@@ -140,6 +150,14 @@ export function createLoopGraphExtension(
     ctx.ui.notify("Loop Graph Extension 已加载", "info");
   });
 
+  // 注册 skill 路径（pi 原生 skill 系统扫描）
+  pi.on("resources_discover", (_event) => {
+    if (fs.existsSync(skillBasePath)) {
+      return { skillPaths: [skillBasePath] };
+    }
+    return {};
+  });
+
   // ── 注册 demo 图（仅在 debug/demo 模式）──
 
   if (options.demoGraphs) {
@@ -158,6 +176,20 @@ export function createLoopGraphExtension(
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
   ): Promise<void> {
     assertValidGraph(graph);
+
+    // 首次执行：校验工具存在性（pi.getAllTools() 此时已包含所有已注册工具）
+    if (!toolValidated.has(graph.id)) {
+      const allTools = piInner.getAllTools();
+      const registeredNames = new Set(allTools.map((t) => t.name));
+      const issues = validateGraphTools(graph, defaultTools, registeredNames);
+      if (issues.length > 0) {
+        throw new Error(
+          `图 "${graph.id}" 工具存在性校验失败:\n` +
+            issues.map((i) => `  ${i.path}: ${i.message}`).join("\n"),
+        );
+      }
+      toolValidated.add(graph.id);
+    }
 
     const runtime = new GraphRuntime();
     const nodeContext = new PiNodeContext(piInner);
@@ -204,6 +236,9 @@ export function createLoopGraphExtension(
 
         const marker = runtime.nextMarker(nodeId);
         piInner.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
+
+        // 追加 skill 内容（哨兵之后，属于本节点 active 段，离开后随 ReAct 折叠）
+        appendSkillContent(piInner, node);
 
         runtime.enterNode(nodeId, marker, input);
         debugLog.enterNode(
@@ -291,7 +326,7 @@ export function createLoopGraphExtension(
   // ── 返回公开 API ────────────────────────────────────────
 
   return {
-    registerGraph: (graph) => registry.registerGraph(graph),
+    registerGraph: (graph) => registry.registerGraph(graph, defaultTools),
     // 公开接口只暴露 (graph, trigger)，内部 executeGraph 已有 pi
     executeGraph(graph, trigger) {
       return executeGraph(pi, graph, trigger);
@@ -334,6 +369,9 @@ export function createLoopGraphExtension(
 
         const marker = childRt.nextMarker(nodeId);
         piInner.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
+
+        // 追加 skill 内容（哨兵之后，属于本节点 active 段）
+        appendSkillContent(piInner, node);
 
         childRt.enterNode(nodeId, marker, input);
         debugLog.enterNode(
@@ -408,6 +446,37 @@ export function createLoopGraphExtension(
   function setNodeToolsForInstance(piInner: ExtensionAPI, node: Node): void {
     const nodeTools = node.kind === "code" ? (node.tools ?? []) : [];
     piInner.setActiveTools(resolveNodeTools(defaultTools, nodeTools));
+  }
+
+  /**
+   * 节点声明了 skill 时，读取 SKILL.md 追加到消息流。
+   * 必须在哨兵之后调用，确保内容属于当前节点的 active 段。
+   */
+  function appendSkillContent(piInner: ExtensionAPI, node: Node): void {
+    if (node.kind !== "code" || !node.skill) return;
+
+    const skillDir = path.join(skillBasePath, node.skill);
+    const skillFile = path.join(skillDir, "SKILL.md");
+
+    if (!fs.existsSync(skillFile)) {
+      debugLog.graphError(
+        `skill:${node.skill}`,
+        `SKILL.md 未找到: ${skillFile}`,
+      );
+      return;
+    }
+
+    try {
+      const content = fs.readFileSync(skillFile, "utf-8");
+      piInner.sendUserMessage(
+        `[skill: ${node.skill}]\n\n${content}`,
+      );
+    } catch (err) {
+      debugLog.graphError(
+        `skill:${node.skill}`,
+        `读取失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }
 

@@ -128,7 +128,9 @@ export interface AgentRunRequest {
  *
  * code 节点的执行配置声明在 Node 自身：
  *   - subGoal     本阶段的子目标（特殊的"构造函数"机制，必须存在）
- *   - skill       关联的 skill 路径（落地为将 skill 文本注入系统提示）
+ *   - skill       关联的 skill 名称。节点进入时，对应 SKILL.md 的完整内容
+ *                 通过 sendUserMessage 追加到消息流中（不动 system prompt），
+ *                 辅助 agent 完成本阶段任务。
  *   - tools       本阶段工具白名单
  *   - mechanisms  局部横切机制，叠加在全局机制之上
  *

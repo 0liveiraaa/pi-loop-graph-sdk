@@ -22,6 +22,7 @@ function fakePi() {
     }),
     setActiveTools: vi.fn(),
     getActiveTools: vi.fn(() => ["read", "__graph_complete__"]),
+    getAllTools: vi.fn(() => [{ name: "read" }, { name: "__graph_complete__" }]),
     sendMessage: vi.fn((_message: any, options?: { triggerTurn?: boolean }) => {
       if (!options?.triggerTurn) return;
       queueMicrotask(() => {
@@ -212,6 +213,13 @@ describe("createLoopGraphExtension", () => {
   describe("默认工具", () => {
     it("执行节点时合并 defaultTools 和节点 tools", async () => {
       const pi = fakePi();
+      // 注册期 + 首次执行校验需要这些工具在 getAllTools 中
+      (pi.getAllTools as any).mockReturnValue([
+        { name: "read" },
+        { name: "__graph_complete__" },
+        { name: "global_tool" },
+        { name: "node_tool" },
+      ]);
       const loop = createLoopGraphExtension(pi, { defaultTools: ["global_tool"] });
       const graph = minimalGraph("default_tools");
       graph.nodes.start = {
@@ -243,6 +251,98 @@ describe("createLoopGraphExtension", () => {
 
       loop.registerGraph(g);
       expect(() => loop.registerGraph(g)).toThrow('图 "dup" 已注册');
+    });
+
+    it("注册时检测节点内重复工具名并抛错", () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+
+      const nodeWithDupTools: Node = {
+        kind: "code",
+        id: "bad",
+        subGoal: "bad node",
+        tools: ["tool_a", "tool_a"],
+        async execute() {
+          return { nodeId: "bad", status: "ok", result: {} };
+        },
+      };
+
+      const g: Graph = {
+        id: "dup_tools",
+        goal: "dup tools",
+        entries: [{ id: "e", guard: () => true, startNodeId: "bad" }],
+        nodes: { bad: nodeWithDupTools },
+        routing: {
+          bad: {
+            nodeId: "bad",
+            edges: [{
+              id: "done",
+              from: "bad",
+              to: END,
+              priority: 1,
+              guard: () => true,
+              migrate(_i, c) {
+                return { frame: { nodeId: c.nodeId, status: "ok", summary: "done", result: {} } };
+              },
+            }],
+            router: { kind: "first-match" },
+          },
+        },
+      };
+
+      expect(() => loop.registerGraph(g)).toThrow(/DUPLICATE_TOOL_IN_NODE|工具校验失败/);
+    });
+
+    it("首次 executeGraph 时校验未注册工具并抛错", async () => {
+      const pi = fakePi();
+      // getAllTools 只返回 read 和 __graph_complete__
+      pi.getAllTools = vi.fn(() => [
+        { name: "read" },
+        { name: "__graph_complete__" },
+      ]);
+
+      const loop = createLoopGraphExtension(pi);
+
+      const nodeWithBadTool: Node = {
+        kind: "code",
+        id: "bad",
+        subGoal: "bad node",
+        tools: ["unregistered_tool"],
+        async execute() {
+          return { nodeId: "bad", status: "ok", result: {} };
+        },
+      };
+
+      const g: Graph = {
+        id: "unreg",
+        goal: "unregistered",
+        entries: [{ id: "e", guard: () => true, startNodeId: "bad" }],
+        nodes: { bad: nodeWithBadTool },
+        routing: {
+          bad: {
+            nodeId: "bad",
+            edges: [{
+              id: "done",
+              from: "bad",
+              to: END,
+              priority: 1,
+              guard: () => true,
+              migrate(_i, c) {
+                return { frame: { nodeId: c.nodeId, status: "ok", summary: "done", result: {} } };
+              },
+            }],
+            router: { kind: "first-match" },
+          },
+        },
+      };
+
+      // 注册期不报错（工具可能尚未注册）
+      loop.registerGraph(g);
+
+      // 首次执行时报错
+      await expect(
+        loop.executeGraph(g, { source: "command", args: "" }),
+      ).rejects.toThrow(/TOOL_NOT_REGISTERED|工具存在性校验失败/);
     });
   });
 
