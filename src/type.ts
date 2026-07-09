@@ -3,6 +3,8 @@
 // ============================================================
 //
 //  栈式子图编排
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 //
 //    AgentInstance 持有一个有序帧栈（frames），每进入一个节点就在栈上生长一层，
 //    离开节点时边负责折叠栈顶层。栈只增不减，历史不可篡改。
@@ -182,33 +184,48 @@ export type Node =
 // ── 机制 ──
 
 /**
- * Mechanism 运行时上下文。check/apply 通过它读取节点、入参与实例状态。
+ * Mechanism 运行时上下文。onNodeEnter 通过它拿到 pi、节点、入参与实例状态，
+ * 并可向 agent 消息流追加上下文。
  *
- *   instance  — 当前 AgentInstance（apply 可写 instance.scratch）
- *   node      — 当前节点
- *   input     — 代码侧一次性入参（apply 据此做数据预处理）
+ *   pi             — 全部 pi 能力（注册原生事件、改工具集、发消息等）
+ *   instance       — 当前 AgentInstance（可写 instance.scratch）
+ *   node           — 当前节点
+ *   input          — 代码侧一次性入参
+ *   appendContext  — 向 agent 消息流追加内容（append-only，不触发 turn）。
+ *
+ * appendContext 是 mechanism 作用于 agent 上下文的唯一合法通道：
+ *   · 追加发生在当前节点哨兵之后，属于本节点 active 段，离开节点后随
+ *     ReAct 一起折叠为帧摘要——天然隔离，不泄漏到下一节点。
+ *   · 遵循原则 7「追加不注入」：不改 system prompt，只在消息流侧追加。
  */
 export interface MechanismContext {
+  pi: ExtensionAPI;
   instance: AgentInstance;
   node: Node;
   input: NodeInput;
+  appendContext(content: string): void;
 }
 
 /**
- * 横切面基础设施。声明式，框架在节点进入后、execute 之前自动分派：
- * 对每个 mechanism 先 check，通过则 await apply。
+ * 横切机制。框架在节点进入后、execute 之前自动分派 onNodeEnter。
+ *
+ * onNodeEnter 是注册 pi 原生事件的入口——机制在里面用 ctx.pi.on() 注册
+ * tool_result、turn_start、before_provider_request 等事件，这些事件在
+ * agent 运行期间持续触发。pi 没有 off，回调需自限（读 ctx.instance.scratch
+ * 或 ctx.node.id 判断是否仍在当前节点）。
  *
  * 全局机制（Graph.mechanisms → AgentInstance.mechanisms）跨节点持续生效；
  * 局部机制（Node.mechanisms）仅在本阶段叠加到全局之上。
  *
- * apply 的唯一合法产出落点是 ctx.instance.scratch（见 AgentInstance.scratch
- * 契约）。不得写 frames/background，不得依赖闭包/模块变量传递跨节点状态。
- * apply 抛错统一记日志后继续（不中止节点）。
+ * 两个合法产出通道：
+ *   · ctx.instance.scratch —— 代码侧横切工作状态（见 AgentInstance.scratch）
+ *   · ctx.appendContext()  —— 向 agent 消息流追加上下文（见 MechanismContext）
+ * 不得写 frames/background，不得依赖闭包/模块变量传递跨节点状态。
+ * onNodeEnter 抛错统一记日志后继续（不中止节点）。
  */
 export interface Mechanism {
   name: string;
-  check(ctx: MechanismContext): boolean;
-  apply(ctx: MechanismContext): Promise<void>;
+  onNodeEnter?(ctx: MechanismContext): Promise<void>;
 }
 
 // ── 边 ──

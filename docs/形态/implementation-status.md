@@ -177,6 +177,31 @@ export function createLoopGraphExtension(pi, options?) {
 [系统] 图 "xxx" 因错误意外终止：{reason}。当前节点已失效，请停止推理。
 ```
 
+### 2.11 mechanism 运行时
+
+Runtime 在节点进入后、`execute` 之前自动分派 onNodeEnter：
+
+```
+enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → execute
+```
+
+- `Graph.mechanisms` 在 `pushGraph` 时写入 `AgentInstance.mechanisms`，跨节点持续生效。
+- `Node.mechanisms` 只在当前节点叠加。
+- 每个 mechanism 若定义了 `onNodeEnter`，串行 `await onNodeEnter(ctx)`。
+- `onNodeEnter` 抛错统一记 debug log 后继续，不中止节点。
+
+`MechanismContext` 提供 pi 全部能力 + 两个显式作用通道：
+
+| 成员 | 用途 |
+|------|------|
+| `ctx.pi` | 全部 pi 能力：注册 `tool_result`、`turn_start`、`before_provider_request` 等原生事件；改工具集；发消息 |
+| `ctx.instance` | 当前 AgentInstance（可写 `instance.scratch`） |
+| `ctx.node` | 当前节点 |
+| `ctx.input` | 代码侧一次性入参 |
+| `ctx.appendContext(content)` | 向 agent 消息流追加（`sendMessage({ customType: "loop_graph_mechanism", display: false })`），不触发额外 turn，落点在本节点 active 段 |
+
+onNodeEnter 是注册钩子的入口——机制在里面用 `ctx.pi.on()` 注册 pi 原生事件，这些事件在 agent 运行期间持续触发。pi 没有 off，回调需自限条件。
+
 ---
 
 ## 三、上下文隔离契约
@@ -231,7 +256,8 @@ runSubgraphInExtension 创建 childRuntime：
 | **after_provider_response 错误回流** | 代码审查（构造函数单一监听）                            | ✅   |
 | **图终止信号注入 agent**             | 代码审查（`executeGraph` catch）                      | ✅   |
 | **input 不进 agent 上下文**          | projection 删 input 渲染 + 显式 prompt                  | ✅   |
-| **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`（4 条）                | ✅   |
+| **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`                        | ✅   |
+| **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                        | ✅   |
 | **全局机制（Graph.mechanisms）接线** | `loop-graph-extension.test.ts`                        | ✅   |
 
 ---

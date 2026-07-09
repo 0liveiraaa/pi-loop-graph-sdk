@@ -251,8 +251,8 @@ export function createLoopGraphExtension(
         );
         nodeContext.setCurrentNodeId(nodeId);
 
-        // 横切机制：节点进入后、execute 之前分派（预处理 scratch 等）
-        await applyMechanisms(runtime.topInstance!, node, input);
+        // 横切机制：节点进入后、execute 之前分派（预处理 scratch / 追加上下文）
+        await applyMechanisms(piInner, runtime.topInstance!, node, input);
 
         const completion = await execNodeInGraph(
           piInner,
@@ -392,7 +392,7 @@ export function createLoopGraphExtension(
         childNc.setCurrentNodeId(nodeId);
 
         // 横切机制：子图节点同样在进入后、execute 之前分派
-        await applyMechanisms(childRt.topInstance!, node, input);
+        await applyMechanisms(piInner, childRt.topInstance!, node, input);
 
         const completion = await execNodeInGraph(
           piInner,
@@ -503,10 +503,14 @@ export function createLoopGraphExtension(
  * 节点进入后、execute 之前分派横切机制。
  *
  * 顺序：全局机制（instance.mechanisms）→ 局部机制（node.mechanisms）。
- * 每个 mechanism 先 check，通过则 await apply（数据预处理必须先于 execute
- * 完成，故串行 await）。apply 抛错统一记日志后继续，不中止节点。
+ * 每个 mechanism 若有 onNodeEnter，则 await 调用，串行保证数据预处理
+ * 先于 execute 完成。抛错统一记日志后继续，不中止节点。
+ *
+ * 必须在哨兵之后调用：appendContext 追加的内容才会落在本节点 active 段，
+ * 离开节点后随 ReAct 折叠，不泄漏到下一节点。
  */
 async function applyMechanisms(
+  pi: ExtensionAPI,
   instance: AgentInstance,
   node: Node,
   input: NodeInput,
@@ -517,12 +521,19 @@ async function applyMechanisms(
   ];
   if (mechanisms.length === 0) return;
 
-  const ctx: MechanismContext = { instance, node, input };
+  const appendContext = (content: string): void => {
+    pi.sendMessage({
+      customType: "loop_graph_mechanism",
+      content,
+      display: false,
+    });
+  };
+
+  const ctx: MechanismContext = { pi, instance, node, input, appendContext };
   for (const m of mechanisms) {
+    if (!m.onNodeEnter) continue;
     try {
-      if (m.check(ctx)) {
-        await m.apply(ctx);
-      }
+      await m.onNodeEnter(ctx);
     } catch (err) {
       debugLog.graphError(
         `mechanism:${m.name}`,

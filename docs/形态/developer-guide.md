@@ -173,6 +173,7 @@ interface Graph {
   entries: Entry[];                      // 入口列表
   nodes: Record<string, Node>;           // 节点集合
   routing: Record<string, NodeRouting>;  // 每个节点的路由配置
+  mechanisms?: Mechanism[];              // 全局横切机制，跨节点生效
 }
 ```
 
@@ -221,6 +222,95 @@ type Node =
 | `kind: "code"` 有 skill/tools | `createAgentExecute()` 工厂 | 调 execute → 内部调 runAgent → LLM 推理 |
 | `kind: "code"` 纯逻辑         | 自定义函数                    | 调 execute → 直接返回 NodeCompletion     |
 | `kind: "graph"`               | 不提供                        | 创建子 Runtime 委托子图                   |
+
+### Mechanism（横切机制）
+
+Mechanism 是**代码侧 hooks 的注册入口**。框架在节点进入后自动调用 `onNodeEnter`，机制在里面注册 pi 原生事件——这些事件在 agent 运行期间持续触发。
+
+```typescript
+interface MechanismContext {
+  pi: ExtensionAPI;                              // 全部 pi 能力
+  instance: AgentInstance;                       // 当前实例（scratch 可写）
+  node: Node;                                    // 当前节点
+  input: NodeInput;                              // 代码侧入参
+  appendContext(content: string): void;           // 向 agent 消息流追加
+}
+
+interface Mechanism {
+  name: string;
+  onNodeEnter?(ctx: MechanismContext): Promise<void>;
+}
+```
+
+执行顺序：
+
+```text
+enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → execute
+```
+
+规则：
+
+- 全局机制写在 `Graph.mechanisms`，跨节点持续生效。
+- 局部机制写在 `Node.mechanisms`，只在当前节点叠加。
+- `onNodeEnter` 串行 await；抛错记日志后继续，不中止节点。
+- 未定义 `onNodeEnter` 的 mechanism 被跳过。
+
+两个合法作用通道：
+
+| 通道 | 作用 | 是否进入 agent 上下文 | 生命周期 |
+|------|------|------------------------|----------|
+| `ctx.instance.scratch` | 代码侧横切状态（计时、计数、预处理结果） | 否 | 当前 AgentInstance；子图独立 |
+| `ctx.appendContext(content)` | 向 agent 消息流追加内容 | 是，追加到当前节点 active 段 | 当前节点；离开后随 ReAct 折叠 |
+
+通过 `ctx.pi.on()` 注册 pi 原生事件，可以 hook 到 agent 运行期间的每一拍：
+
+| 需要 hook 的时刻 | 注册哪个 pi 事件 |
+|-----------------|-----------------|
+| 工具调用后 | `tool_result` |
+| 每轮 LLM 请求前 | `before_provider_request` |
+| LLM 响应后 | `after_provider_response` |
+| 每轮开始 | `turn_start` |
+| 每轮结束 | `turn_end` |
+| 消息追加后 | `message_end` |
+
+> **注意**：pi 没有 `off`。事件回调需自限——读 `ctx.instance.scratch` 或 `ctx.node.id` 判断是否仍在当前节点，条件不满足时 early return。
+
+示例：计时 + 工具审计 + 动态上下文：
+
+```typescript
+const timingMechanism: Mechanism = {
+  name: "timing",
+  async onNodeEnter(ctx) {
+    ctx.instance.scratch[`${ctx.node.id}_started`] = Date.now();
+  },
+};
+
+const toolAuditor: Mechanism = {
+  name: "tool-auditor",
+  async onNodeEnter(ctx) {
+    const nodeId = ctx.node.id;
+    ctx.pi.on("tool_result", (event) => {
+      if (ctx.instance.scratch._done) return;
+      auditLog.write({ nodeId, tool: event.toolName });
+    });
+  },
+};
+
+const autoTest: Mechanism = {
+  name: "auto-test",
+  async onNodeEnter(ctx) {
+    ctx.pi.on("tool_result", (event) => {
+      if (event.toolName !== "bash") return;
+      const cmd = (event.details as any)?.command ?? "";
+      if (!cmd.includes("write") && !cmd.includes("edit")) return;
+      const result = execSync("npm test");
+      ctx.appendContext(`[auto-test]\n${result}`);
+    });
+  },
+};
+```
+
+---
 
 ### Edge（边）
 
@@ -521,7 +611,7 @@ interface ContextFrame {
 
 ```
 === COMPLETED === ← 帧栈摘要（已完成节点的折叠结果）
-=== CURRENT ===   ← 当前节点信息（subGoal、输入、工具）
+=== CURRENT ===   ← 当前节点信息（subGoal、工具、skill 名称）
 （当前节点的 live ReAct 消息）
 ```
 

@@ -540,7 +540,7 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("横切机制", () => {
-    it("mechanism.apply 在 execute 之前跑，且写入 scratch 对 execute 可见", async () => {
+    it("onNodeEnter 在 execute 之前跑，且写入 scratch 对 execute 可见", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
       const order: string[] = [];
@@ -550,8 +550,7 @@ describe("createLoopGraphExtension", () => {
       g.mechanisms = [
         {
           name: "prep",
-          check: () => true,
-          async apply(ctx) {
+          async onNodeEnter(ctx) {
             order.push("apply");
             ctx.instance.scratch.prepared = 42;
           },
@@ -574,15 +573,15 @@ describe("createLoopGraphExtension", () => {
       expect(seenScratch).toBe(42);
     });
 
-    it("check 返回 false 时跳过 apply", async () => {
+    it("onNodeEnter 未定义时跳过", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
       const applied: string[] = [];
 
       const g = minimalGraph("mech_skip");
       g.mechanisms = [
-        { name: "yes", check: () => true, async apply() { applied.push("yes"); } },
-        { name: "no", check: () => false, async apply() { applied.push("no"); } },
+        { name: "yes", async onNodeEnter() { applied.push("yes"); } },
+        { name: "no" },
       ];
 
       await loop.executeGraph(g, { source: "command", args: "" });
@@ -590,14 +589,14 @@ describe("createLoopGraphExtension", () => {
       expect(applied).toEqual(["yes"]);
     });
 
-    it("apply 抛错记日志但不中止节点", async () => {
+    it("onNodeEnter 抛错记日志但不中止节点", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
       let executed = false;
 
       const g = minimalGraph("mech_throw");
       g.mechanisms = [
-        { name: "boom", check: () => true, async apply() { throw new Error("mech failed"); } },
+        { name: "boom", async onNodeEnter() { throw new Error("mech failed"); } },
       ];
       g.nodes.start = {
         kind: "code",
@@ -618,6 +617,32 @@ describe("createLoopGraphExtension", () => {
       );
     });
 
+    it("appendContext 向消息流追加内容且不触发额外 turn", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+
+      const g = minimalGraph("mech_append");
+      g.mechanisms = [
+        {
+          name: "inject",
+          async onNodeEnter(ctx) {
+            ctx.appendContext("机制注入的上下文");
+          },
+        },
+      ];
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      // 以 loop_graph_mechanism 追加，display:false，且未带 triggerTurn
+      const call = (pi.sendMessage as any).mock.calls.find(
+        (c: any[]) => c[0]?.customType === "loop_graph_mechanism",
+      );
+      expect(call).toBeDefined();
+      expect(call[0].content).toBe("机制注入的上下文");
+      expect(call[0].display).toBe(false);
+      expect(call[1]?.triggerTurn).toBeFalsy();
+    });
+
     it("全局机制先于局部机制执行", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
@@ -625,14 +650,14 @@ describe("createLoopGraphExtension", () => {
 
       const g = minimalGraph("mech_order");
       g.mechanisms = [
-        { name: "global", check: () => true, async apply() { order.push("global"); } },
+        { name: "global", async onNodeEnter() { order.push("global"); } },
       ];
       g.nodes.start = {
         kind: "code",
         id: "start",
         subGoal: "顺序",
         mechanisms: [
-          { name: "local", check: () => true, async apply() { order.push("local"); } },
+          { name: "local", async onNodeEnter() { order.push("local"); } },
         ],
         async execute() {
           order.push("execute");
