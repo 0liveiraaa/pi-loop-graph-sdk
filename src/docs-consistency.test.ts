@@ -46,7 +46,6 @@ describe("documentation consistency", () => {
     const files = [
       "README.md",
       "docs/README.md",
-      "docs/设计/developer-guide.md",
       "docs/设计/loop-graph-sdk-design.md",
       "docs/形态/implementation-status.md",
       "docs/计划/2026-07-08_review-agent-single-turn-validation.md",
@@ -63,7 +62,6 @@ describe("documentation consistency", () => {
     const files = [
       "README.md",
       "docs/README.md",
-      "docs/设计/developer-guide.md",
       "docs/形态/implementation-status.md",
       "docs/计划/2026-07-08_review-agent-single-turn-validation.md",
     ];

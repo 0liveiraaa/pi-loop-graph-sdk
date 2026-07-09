@@ -18,6 +18,9 @@ export type {
 export { GraphRegistry } from "./registry.js";
 export type { ExecuteGraph } from "./registry.js";
 
+// ── 工具解析 ──
+export { resolveNodeTools } from "./tools-resolve.js";
+
 // ── execute 工厂 ──
 export { createAgentExecute } from "./agent-execute.js";
 export type { AgentExecuteOptions } from "./agent-execute.js";

@@ -104,6 +104,7 @@ export interface NodeContext {
 
 export interface AgentRunRequest {
   prompt: string;
+  /** @deprecated 工具集由 Node.tools 统一声明。此字段不再生效。 */
   tools?: string[];
   skill?: string;
   outputSchema?: unknown;

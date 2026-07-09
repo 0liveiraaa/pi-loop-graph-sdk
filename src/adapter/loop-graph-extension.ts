@@ -34,6 +34,7 @@ import { selectEdge } from "../router.js";
 import { projectMessages } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
+import { resolveNodeTools } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
 import { GraphRegistry } from "../registry.js";
 import { reviewGraph } from "../graphs/review-graph.js";
@@ -199,10 +200,7 @@ export function createLoopGraphExtension(
 
         const prevTools = saveActiveTools(piInner);
         setNodeToolsForInstance(piInner, node);
-        debugLog.toolsChanged(
-          nodeId,
-          ["read", ...(node.kind === "code" ? (node.tools ?? []) : []), COMPLETE_TOOL_NAME],
-        );
+        debugLog.toolsChanged(nodeId, piInner.getActiveTools());
 
         const marker = runtime.nextMarker(nodeId);
         piInner.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
@@ -409,12 +407,7 @@ export function createLoopGraphExtension(
 
   function setNodeToolsForInstance(piInner: ExtensionAPI, node: Node): void {
     const nodeTools = node.kind === "code" ? (node.tools ?? []) : [];
-    piInner.setActiveTools([
-      "read",
-      ...defaultTools,
-      ...nodeTools,
-      COMPLETE_TOOL_NAME,
-    ]);
+    piInner.setActiveTools(resolveNodeTools(defaultTools, nodeTools));
   }
 }
 

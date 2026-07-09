@@ -7,6 +7,7 @@ import type { AgentInstance, AgentRunRequest, Node, NodeCompletion, NodeContext,
 export interface AgentExecuteOptions {
   prompt?: string | ((input: NodeInput) => string);
   skill?: string;
+  /** @deprecated 工具集由 Node.tools 统一声明。此字段不再生效。 */
   tools?: string[];
   validateCompletion?: AgentRunRequest["validateCompletion"];
 }
@@ -35,7 +36,6 @@ export function createAgentExecute(
         : options.prompt ?? "开始执行当前阶段";
     return ctx.runAgent({
       prompt,
-      tools: options.tools,
       skill: options.skill,
       validateCompletion: options.validateCompletion,
     });

@@ -21,6 +21,7 @@ function fakePi() {
       handlers.set(eventName, existing);
     }),
     setActiveTools: vi.fn(),
+    getActiveTools: vi.fn(() => ["read", "__graph_complete__"]),
     sendMessage: vi.fn((_message: any, options?: { triggerTurn?: boolean }) => {
       if (!options?.triggerTurn) return;
       queueMicrotask(() => {
