@@ -831,10 +831,10 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项                    | 当前策略                                                                                                                                                                |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `callTool`          | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。                              |
-| `agent-choice` 路由 | 暂缓 / experimental。短期使用`priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。       |
-| 多 skill              | 当前只有 node.skill?: string 单值字段，图级 skills?: string[] 未实现。多 skill 策略：拆到不同节点、手动组合prompt、纯代码绕过。参见 §skill 集成。                      |
-| schema / 泛型类型     | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。 |
-| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                              |
+| 项                    | 当前策略                                                                                                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `callTool`          | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。                                                             |
+| `agent-choice` 路由 | 暂缓 / experimental。短期使用`priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。//目前已经实现,删除此部分             |
+| 多 skill              | 当前只有 node.skill?: string 单值字段，图级 skills?: string[] 未实现。多 skill 策略：拆到不同节点、手动组合prompt、纯代码绕过。参见 §skill 集成。//不承诺实现,如果需要自己利用已有功能完成,删除此部分 |
+| schema / 泛型类型     | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。                                |
+| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                                                             |
