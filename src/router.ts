@@ -34,7 +34,7 @@ export async function selectEdge(
         if (edge) return edge;
       }
 
-      // 降级：agent 未声明或声明了不存在的边 → priority-first
+      // 降级：agent 未声明或声明了不存在的边 → priority-first  开发者注释:在loop-graph-extension部分已经被改为返回结果用validation机制让agent重试,此处是否需要清理或者合并,或者重新组织这两个文件的相关代码
       return priorityFirst(matched);
     }
     default:

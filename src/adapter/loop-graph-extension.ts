@@ -266,7 +266,7 @@ export function createLoopGraphExtension(
         );
         nodeContext.setCurrentNodeId(nodeId);
 
-        // 横切机制：节点进入后、execute 之前分派（预处理 scratch / 追加上下文）
+        // 横切机制：节点进入后、execute 之前分派（预处理 scratch / 追加上下文） 机制应该是存在agent调用的节点在agent运行时工作的代码,类似hook机制,否则会和hybird节点打架,两者似乎是同一功能
         await applyMechanisms(piInner, runtime.topInstance!, node, input);
 
         // agent-choice 路由：注入边选择校验，agent 未正确声明 chosen_edge_id 时驳回重试
@@ -330,9 +330,9 @@ export function createLoopGraphExtension(
       const reason = error instanceof Error ? error.message : String(error);
       debugLog.graphError(graph.id, reason);
 
-      // 向 agent 注入终止信号，让机制层的事被 agent 感知
+      // 向 agent 注入终止信号，让图运行层的事被 agent 感知
       piInner.sendUserMessage(
-        `[系统] 图 "${graph.id}" 因错误意外终止：${reason}。当前节点已失效，请停止推理。`,
+        `[系统] 图 "${graph.id}" 因错误意外终止：${reason}。当前节点已失效，请停止相关图工作。`,
       );
 
       piInner.sendMessage({
@@ -515,7 +515,7 @@ export function createLoopGraphExtension(
       );
     }
   }
-}
+}//开发者注释:关于子图调用部分能否更合理的安排代码,使得其复用顶层图的大部分代码,而不是重新敲一遍
 
 // ── 内部辅助函数 ────────────────────────────────────────────
 //  （封装在模块作用域，由工厂函数内调用，不暴露给外部）

@@ -67,6 +67,9 @@ interface LoopGraphExtensionOptions {
   /** 所有节点默认可用的工具列表。为空时只保留 read + __graph_complete__。
    *  例如业务包可传入 ["review_card", "review_chapter"] 作为全局工具。 */
   defaultTools?: string[];
+  /** skill 目录的根路径。node.skill 的 SKILL.md 在此路径下按 `{name}/SKILL.md` 查找。
+   *  默认 `process.cwd() + "/skills"`。 */
+  skillBasePath?: string;
 }
 ```
 
@@ -170,8 +173,9 @@ interface Graph {
 }
 ```
 
-- 有 `invocation` → 对用户可见，自动注册为 pi 命令和工具
-- 无 `invocation` → 纯子图，只能被别的节点引用
+- 有 `invocation` → 对用户与agent可见，自动注册为 pi 命令和agent可使用工具
+- 无 `invocation` → 纯子图，只
+  能被别的节点引用
 
 ### Entry（入口）
 

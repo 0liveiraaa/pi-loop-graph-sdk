@@ -7,7 +7,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 //
 //    AgentInstance 持有一个有序帧栈（frames），每进入一个节点就在栈上生长一层，
-//    离开节点时边负责折叠栈顶层。栈只增不减，历史不可篡改。
+//    离开节点时边负责折叠栈顶层。栈只增不减，保持信息连续性。
 //
 //    子图调用是一等公民：Node 可以引用另一个 Graph 作为其实现。
 //    子图执行使用隔离栈：Runtime 为子图创建新的 AgentInstance，
@@ -69,9 +69,9 @@ export interface ContextFrame {
  * 阶段性业务状态不挂在 AgentInstance 上。节点只能从 background 和 frames
  * 读取已经显式进入历史的上下文。
  *
- * scratch 的契约（宪法原则 2 的显式例外）：
+ * scratch 的契约：
  *   1. 只有 Mechanism.apply 可写 scratch。execute 可读，不应写——
- *      写了就是绕过声明式机制。
+ *      写了就是绕过声明式机制。开发者注释:声明式机制准备被替代,转向高扩展,高度可自定义
  *   2. scratch 不进 agent 上下文。projection 永不渲染它，
  *      它与 input 同侧（代码侧横切状态）。
  *   3. scratch 随 AgentInstance 生命周期。子图新实例 = 新 scratch，

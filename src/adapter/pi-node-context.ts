@@ -118,7 +118,7 @@ export class PiNodeContext implements NodeContext {
    *   const data = fs.readFileSync(input.data.path, "utf-8");
    *   const result = await fetch("https://api.example.com", {...});
    *   return { nodeId: "parse", status: "ok", result: { data, result } };
-   * }
+   * }//讨论在有纯代码节点的前提下该功能是否必要
    * ```
    */
   async callTool(

@@ -257,21 +257,21 @@ enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → e
 
 两个合法作用通道：
 
-| 通道 | 作用 | 是否进入 agent 上下文 | 生命周期 |
-|------|------|------------------------|----------|
-| `ctx.instance.scratch` | 代码侧横切状态（计时、计数、预处理结果） | 否 | 当前 AgentInstance；子图独立 |
-| `ctx.appendContext(content)` | 向 agent 消息流追加内容 | 是，追加到当前节点 active 段 | 当前节点；离开后随 ReAct 折叠 |
+| 通道                           | 作用                                     | 是否进入 agent 上下文        | 生命周期                      |
+| ------------------------------ | ---------------------------------------- | ---------------------------- | ----------------------------- |
+| `ctx.instance.scratch`       | 代码侧横切状态（计时、计数、预处理结果） | 否                           | 当前 AgentInstance；子图独立  |
+| `ctx.appendContext(content)` | 向 agent 消息流追加内容                  | 是，追加到当前节点 active 段 | 当前节点；离开后随 ReAct 折叠 |
 
 通过 `ctx.pi.on()` 注册 pi 原生事件，可以 hook 到 agent 运行期间的每一拍：
 
-| 需要 hook 的时刻 | 注册哪个 pi 事件 |
-|-----------------|-----------------|
-| 工具调用后 | `tool_result` |
-| 每轮 LLM 请求前 | `before_provider_request` |
-| LLM 响应后 | `after_provider_response` |
-| 每轮开始 | `turn_start` |
-| 每轮结束 | `turn_end` |
-| 消息追加后 | `message_end` |
+| 需要 hook 的时刻 | 注册哪个 pi 事件            |
+| ---------------- | --------------------------- |
+| 工具调用后       | `tool_result`             |
+| 每轮 LLM 请求前  | `before_provider_request` |
+| LLM 响应后       | `after_provider_response` |
+| 每轮开始         | `turn_start`              |
+| 每轮结束         | `turn_end`                |
+| 消息追加后       | `message_end`             |
 
 > **注意**：pi 没有 `off`。事件回调需自限——读 `ctx.instance.scratch` 或 `ctx.node.id` 判断是否仍在当前节点，条件不满足时 early return。
 
@@ -347,10 +347,10 @@ type RouterStrategy =
 
 Node 有两个 kind：
 
-| kind | 含义 |
-|------|------|
-| `"code"` | JS 函数。execute 内可以调 `ctx.runAgent()`，也可以不调。框架不区分 |
-| `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行 |
+| kind        | 含义                                                                |
+| ----------- | ------------------------------------------------------------------- |
+| `"code"`  | JS 函数。execute 内可以调`ctx.runAgent()`，也可以不调。框架不区分 |
+| `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行                 |
 
 ---
 
@@ -367,7 +367,7 @@ execute: createAgentExecute({
 })
 ```
 
-`createAgentExecute` 是语法糖——等价于 `execute = (_, input, ctx) => ctx.runAgent({ prompt, skill })`。**不是一种新的节点类型**。
+`createAgentExecute` 是语法糖——等价于 `execute = (_, input, ctx) => ctx.runAgent({ prompt, skill })`。
 
 > **注意**：agent 需要知道的信息必须在 `prompt` 中显式传入。框架不会自动 dump `input.data` 进上下文。如果你用 `createAgentExecute` 不带 `prompt`，agent 只能看到 CURRENT 段的 subGoal 和 skill 名。
 
