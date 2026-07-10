@@ -338,7 +338,7 @@ type RouterStrategy =
   | { kind: "first-match" }         // 按 edges 顺序取第一条满足 guard 的
   | { kind: "priority-first" }      // 取 priority 最高者
   | { kind: "custom"; fn: RouterFn } // 自定义函数
-  | { kind: "agent-choice" };       // 未实现（可用 custom 替代）
+  | { kind: "agent-choice" };       // agent 通过 chosen_edge_id 选边
 ```
 
 ---
@@ -349,7 +349,7 @@ Node 有两个 kind：
 
 | kind        | 含义                                                                |
 | ----------- | ------------------------------------------------------------------- |
-| `"code"`  | JS 函数。execute 内可以调`ctx.runAgent()`，也可以不调。框架不区分 |
+| `"code"`  | JS 函数。execute 内可以调`ctx.runAgent()`，来执行agent操作 |
 | `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行                 |
 
 ---
@@ -531,7 +531,7 @@ routing: {
 
 ### agent-choice
 
-当前 `{ kind: "agent-choice" }` 会抛异常。如果你需要让 LLM 选边，可以用 `custom` 自己实现——注册一个临时工具，把可选路由列表呈现给 LLM，由 LLM 的返回决定走哪条边。
+`{ kind: "agent-choice" }` 让 agent 在 `__graph_complete__` 时通过 `result.chosen_edge_id` 声明选择哪条边。单边匹配时直接返回；多边匹配时读取 `chosen_edge_id`，未匹配到合法边则降级为 `priority-first`。
 
 ---
 
@@ -831,10 +831,7 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项                    | 当前策略                                                                                                                                                                                               |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `callTool`          | 未实现。纯代码节点应直接调用业务库函数（Node.js API、第三方 SDK 等）；如果动作只能经 LLM tool-call 发生，就不能声称代码层强制执行该 tool。                                                             |
-| `agent-choice` 路由 | 暂缓 / experimental。短期使用`priority-first`、`first-match` 或 `custom`。如需 LLM 选边，用 `custom` 自己实现（注册临时工具 → LLM 返回选择 → resume）。//目前已经实现,删除此部分             |
-| 多 skill              | 当前只有 node.skill?: string 单值字段，图级 skills?: string[] 未实现。多 skill 策略：拆到不同节点、手动组合prompt、纯代码绕过。参见 §skill 集成。//不承诺实现,如果需要自己利用已有功能完成,删除此部分 |
-| schema / 泛型类型     | `NodeCompletion.result`、`NodeInput.data`、`inputSchema` 当前保留 `Record<string, unknown>`；下一阶段补 schema helper 和泛型 API（`Node<TInput, TResult>`）。                                |
-| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                                                             |
+| 项                    | 当前策略                                                                                                                                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `callTool`          | 不计划实现。纯代码节点可直接调用业务库函数（Node.js API、第三方 SDK 等）。`ctx.runAgent` 已提供 agent 能力，不需要通过 tool-call 间接驱动。 |
+| schema / 泛型类型| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                                                                              |
