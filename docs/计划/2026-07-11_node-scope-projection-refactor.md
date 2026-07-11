@@ -5,6 +5,8 @@
 >
 > 建议在 session 续跑、帧持久化和多 agent 工作开始前完成。
 
+> 后续决策：原 Phase 5 的“compaction 后重发 NodeScope 并排除 summary”已被替代。当前实现尊重 pi 原生 compaction 语义：保留 summary 与 recent messages，推进模型可见 frame 基线，frames 从压缩点后重新生长；Runtime 完整 frames 不物理删除。`ContextFrame` 业务载荷完全开放，图返回由可选 `MigrationResult.output` 显式表达。本文后续旧 Phase 5 描述仅作为演进记录，不再代表当前验收口径。
+
 ---
 
 ## 一、目标
@@ -711,7 +713,7 @@ closeFrameSegment(scope, completion): NodeCompletion;
 
 ### Phase 9 — 完成 call 与 GraphCallScope 的统一实现
 
-**状态：✅ 已完成。** `call/compose` 现在写入配对、可自描述的 `loop_graph_call_start/end`，所有入口解析、节点、路由、无边、maxSteps 与异常路径共享同一 `try/finally`，并保证发送 end 失败时仍 pop CallFrame。context 始终先删除已闭合调用区段，再按活动 NodeScope 投影。由于 pi compaction 基于原始 session entries 生成 summary，可能把调用区段内部内容混入不可拆分的摘要，本阶段选择安全策略：共享 Session 的嵌套 `call/compose` 活跃期间由 `session_before_compact` 返回 `{ cancel: true }`；root-only 图仍沿用 Phase 5 的 checkpoint 协同。长任务和独立 compaction 生命周期交给 Phase 10 `delegate`。完成时全量 12 文件、183 项测试（含真实 LLM）与 `tsc --noEmit` 均通过。
+**状态：✅ 已完成。** `call/compose` 现在写入配对、可自描述的 `loop_graph_call_start/end`，所有入口解析、节点、路由、无边、maxSteps 与异常路径共享同一 `try/finally`，并保证发送 end 失败时仍 pop CallFrame。context 始终先删除已闭合调用区段，再按活动 NodeScope 投影。由于 pi compaction 基于原始 session entries 生成 summary，可能把调用区段内部内容混入不可拆分的摘要，本阶段选择安全策略：共享 Session 的嵌套 `call/compose` 活跃期间由 `session_before_compact` 返回 `{ cancel: true }`；root-only 图仍沿用 Phase 5 的 checkpoint 协同。若取消策略因竞态或第三方 extension 异常失效，Runtime 会终止当前共享调用，并在本 session 后续投影中 fail closed 地丢弃 compactionSummary；不会通过重发 `call_start` 假装恢复。长任务和独立 compaction 生命周期交给 Phase 10 `delegate`。完成时全量测试与 `tsc --noEmit` 均通过。
 
 **目标**：把当前隔离子图正式收敛为 call 策略，并完成共享 Session 的调用区段审计。
 

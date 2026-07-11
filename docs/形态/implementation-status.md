@@ -6,16 +6,22 @@
 
 ## 2026-07-11 重构状态
 
+- `ContextFrame` 已开放为任意开发者字段；`nodeId/status/summary/result` 仅为可选兼容字段，默认 formatter 原样稳定序列化 frame，不再替开发者挑选字段。
+- END 边可通过 `MigrationResult.output` 显式声明图返回，使业务返回与模型工作记忆解耦；旧 `frame.status/result` 继续兼容。
+- pi 原生 `compactionSummary` 与 recent messages 是压缩历史的权威替代。SDK 不再在压缩后重发 NodeScope 并遮挡 summary。
+- Runtime 通过 `branchEntries + firstKeptEntryId + NodeScope` 计算完整落入压缩前缀的 frame 基线：完整 frames 仍供代码、路由与审计使用，LLM 只停止重复投影已由 summary 覆盖的前缀。若切点落在节点内部，该节点 frame 会保留，避免 recent tail 被裁后形成信息缺口；共享 `call/compose` 活跃期间仍禁止 compaction。
+
 - 图执行返回统一为 `GraphRunResult`；runtime-only 子 adapter 复用真实 `createLoopGraphExtension`，不再维护第二套弱化 Runtime，也不直接改写 `session.agent.state.messages`。
 - `GraphRuntime` 使用结构化 `NodeScopeDescriptor`（graphRunId / instanceId / scopeId / graphId / nodeId / visit / depth），主路径已删除随机 `loop_graph_boundary` 哨兵。
 - projection 从尾部匹配当前 `scopeId`，输出 frames + 当前 NodeScope 后的 live ReAct；外层 transcript、旧节点 ReAct、scope 前 compaction summary 均不保留。
 - scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
-- 图节点活跃期间收到 pi `session_compact` 后，会同步重发同一 `scopeId` 的 NodeScope checkpoint；overflow retry 因此从新 checkpoint 开始，`compactionGeneration` / `reason` / `willRetry` 写入 debug trace。
+- 图节点活跃期间收到 pi `session_compact` 后，会推进 frame 投影基线并记录 `compactionGeneration` / `reason` / `willRetry`；不重发 NodeScope，不遮挡原生 summary 与 recent messages。
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
 - Phase 7 已将 root/call 收敛到单一 `runGraphLoop`；call 使用同一 Runtime 的嵌套 CallFrame，仍创建独立 AgentInstance。
 - Phase 8 已接线 `compose`：同一 AgentInstance 上的 child frames 被 Runtime 限定为临时 FrameSegment，默认或自定义 fold 后强制截断；异常、fold throw、maxSteps 均回滚，父节点活动 Scope 在嵌套返回时恢复。
 - Phase 9 已接线持久 GraphCallScope：call/compose 使用配对 start/end，context 在有无活动图时都清除闭合区段；end 记录 boundary、invocationKind 和真实业务状态，异常路径固定恢复 CallFrame。
-- 共享 Session 的嵌套 call/compose 活跃期间会取消 compaction，避免 pi 基于原始 transcript 生成的混合 summary 穿透调用边界；root-only 图继续使用 NodeScope checkpoint。长任务 compaction 由 Phase 10 delegate host 承担。
+- 共享 Session 的嵌套 call/compose 活跃期间会取消 compaction，避免 pi 基于原始 transcript 生成的混合 summary 穿透调用边界；root-only 图直接采用原生 compaction 基底。长任务 compaction 由 Phase 10 delegate host 承担。
+- 若嵌套调用期间仍异常收到 `session_compact`，Runtime fail closed：标记边界违规、终止当前图调用，并持续过滤该 session 的 compactionSummary；CallFrame 不保存 callId，也不尝试用重发 start 修复不可拆分的混合摘要。
 - runtime-only 注册仅剥离顶层 `invocation`，不修改原 Graph；`nodes`/`routing` 作为含函数的只读定义引用共享，不能也不应结构化深拷贝。
 - `delegate` 仍未接线独立 host，会明确拒绝，绝不按 call 静默执行。
 - 验证：`npm test -- --run` 通过（12 文件、183 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。

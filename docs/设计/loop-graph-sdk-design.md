@@ -420,6 +420,12 @@ const reviewGraph: Graph = {
 
 完整决策见 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)。
 
+### 修订 13：Frame 业务载荷完全开放，compaction 成为权威历史基底
+
+**问题**：固定向模型发送 `nodeId/status/summary/result` 暴露 SDK 内部概念，也限制开发者在效果、完整性、长度与 KV cache 成本之间自行取舍。压缩后重发 NodeScope 再截断上下文还会遮挡 pi 的原生 summary 和 recent messages，破坏 compaction 的连续性语义。
+
+**决策**：ContextFrame 是开发者完全自定义的工作记忆，Runtime 控制元数据与 LLM 载荷分离；默认 formatter 只稳定序列化开发者 frame。图返回通过 `MigrationResult.output` 与 frame 解耦。pi compaction summary 是旧上下文的权威替代，Runtime 使用 `branchEntries + firstKeptEntryId + NodeScope` 精确推进模型可见 frame 基线，不物理删除完整帧；切点内部节点的 frame 保留，活动 scope 被压缩时恢复 CURRENT，并保留 summary 与 recent messages。共享 call/compose 的混合摘要仍不可安全归属，因此继续阻止跨调用 compaction。
+
 ---
 
 ## 后续步骤

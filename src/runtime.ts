@@ -25,6 +25,8 @@ export interface CallFrame {
   activeInput: NodeInput | null;
   activeScope: NodeScopeDescriptor | null;
   isNodeActive: boolean;
+  /** 已被最近一次 pi compaction 原生上下文取代的 frame 前缀长度。 */
+  projectedFrameBase: number;
 }
 
 /** compose 调用在父 frames 上建立的受 Runtime 管理的临时区间。 */
@@ -61,6 +63,8 @@ export class GraphRuntime {
   readonly graphRunId = crypto.randomUUID();
   /** 当前 graph run 已发生的 compaction 次数，仅用于诊断和 checkpoint 观测。 */
   compactionGeneration = 0;
+  /** Runtime 控制平面的 frame → NodeScope 对齐表，不进入开发者 frame/LLM。 */
+  private readonly frameScopes = new Map<string, NodeScopeDescriptor[]>();
 
   get top(): CallFrame | null {
     return this.callStack.length > 0
@@ -95,6 +99,7 @@ export class GraphRuntime {
       mechanisms: graph.mechanisms ?? [],
       scratch: {},
     };
+    if (!this.frameScopes.has(instance.id)) this.frameScopes.set(instance.id, []);
     this.callStack.push({
       instance,
       graph,
@@ -110,6 +115,7 @@ export class GraphRuntime {
       activeInput: null,
       activeScope: null,
       isNodeActive: false,
+      projectedFrameBase: 0,
     });
     return instance;
   }
@@ -143,6 +149,7 @@ export class GraphRuntime {
   rollbackFrameSegment(scope: FrameSegmentScope): void {
     const instance = this.assertSegmentOwner(scope);
     instance.frames.splice(scope.baseIndex);
+    this.frameScopes.get(instance.id)?.splice(scope.baseIndex);
   }
 
   closeFrameSegment(scope: FrameSegmentScope, completion: NodeCompletion): NodeCompletion {
@@ -193,6 +200,7 @@ export class GraphRuntime {
     if (!instance) throw new Error("callStack 为空");
 
     instance.frames.push(frame);
+    if (this.currentScope) this.frameScopes.get(instance.id)?.push(this.currentScope);
     this.isNodeActive = false;
     this.currentNode = null;
     this.currentInput = null;
@@ -210,9 +218,28 @@ export class GraphRuntime {
    * 记录一次 session compaction。NodeScope 的身份（scopeId）不变；
    * extension 会在消息流末尾重发该 scope 作为新的 checkpoint。
    */
-  recordCompaction(): number {
+  recordCompaction(projectedFrameBase?: number): number {
     this.compactionGeneration += 1;
+    const top = this.top;
+    if (top) {
+      const nextBase = projectedFrameBase ?? top.instance.frames.length;
+      top.projectedFrameBase = Math.max(
+        top.projectedFrameBase,
+        Math.min(nextBase, top.instance.frames.length),
+      );
+    }
     return this.compactionGeneration;
+  }
+
+  get completedFrameScopes(): readonly NodeScopeDescriptor[] {
+    const instance = this.topInstance;
+    return instance ? (this.frameScopes.get(instance.id) ?? []) : [];
+  }
+
+  /** 只返回最近一次 compaction 后新生长、仍需单独投影的开发者 frames。 */
+  get projectedFrames(): ContextFrame[] {
+    const top = this.top;
+    return top ? top.instance.frames.slice(top.projectedFrameBase) : [];
   }
 
   reset(): void {
@@ -222,6 +249,7 @@ export class GraphRuntime {
     this.currentNode = null;
     this.currentInput = null;
     this.compactionGeneration = 0;
+    this.frameScopes.clear();
   }
 
   private assertSegmentOwner(scope: FrameSegmentScope): AgentInstance {
@@ -246,10 +274,7 @@ export class GraphRuntime {
 
 /** 复制并冻结 compose fold 可见的帧，不向其暴露 live 引用。 */
 function snapshotFrame(frame: ContextFrame): ContextFrame {
-  return Object.freeze({
-    ...frame,
-    result: snapshotValue(frame.result) as Record<string, unknown>,
-  });
+  return Object.freeze(snapshotValue(frame) as ContextFrame);
 }
 
 /**

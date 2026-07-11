@@ -71,7 +71,7 @@ describe("GraphRegistry", () => {
       result: {},
       steps: 1,
     });
-    const registry = new GraphRegistry(pi, executeGraph);
+    const registry = new GraphRegistry(pi, { invoke: executeGraph });
 
     registry.registerGraph(graph);
 
@@ -81,12 +81,13 @@ describe("GraphRegistry", () => {
     });
 
     expect(executeGraph).toHaveBeenCalledWith(
-      pi,
       graph,
       expect.objectContaining({
-        source: "command",
-        params: { parsed: "algebra", via: "parseArgs" },
+        invocationKind: "command",
+        boundary: "delegate",
+        background: { parsed: "algebra", via: "parseArgs" },
       }),
+      expect.anything(),
     );
   });
 
@@ -100,7 +101,7 @@ describe("GraphRegistry", () => {
       steps: 1,
     };
     const executeGraph = vi.fn().mockResolvedValue(graphResult);
-    const registry = new GraphRegistry(pi, executeGraph);
+    const registry = new GraphRegistry(pi, { invoke: executeGraph });
 
     registry.registerGraph(graph);
 
@@ -112,9 +113,14 @@ describe("GraphRegistry", () => {
       details: graphResult,
     });
 
-    expect(executeGraph).toHaveBeenCalledWith(pi, graph, {
-      source: "tool",
-      params: { subject: "math" },
-    });
+    expect(executeGraph).toHaveBeenCalledWith(
+      graph,
+      expect.objectContaining({
+        invocationKind: "tool",
+        boundary: "delegate",
+        background: { subject: "math" },
+      }),
+      undefined,
+    );
   });
 });

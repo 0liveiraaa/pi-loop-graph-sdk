@@ -19,7 +19,11 @@
 //  不再依赖全局 Registry 初始化顺序。
 // ============================================================
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  CompactionSettings,
+  ExtensionAPI,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import type {
   AgentInstance,
   Edge,
@@ -41,6 +45,11 @@ import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
 import { GraphRegistry } from "../registry.js";
+import {
+  DelegateGraphInvoker,
+  type DelegateHostFactory,
+  type GraphInvoker,
+} from "./graph-execution-host.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
@@ -73,6 +82,14 @@ export interface LoopGraphExtensionOptions {
    *  返回 null 则跳过 COMPLETED 段（不折叠，agent 看不到历史帧）。
    *  默认：保持当前 JSON 格式（向后兼容）。 */
   frameFormatter?: (frames: import("../type.js").ContextFrame[]) => string | null;
+  /** 为 command、tool 和 delegate graph-node 创建一次性隔离执行 host。 */
+  createDelegateHost?: DelegateHostFactory;
+  /** 传递给递归隔离子会话的真实工具定义。 */
+  delegateTools?: ToolDefinition[];
+  /** 隔离子会话的 compaction 配置；由 host factory 消费。 */
+  delegateCompaction?: CompactionSettings;
+  /** graph tool 返回给模型的最大 UTF-8 字节数。 */
+  toolResultMaxBytes?: number;
 }
 
 export interface LoopGraphExtension {
@@ -103,10 +120,20 @@ export function createLoopGraphExtension(
 
   /** 已完成工具存在性校验的图 ID（首次 executeGraph 时校验一次） */
   const toolValidated = new Set<string>();
+  let pendingCompactionFrameBase: number | null = null;
 
   // ── 实例级图注册表（替代原全局 graphs Map）──
 
-  const registry = new GraphRegistry(pi, executeGraph);
+  const delegateInvoker: GraphInvoker = options.createDelegateHost
+    ? new DelegateGraphInvoker(pi, options.createDelegateHost)
+    : {
+        async invoke() {
+          throw new Error("图请求 delegate 隔离边界，但未配置 createDelegateHost");
+        },
+      };
+  const registry = new GraphRegistry(pi, delegateInvoker, {
+    toolResultMaxBytes: options.toolResultMaxBytes,
+  });
 
   // ── 注册 __graph_complete__ 工具 ──
 
@@ -139,20 +166,20 @@ export function createLoopGraphExtension(
 
     const input = {
       messages,
-      frames: rt.topInstance?.frames ?? [],
+      frames: rt.projectedFrames,
       currentNode: rt.currentNode,
       activeScope: rt.currentScope,
       availableEdges,
       frameFormatter: options.frameFormatter,
+      compactionActive: rt.compactionGeneration > 0,
     };
     const projected = projectMessages(input);
     debugLog.projection(input, projected as any[]);
     return { messages: projected };
   });
 
-  // compaction 会移除旧 transcript，因而可能带走活动 NodeScope。压缩完成后
-  // 在消息流末尾重发相同 scopeId 的 checkpoint；下一次（包括 overflow retry）
-  // 的严格投影将从此处开始，而不会回退到 compaction summary 或外层消息。
+  // compaction summary + firstKeptEntryId 后的 recent messages 是 pi 对旧上下文
+  // 的权威替代。SDK 只推进 frame 投影基线，不重发 scope，也不遮挡 summary。
   //
   // 共享 Session 的嵌套 call/compose 不能允许 compaction 跨越 GraphCallScope：
   // pi 的 summary 基于原始 session entries 生成，可能混入子图内部 transcript；
@@ -162,7 +189,16 @@ export function createLoopGraphExtension(
     const activeSharedCall = rt?.callStack.some(
       (frame) => frame.boundary === "call" || frame.boundary === "compose",
     );
-    if (!activeSharedCall) return;
+    if (!activeSharedCall) {
+      if (rt?.isNodeActive) {
+        pendingCompactionFrameBase = findCompactedFrameBase(
+          event?.branchEntries,
+          event?.preparation?.firstKeptEntryId,
+          rt.completedFrameScopes,
+        );
+      }
+      return;
+    }
 
     debugLog.compactionBlocked(
       event?.reason,
@@ -179,8 +215,8 @@ export function createLoopGraphExtension(
     const nodeId = rt?.currentNodeId;
     if (!rt?.isNodeActive || !node || !scope || !graph || !nodeId) return;
 
-    const generation = rt.recordCompaction();
-    appendNodeScope(pi, node, scope, getAvailableEdges(graph, nodeId));
+    const generation = rt.recordCompaction(pendingCompactionFrameBase ?? undefined);
+    pendingCompactionFrameBase = null;
     debugLog.scopeCheckpoint(scope.scopeId, generation, event?.reason, event?.willRetry);
   });
 
@@ -210,6 +246,7 @@ export function createLoopGraphExtension(
   // session 启动通知
   if (!options.runtimeOnly) {
     pi.on("session_start", async (_event, ctx) => {
+      pendingCompactionFrameBase = null;
       ctx.ui.notify("Loop Graph Extension 已加载", "info");
     });
   }
@@ -241,10 +278,11 @@ export function createLoopGraphExtension(
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
   ): Promise<GraphRunResult> {
-    // Phase 8 已接线 compose；delegate 仍必须明确拒绝，不能悄悄按 call 执行。
     assertValidGraph(graph, {
-      supportedBoundaries: ["call", "compose"],
-      delegateHostAvailable: false,
+      supportedBoundaries: options.createDelegateHost
+        ? ["call", "compose", "delegate"]
+        : ["call", "compose"],
+      delegateHostAvailable: options.createDelegateHost != null,
     });
 
     // 首次执行：校验工具存在性（pi.getAllTools() 此时已包含所有已注册工具）
@@ -449,6 +487,18 @@ export function createLoopGraphExtension(
             input,
             async (graphNode, callBackground) => {
               const graphBoundary = graphNode.boundary ?? "call";
+              if (graphBoundary === "delegate") {
+                const child = await delegateInvoker.invoke(graphNode.graph, {
+                  background: callBackground,
+                  invocationKind: "graph-node",
+                  boundary: "delegate",
+                });
+                return {
+                  nodeId: graphNode.id,
+                  status: child.status,
+                  result: child.result,
+                };
+              }
               if (graphBoundary === "compose") {
                 const parentInstance = runtime.topInstance;
                 if (!parentInstance) throw new Error("compose 调用缺少父 AgentInstance");
@@ -534,8 +584,8 @@ export function createLoopGraphExtension(
           if (edge.to === END) {
             lastResult = {
               graphId: graph.id,
-              status: migration.frame.status,
-              result: migration.frame.result,
+              status: migration.output?.status ?? migration.frame.status ?? completion.status,
+              result: migration.output?.result ?? migration.frame.result ?? completion.result,
               steps: step + 1,
             };
             return finish(lastResult);
@@ -700,6 +750,36 @@ function createAgentChoiceValidator(
 
     return { isValid: true };
   };
+}
+
+function findCompactedFrameBase(
+  branchEntries: any[] | undefined,
+  firstKeptEntryId: string | undefined,
+  frameScopes: readonly import("../runtime.js").NodeScopeDescriptor[],
+): number {
+  if (!Array.isArray(branchEntries) || !firstKeptEntryId) return frameScopes.length;
+  const cut = branchEntries.findIndex((entry) => entry?.id === firstKeptEntryId);
+  if (cut < 0) return frameScopes.length;
+
+  const scopePositions = new Map<string, number>();
+  for (let index = 0; index < branchEntries.length; index++) {
+    const entry = branchEntries[index];
+    if (entry?.type !== "custom_message" || entry?.customType !== NODE_SCOPE_TYPE) continue;
+    const scopeId = entry?.details?.scopeId;
+    if (typeof scopeId === "string") scopePositions.set(scopeId, index);
+  }
+
+  let compacted = 0;
+  for (let frameIndex = 0; frameIndex < frameScopes.length; frameIndex++) {
+    const currentPos = scopePositions.get(frameScopes[frameIndex].scopeId);
+    if (currentPos == null) continue;
+    let nextScopePos = Number.POSITIVE_INFINITY;
+    for (const pos of scopePositions.values()) {
+      if (pos > currentPos && pos < nextScopePos) nextScopePos = pos;
+    }
+    if (nextScopePos <= cut) compacted = frameIndex + 1;
+  }
+  return compacted;
 }
 
 /**

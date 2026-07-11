@@ -17,6 +17,28 @@ Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
 
 ---
 
+## 自定义 Frame 与图返回
+
+`Edge.migrate` 的 `frame` 是给后续模型使用的业务工作记忆，字段完全由开发者决定。只保留后续工作真正需要的信息，并保持序列化结果短小、稳定，以兼顾上下文效果和 KV cache：
+
+```typescript
+return {
+  frame: {
+    findings: ["连接正常", "并发写入时出现问题"],
+    next: "检查事务隔离级别",
+  },
+  output: edge.to === END
+    ? { status: completion.status, result: completion.result }
+    : undefined,
+};
+```
+
+`nodeId/status/summary/result` 仍可用于旧图，但不再是必填字段。END 边推荐使用 `output` 声明对外返回，不要让模型记忆结构承担函数返回协议。
+
+发生 pi compaction 后，原生 summary 和 recent messages 会继续进入当前节点上下文；压缩前已有 frames 不再重复投影，新 frames 从压缩基线继续生长。开发者无需在 frame 中记录 compaction 或 scope 元数据。
+
+---
+
 ## 两种使用方式
 
 ### 方式 A：作为 debug/demo pi extension 使用
@@ -351,10 +373,10 @@ type RouterStrategy =
 
 Node 有两个 kind：
 
-| kind        | 含义                                                                |
-| ----------- | ------------------------------------------------------------------- |
+| kind        | 含义                                                         |
+| ----------- | ------------------------------------------------------------ |
 | `"code"`  | JS 函数。execute 内可以调`ctx.runAgent()`，来执行agent操作 |
-| `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行                 |
+| `"graph"` | 引用另一个 Graph 作为子图，Runtime 自动委托子图执行          |
 
 ---
 
@@ -450,9 +472,11 @@ const subNode: Node = {
 
 底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
 
-图节点运行期间如果 pi 发生自动、手动或 overflow compaction，SDK 会在 `session_compact` 后重发当前 NodeScope checkpoint（同一 `scopeId`）。这不会生成摘要或改写 system prompt；下一次调用仅通过 frames + checkpoint 后的 live 消息恢复上下文。
+图节点运行期间如果 pi 发生自动、手动或 overflow compaction，SDK 将 pi 原生 `compactionSummary` 与 recent messages 视为压缩历史的权威替代，并推进 frame 投影基线。若当前 NodeScope 已被压缩，投影会在 summary 后恢复 CURRENT；不会重发 checkpoint 后再遮挡压缩结果。
 
 这一规则只适用于 root-only 图。共享 Session 的嵌套 `call/compose` 活跃时，SDK 会在 `session_before_compact` 取消本次压缩：pi 的 compaction summary 基于原始 session entries，可能同时包含父上下文和子图内部 transcript，事后补发调用锚点无法安全拆开。需要独立 compaction 生命周期或可能运行很久的子任务，应使用 `delegate` 边界。
+
+如果取消策略因竞态或其他 extension 异常失效、嵌套调用仍收到 `session_compact`，SDK 会把它视为隔离违规：终止当前共享调用，并在该 session 后续模型投影中移除 compactionSummary。该路径优先保证不泄漏，代价是丢失压缩摘要；不会重发 `call_start` 来宣称边界已经恢复。
 
 ### 位置约定
 
@@ -766,13 +790,13 @@ tail -f loop-graph-debug.log  # 实时观察
 
 关键事件：
 
-| 事件               | 查看内容                     |
-| ------------------ | ---------------------------- |
-| `enter_node`     | 节点 ID、输入数据、当前帧栈  |
+| 事件               | 查看内容                         |
+| ------------------ | -------------------------------- |
+| `enter_node`     | 节点 ID、输入数据、当前帧栈      |
 | `projection`     | 消息总数、scopeId 是否命中、帧数 |
-| `agent_complete` | 完成状态、result 字段列表    |
-| `exit_node`      | 推入的帧摘要、累计帧数       |
-| `agent_retry`    | 验证不通过的原因             |
+| `agent_complete` | 完成状态、result 字段列表        |
+| `exit_node`      | 推入的帧摘要、累计帧数           |
+| `agent_retry`    | 验证不通过的原因                 |
 
 ---
 
@@ -889,7 +913,6 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项                    | 当前策略                                                                                                                                                                                                                |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `callTool`          | 不计划实现。纯代码节点可直接调用业务库函数（Node.js API、第三方 SDK 等）。`ctx.runAgent` 已提供 agent 能力，不需要通过 tool-call 间接驱动。 |
-| schema / 泛型类型| session 续跑          | 当前不持久化帧栈，图运行中断后需重新开始。                                                                                                                                                                              |
+| 项                | 当前策略     |
+| ----------------- | ------------ |
+| schema / 泛型类型 | session 续跑 |

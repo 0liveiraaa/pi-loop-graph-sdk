@@ -169,6 +169,19 @@ describe("GraphRuntime", () => {
     expect(runtime.currentScope).toBeNull();
   });
 
+  it("compaction 只推进模型投影基线，不删除 Runtime 完整 frames", () => {
+    const runtime = new GraphRuntime();
+    const instance = runtime.pushGraph(minimalGraph(), {}, "root");
+    instance.frames.push({ memory: "before compaction" });
+
+    runtime.recordCompaction();
+    expect(instance.frames).toEqual([{ memory: "before compaction" }]);
+    expect(runtime.projectedFrames).toEqual([]);
+
+    instance.frames.push({ memory: "after compaction" });
+    expect(runtime.projectedFrames).toEqual([{ memory: "after compaction" }]);
+  });
+
   it("records compaction generations without changing the active scope identity", () => {
     const runtime = new GraphRuntime();
     runtime.pushGraph(minimalGraph(), {});

@@ -454,7 +454,7 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("compaction checkpoint", () => {
-    it("活动节点 compaction 后以相同 scopeId 重发 checkpoint，retry 投影保留 frames 且不泄漏 summary", async () => {
+    it("活动节点 compaction 后保留原生 summary/recent messages，并从空 frame 基线重新生长", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
       let retryProjection: any;
@@ -468,6 +468,20 @@ describe("createLoopGraphExtension", () => {
       const second: Node = {
         kind: "code", id: "second", subGoal: "压缩后继续",
         async execute() {
+          const scopeEntries = pi._sentMessages
+            .filter((message: any) => message.customType === "loop_graph_node_scope")
+            .map((message: any, index: number) => ({
+              id: `scope-entry-${index}`,
+              type: "custom_message",
+              customType: "loop_graph_node_scope",
+              details: message.details,
+            }));
+          pi.emit("session_before_compact", {
+            reason: "overflow",
+            willRetry: true,
+            branchEntries: scopeEntries,
+            preparation: { firstKeptEntryId: scopeEntries.at(-1)?.id },
+          });
           pi.emit("session_compact", { reason: "overflow", willRetry: true });
           retryProjection = pi.emit("context", {
             messages: [
@@ -507,14 +521,14 @@ describe("createLoopGraphExtension", () => {
 
       const scopes = pi._sentMessages.filter((message: any) => message.customType === "loop_graph_node_scope");
       const secondScopes = scopes.filter((message: any) => message.details.nodeId === "second");
-      expect(secondScopes).toHaveLength(2);
-      expect(secondScopes[0].details.scopeId).toBe(secondScopes[1].details.scopeId);
+      expect(secondScopes).toHaveLength(1);
 
       const text = retryProjection.messages.map((message: any) => String(message.content)).join("\n");
-      expect(text).toContain("first done");
+      expect(retryProjection.messages.some((message: any) => message.role === "compactionSummary")).toBe(true);
+      expect(text).not.toContain("first done");
       expect(text).toContain("nodeId: second");
       expect(text).not.toContain("outer transcript");
-      expect(text).not.toContain("compaction secret");
+      expect(text).toContain("compaction secret");
     });
 
     it("无活动图节点时忽略 compaction，不写入 checkpoint", () => {

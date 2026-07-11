@@ -118,6 +118,60 @@ describe("projectMessages — NodeScope v2", () => {
     expect(text(skipped)).not.toContain("node1 已完成");
   });
 
+  it("默认 formatter 原样投影开发者自定义 frame，不预设字段", () => {
+    const activeScope = scope("node2");
+    const customFrame: ContextFrame = {
+      findings: ["连接正常", "问题位于事务边界"],
+      next: "检查隔离级别",
+    };
+    const out = projectMessages({
+      messages: [scopeMessage(activeScope)],
+      frames: [customFrame],
+      currentNode: agentNode("node2"),
+      activeScope,
+    });
+    const projected = text(out);
+    expect(projected).toContain("事务边界");
+    expect(projected).toContain("检查隔离级别");
+    expect(projected).not.toContain('"nodeId":"node1"');
+  });
+
+  it("compaction 后保留原生 summary、活动 scope 与 recent messages", () => {
+    const activeScope = scope("node2");
+    const out = projectMessages({
+      messages: [
+        { role: "compactionSummary", summary: "node1 与 node2 早期工作" },
+        { role: "user", content: "kept before scope" },
+        scopeMessage(activeScope),
+        { role: "assistant", content: "node2 recent" },
+      ],
+      frames: [],
+      currentNode: agentNode("node2"),
+      activeScope,
+      compactionActive: true,
+    });
+    expect(out[0].role).toBe("compactionSummary");
+    expect(text(out)).toContain("node2 recent");
+    expect(text(out)).not.toContain("kept before scope");
+  });
+
+  it("活动 scope 被压缩时在 summary 后恢复 CURRENT，且不丢 recent messages", () => {
+    const activeScope = scope("node2", "compacted-scope");
+    const out = projectMessages({
+      messages: [
+        { role: "compactionSummary", summary: "node2 前两轮工作" },
+        { role: "assistant", content: "kept tool conclusion" },
+      ],
+      frames: [],
+      currentNode: agentNode("node2"),
+      activeScope,
+      compactionActive: true,
+    });
+    expect(out[0].role).toBe("compactionSummary");
+    expect(text(out)).toContain("=== CURRENT ===");
+    expect(text(out)).toContain("kept tool conclusion");
+  });
+
   it("合成 frame 与 recovery CURRENT 消息包含 timestamp", () => {
     const out = projectMessages({ messages: [], frames: [frame], currentNode: agentNode("node2"), activeScope: scope("node2") });
     expect(out).toHaveLength(2);

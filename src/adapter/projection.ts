@@ -24,6 +24,8 @@ export interface ProjectionInput {
    *  返回 null 则跳过 COMPLETED 段（不折叠）。
    *  默认：保持当前 JSON 格式（向后兼容）。 */
   frameFormatter?: (frames: ContextFrame[]) => string | null;
+  /** 活动图已经历 compaction；原生 summary 是此前上下文的权威替代。 */
+  compactionActive?: boolean;
 }
 
 export interface MessageEntry {
@@ -43,6 +45,12 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
   const { messages, frames, currentNode, activeScope } = input;
   const currentIdx = activeScope ? findLastMatchingScope(messages, activeScope) : -1;
   const result: MessageEntry[] = [];
+  const summaryIdx = input.compactionActive ? findLastCompactionSummary(messages) : -1;
+
+  // pi 的 summary + recent messages 是压缩后上下文的权威表达。若活动 scope
+  // 仍在保留区，只保留 summary 与该 scope 后内容；若 scope 已被压缩，则在
+  // summary 后恢复 CURRENT，并保留所有 recent messages。
+  if (summaryIdx >= 0) result.push(messages[summaryIdx]);
 
   // frame 段
   if (frames.length > 0) {
@@ -61,8 +69,8 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
     const includeAnchor = messages[currentIdx]?.customType === "loop_graph_node_scope";
     result.push(...messages.slice(currentIdx + (includeAnchor ? 0 : 1)));
   } else if (currentNode) {
-    // fail closed：scope 丢失时只恢复确定性节点信息，绝不回退 raw transcript。
     result.push(buildNodeInfo(currentNode, input.availableEdges));
+    if (summaryIdx >= 0) result.push(...messages.slice(summaryIdx + 1));
   }
   return result;
 }
@@ -143,14 +151,14 @@ function isMatchingScope(
 
 /** 默认帧格式化器：保持向后兼容的 JSON 格式（=== COMPLETED === / === END === 包裹）。 */
 export const defaultFrameFormatter = (frames: ContextFrame[]) =>
-  `=== COMPLETED ===\n${JSON.stringify(
-    frames.map((f) => ({
-      nodeId: f.nodeId,
-      status: f.status,
-      summary: f.summary,
-      result: f.result,
-    })),
-  )}\n=== END ===`;
+  `=== COMPLETED ===\n${JSON.stringify(frames)}\n=== END ===`;
+
+function findLastCompactionSummary(messages: MessageEntry[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "compactionSummary") return index;
+  }
+  return -1;
+}
 
 export function buildNodeInfoContent(node: Node, availableEdges?: EdgeChoice[]): string {
   const lines: string[] = ["=== CURRENT ==="];

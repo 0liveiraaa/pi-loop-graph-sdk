@@ -21,13 +21,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * 图的终止标记，也是图的「返回」出口。
  *
  * 当一条边的 to 指向 END，Runtime 弹出当前图的栈帧，
- * 并将该边 migrate 产出的 frame.result 作为本图的返回值：
+ * 并将该边 migrate 产出的 output 作为本图的返回值；旧代码仍可使用
+ * frame.status/result 兼容通道：
  *   · 子图调用   → 成为父图 kind="graph" 节点的 NodeCompletion.result
  *   · tool 调用  → 成为返回给 agent 的工具结果
  *   · 顶层调用   → 成为整次运行的最终产出
  *
- * 即:END 边的 migrate 承担双重身份——既折叠最后一层进历史，
- * 又通过 frame.result 声明「这张图对外交付什么」。
+ * 即:END 边的 migrate 承担双重身份——既自由定义最后一层工作记忆，
+ * 又通过 output 声明「这张图对外交付什么」。
  */
 export const END = Symbol("graph.end");
 
@@ -45,14 +46,18 @@ export interface NodeCompletion {
 // ── 栈帧 ──
 
 /**
- * 栈中的一层。每进入一个节点就 push 一帧；
- * 离开节点时由 Edge.migrate 填写 snapshot 将其折叠。
+ * 栈中的一层。内容完全由开发者定义；SDK 控制元数据不进入该对象，也不
+ * 默认向 LLM 添加 nodeId/status 等内部概念。兼容字段全部可选。
  */
-export interface ContextFrame {
-  nodeId: string;
-  status: "ok" | "failed" | "cancelled";
-  summary: string;
-  result: Record<string, unknown>;
+export interface ContextFrame extends Record<string, unknown> {
+  /** @deprecated 兼容字段；SDK 不再要求或特殊投影这些字段。 */
+  nodeId?: string;
+  /** @deprecated 兼容字段；图控制状态来自 NodeCompletion。 */
+  status?: "ok" | "failed" | "cancelled";
+  /** @deprecated 兼容字段；开发者可使用任意上下文结构。 */
+  summary?: string;
+  /** @deprecated END 返回值兼容通道；新代码优先使用 MigrationResult.output。 */
+  result?: Record<string, unknown>;
 }
 
 // ── 图调用协议 ──
@@ -280,7 +285,10 @@ export interface Mechanism {
  * 取作本图的返回值（见 END 注释）；input 此时无后继节点，应省略。
  */
 export interface MigrationResult {
-  frame: ContextFrame; // 如何折叠栈顶层（END 边时 frame.result 兼作图的返回值）
+  /** 完全由开发者定义的模型工作记忆；SDK 不预设其字段。 */
+  frame: ContextFrame;
+  /** END 边可显式声明图返回。省略时兼容读取 frame.status/result，再回退到 NodeCompletion。 */
+  output?: Pick<NodeCompletion, "status" | "result">;
   input?: Record<string, unknown>; // 下一节点的一次性入参，由 Runtime 包装为 NodeInput
 }
 
