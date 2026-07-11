@@ -194,7 +194,7 @@ export type Node =
  *   appendContext  — 向 agent 消息流追加内容（append-only，不触发 turn）。
  *
  * appendContext 是 mechanism 作用于 agent 上下文的唯一合法通道：
- *   · 追加发生在当前节点哨兵之后，属于本节点 active 段，离开节点后随
+ *   · 追加发生在当前 NodeScope 之后，属于本节点 active 段，离开节点后随
  *     ReAct 一起折叠为帧摘要——天然隔离，不泄漏到下一节点。
  *   · 遵循原则 7「追加不注入」：不改 system prompt，只在消息流侧追加。
  */

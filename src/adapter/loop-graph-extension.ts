@@ -34,12 +34,13 @@ import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
 import { assertValidGraph, validateGraphTools } from "../validate.js";
 import { selectEdge } from "../router.js";
-import { projectMessages } from "./projection.js";
+import { buildNodeInfoContent, projectMessages, type EdgeChoice } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
 import { GraphRegistry } from "../registry.js";
+import type { GraphRunResult } from "./graph-execution-host.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
@@ -49,12 +50,15 @@ import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js"
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const BOUNDARY_TYPE = "loop_graph_boundary";
+const NODE_SCOPE_TYPE = "loop_graph_node_scope";
 const completeToolRegistered = new WeakSet<object>();
 
 // ── 公开 API 类型 ──────────────────────────────────────────
 
 export interface LoopGraphExtensionOptions {
+  /** 仅安装执行 Runtime，不注册 session UI 通知或对外 invocation。
+   * 供独立子 AgentSession 使用。 */
+  runtimeOnly?: boolean;
   /** 是否注册 SDK 自带测试/示例图。默认 false，
    *  只有 debug/demo extension 入口应设为 true。 */
   demoGraphs?: boolean;
@@ -81,7 +85,7 @@ export interface LoopGraphExtension {
     trigger:
       | { source: "command"; args?: string; params?: Record<string, unknown> }
       | { source: "tool"; params?: Record<string, unknown> },
-  ): Promise<void>;
+  ): Promise<GraphRunResult>;
 }
 
 // ── 工厂函数 ───────────────────────────────────────────────
@@ -135,7 +139,7 @@ export function createLoopGraphExtension(
       messages: e.messages as any[],
       frames: rt.topInstance?.frames ?? [],
       currentNode: rt.currentNode,
-      nodeMarker: rt.nodeMarker,
+      activeScope: rt.currentScope,
       availableEdges,
       frameFormatter: options.frameFormatter,
     };
@@ -168,17 +172,21 @@ export function createLoopGraphExtension(
   });
 
   // session 启动通知
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("Loop Graph Extension 已加载", "info");
-  });
+  if (!options.runtimeOnly) {
+    pi.on("session_start", async (_event, ctx) => {
+      ctx.ui.notify("Loop Graph Extension 已加载", "info");
+    });
+  }
 
   // 注册 skill 路径（pi 原生 skill 系统扫描）
-  pi.on("resources_discover", (_event) => {
-    if (fs.existsSync(skillBasePath)) {
-      return { skillPaths: [skillBasePath] };
-    }
-    return {};
-  });
+  if (!options.runtimeOnly) {
+    pi.on("resources_discover", (_event) => {
+      if (fs.existsSync(skillBasePath)) {
+        return { skillPaths: [skillBasePath] };
+      }
+      return {};
+    });
+  }
 
   // ── 注册 demo 图（仅在 debug/demo 模式）──
 
@@ -196,7 +204,7 @@ export function createLoopGraphExtension(
     piInner: ExtensionAPI,
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
-  ): Promise<void> {
+  ): Promise<GraphRunResult> {
     assertValidGraph(graph);
 
     // 首次执行：校验工具存在性（pi.getAllTools() 此时已包含所有已注册工具）
@@ -238,7 +246,12 @@ export function createLoopGraphExtension(
           content: `无匹配入口: ${JSON.stringify(background)}`,
           display: true,
         });
-        return;
+        return {
+          graphId: graph.id,
+          status: "failed",
+          result: { reason: `无匹配入口: ${JSON.stringify(background)}` },
+          steps: 0,
+        };
       }
 
       runtime.pushGraph(graph, background);
@@ -256,17 +269,17 @@ export function createLoopGraphExtension(
         setNodeToolsForInstance(piInner, node);
         debugLog.toolsChanged(nodeId, piInner.getActiveTools());
 
-        const marker = runtime.nextMarker(nodeId);
-        piInner.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
+        const scope = runtime.nextScope(nodeId);
+        appendNodeScope(piInner, node, scope, getAvailableEdges(graph, nodeId));
 
-        // 追加 skill 内容（哨兵之后，属于本节点 active 段，离开后随 ReAct 折叠）
+        // 追加 skill 内容（NodeScope 之后，属于本节点 active 段，离开后随 ReAct 折叠）
         appendSkillContent(piInner, node);
 
-        runtime.enterNode(nodeId, marker, input);
+        runtime.enterNode(nodeId, scope, input);
         debugLog.enterNode(
           runtime.callStack.length,
           nodeId,
-          marker,
+          scope.scopeId,
           input,
           runtime.topInstance?.frames ?? [],
         );
@@ -302,7 +315,12 @@ export function createLoopGraphExtension(
             content: `图结束（无边匹配 ${nodeId}）`,
             display: true,
           });
-          break;
+          return {
+            graphId: graph.id,
+            status: completion.status,
+            result: completion.result,
+            steps: step + 1,
+          };
         }
 
         const migration = edge.migrate(runtime.topInstance!, completion);
@@ -323,7 +341,12 @@ export function createLoopGraphExtension(
             display: true,
           });
           debugLog.graphEnd(graph.id, step + 1, runtime.topInstance?.frames ?? []);
-          break;
+          return {
+            graphId: graph.id,
+            status: migration.frame.status,
+            result: migration.frame.result,
+            steps: step + 1,
+          };
         }
 
         nodeId = edge.to as string;
@@ -332,6 +355,13 @@ export function createLoopGraphExtension(
           source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
         };
       }
+
+      return {
+        graphId: graph.id,
+        status: "failed",
+        result: { reason: "Max steps (100) exceeded" },
+        steps: 100,
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       debugLog.graphError(graph.id, reason);
@@ -346,6 +376,12 @@ export function createLoopGraphExtension(
         content: `图运行错误: ${reason}`,
         display: true,
       });
+      return {
+        graphId: graph.id,
+        status: "failed",
+        result: { reason },
+        steps: runtime.topInstance?.frames.length ?? 0,
+      };
     } finally {
       runtime.reset();
       nodeContext.reset();
@@ -358,7 +394,13 @@ export function createLoopGraphExtension(
   // ── 返回公开 API ────────────────────────────────────────
 
   return {
-    registerGraph: (graph) => registry.registerGraph(graph, defaultTools),
+    registerGraph: (graph) => {
+      if (options.runtimeOnly && graph.invocation) {
+        registry.registerGraph({ ...graph, invocation: undefined }, defaultTools);
+        return;
+      }
+      registry.registerGraph(graph, defaultTools);
+    },
     // 公开接口只暴露 (graph, trigger)，内部 executeGraph 已有 pi
     executeGraph(graph, trigger) {
       return executeGraph(pi, graph, trigger);
@@ -399,17 +441,17 @@ export function createLoopGraphExtension(
         const prevTools = saveActiveTools(piInner);
         setNodeToolsForInstance(piInner, node);
 
-        const marker = childRt.nextMarker(nodeId);
-        piInner.sendMessage({ customType: BOUNDARY_TYPE, content: marker, display: false });
+        const scope = childRt.nextScope(nodeId);
+        appendNodeScope(piInner, node, scope, getAvailableEdges(childGraph, nodeId));
 
-        // 追加 skill 内容（哨兵之后，属于本节点 active 段）
+        // 追加 skill 内容（NodeScope 之后，属于本节点 active 段）
         appendSkillContent(piInner, node);
 
-        childRt.enterNode(nodeId, marker, input);
+        childRt.enterNode(nodeId, scope, input);
         debugLog.enterNode(
           childRt.callStack.length,
           nodeId,
-          marker,
+          scope.scopeId,
           input,
           childRt.topInstance?.frames ?? [],
         );
@@ -467,10 +509,7 @@ export function createLoopGraphExtension(
       return {
         nodeId: graphNode.id,
         status: lastFrame?.status ?? "failed",
-        result: {
-          childFrames: childInstance.frames,
-          finalResult: lastFrame?.result ?? {},
-        },
+        result: lastFrame?.result ?? {},
       };
     } finally {
       childRt.reset();
@@ -488,7 +527,7 @@ export function createLoopGraphExtension(
 
   /**
    * 节点声明了 skill 时，读取 SKILL.md 追加到消息流。
-   * 必须在哨兵之后调用，确保内容属于当前节点的 active 段。
+   * 必须在 NodeScope 之后调用，确保内容属于当前节点的 active 段。
    */
   function appendSkillContent(piInner: ExtensionAPI, node: Node): void {
     if (node.kind !== "code" || !node.skill) return;
@@ -520,6 +559,20 @@ export function createLoopGraphExtension(
         `读取失败: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  function appendNodeScope(
+    piInner: ExtensionAPI,
+    node: Node,
+    scope: import("../runtime.js").NodeScopeDescriptor,
+    availableEdges?: EdgeChoice[],
+  ): void {
+    piInner.sendMessage({
+      customType: NODE_SCOPE_TYPE,
+      content: buildNodeInfoContent(node, availableEdges),
+      details: scope,
+      display: false,
+    });
   }
 }//开发者注释:关于子图调用部分能否更合理的安排代码,使得其复用顶层图的大部分代码,而不是重新敲一遍
 
@@ -612,6 +665,17 @@ function wrapWithAgentChoiceValidator(
   };
 }
 
+function getAvailableEdges(graph: Graph, nodeId: string): EdgeChoice[] | undefined {
+  const routing = graph.routing[nodeId];
+  if (routing?.router.kind !== "agent-choice") return undefined;
+  return routing.edges.map((edge) => ({
+    id: edge.id,
+    description: edge.description ?? "",
+    priority: edge.priority,
+    target: typeof edge.to === "symbol" ? "END" : String(edge.to),
+  }));
+}
+
 /**
  * 节点进入后、execute 之前分派横切机制。
  *
@@ -619,7 +683,7 @@ function wrapWithAgentChoiceValidator(
  * 每个 mechanism 若有 onNodeEnter，则 await 调用，串行保证数据预处理
  * 先于 execute 完成。抛错统一记日志后继续，不中止节点。
  *
- * 必须在哨兵之后调用：appendContext 追加的内容才会落在本节点 active 段，
+ * 必须在 NodeScope 之后调用：appendContext 追加的内容才会落在本节点 active 段，
  * 离开节点后随 ReAct 折叠，不泄漏到下一节点。
  */
 async function applyMechanisms(

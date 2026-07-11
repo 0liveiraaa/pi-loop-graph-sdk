@@ -1,8 +1,19 @@
 # Loop Graph SDK 实现形态
 
-> 2026-07-09 | 单 agent MVP 阶段 (v0.1.0)
+> 2026-07-11 | NodeScope v2 / 独立子会话重构阶段
 >
-> 上次更新：反馈根因修复计划（阶段 1-4）全部落地
+> 上次更新：GraphExecutionHost 基础切片与 NodeScope v2 Phase 4 落地
+
+## 2026-07-11 重构状态
+
+- 图执行返回统一为 `GraphRunResult`；runtime-only 子 adapter 复用真实 `createLoopGraphExtension`，不再维护第二套弱化 Runtime，也不直接改写 `session.agent.state.messages`。
+- `GraphRuntime` 使用结构化 `NodeScopeDescriptor`（graphRunId / instanceId / scopeId / graphId / nodeId / visit / depth），主路径已删除随机 `loop_graph_boundary` 哨兵。
+- projection 从尾部匹配当前 `scopeId`，输出 frames + 当前 NodeScope 后的 live ReAct；外层 transcript、旧节点 ReAct、scope 前 compaction summary 均不保留。
+- scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
+- 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
+- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、138 项测试通过（含真实 LLM Phase 0）。
+
+> 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
 ---
 
@@ -249,6 +260,17 @@ availableEdges?: Array<{ id: string; description: string; priority: number; targ
 
 `agentChoiceField` 允许自定义字段名（默认 `"chosen_edge_id"`）。
 
+### 2.13 隔离图执行载体契约（基础切片）
+
+已新增公开的图执行边界类型：
+
+- `GraphRunRequest`：只通过 `background` 携带显式调用输入，并标注 tool/command/subgraph 来源。
+- `GraphRunResult`：统一返回 graphId、业务终态、END 最终 result 和步数；不包含 frames/trace。
+- `GraphExecutionHost`：图执行载体抽象。
+- `IsolatedSessionGraphHost`：独立子 AgentSession 的生命周期外壳。
+
+当前 `IsolatedSessionGraphHost` 已固化以下行为：同一 host 禁止并发 run；outer AbortSignal 转发到子会话；清理顺序固定为 abort → dispose；dispose 幂等；dispose 后拒绝再次运行。子 AgentSession 的实际创建与 runtime-only graph adapter 绑定通过 `IsolatedGraphSessionFactory` 注入，尚未切换 `GraphRegistry` 的 graph tool 路径。
+
 ---
 
 ## 三、上下文隔离契约
@@ -307,6 +329,9 @@ runSubgraphInExtension 创建 childRuntime：
 | **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                        | ✅   |
 | **自定义帧格式 frameFormatter** | `projection.test.ts`                        | ✅   |
 | **agent-choice 路由** | `router.test.ts` + `validate.test.ts` + `projection.test.ts` | ✅ |
+| **Phase 0 独立 AgentSession 可行性** | `graph-execution-host.spike.test.ts`（29 条，含真实 LLM） | ✅ |
+| **Phase 1 现有行为冻结** | `characterization.test.ts`（11 条） | ✅ |
+| **GraphExecutionHost 生命周期契约** | `graph-execution-host.test.ts`（8 条） | ✅ |
 
 ---
 
@@ -317,8 +342,9 @@ runSubgraphInExtension 创建 childRuntime：
 | `pi-node-context.callTool` | `throw Error` 占位                                                                         |
 | schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
 | 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
-| 帧栈太长触发 compaction      | 不处理（投影天然免疫，框架不干预）                                                           |
+| compaction 主动重锚定        | Phase 4 已提供 fail-closed 基线；Phase 5 仍需监听 `session_compact` 重发当前 NodeScope checkpoint |
 | session 续跑                 | 帧栈未持久化到磁盘                                                                           |
+| graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
 
 ### 已关闭的缺口
 

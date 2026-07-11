@@ -423,7 +423,7 @@ const reviewGraph: Graph = {
 1. ✅ 最小 Runtime：entries 入口、priority-first Router、节点→边→迁移主循环
 2. ✅ Node 的标准 execute 工厂（`createAgentExecute`）
 3. ✅ 2~3 个概念验证节点（echo、probe、chain、subgraph、validate）
-4. ✅ pi 单 agent MVP 验证通过（哨兵、投影、帧栈折叠、子图隔离、完成度验证）
+4. ✅ pi 单 agent MVP 验证通过（NodeScope v2 严格投影、帧栈折叠、子图隔离、完成度验证）
 5. ✅ 包边界修复：`createLoopGraphExtension(pi)` 工厂 + 实例级 `GraphRegistry`
 6. ✅ library / debug extension 分离（`"."` vs `"./extension"`）
 7. 🔜 在现有 review profile 旁并行运行，验证行为等价

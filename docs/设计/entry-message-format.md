@@ -2,7 +2,7 @@
 
 ## 格式
 
-每次进入节点时，Runtime 向 pi 对话流注入一条消息，`customType: "loop_graph_enter_node"`，内容为两个区块：
+每次进入节点时，Runtime 向 pi 对话流追加一条 `customType: "loop_graph_node_scope"` 消息。正文是 CURRENT；结构化 `NodeScopeDescriptor` 位于 `details`，不序列化进模型可见正文。COMPLETED 由 context 投影根据 frames 在调用前合成：
 
 ```
 === COMPLETED ===
@@ -71,4 +71,4 @@ completeWith: __graph_complete__({ status, result })
 
 ## 与 compaction 的关系
 
-compaction 可能毁掉之前注入的入口消息。旧消息毁了就毁了——Runtime 只追加一条新的 CURRENT 消息，内容为当前节点信息。不重建 COMPLETED。
+Phase 4 的安全基线是 fail closed：当前 scope 被 compaction 删除后，投影不会回退原始 transcript，而是从 `AgentInstance.frames` 重建 COMPLETED，并从当前 Node 重建确定性 CURRENT。Phase 5 将监听 `session_compact`，主动重新发出当前 NodeScope checkpoint；frames 始终是跨节点状态的唯一事实来源。

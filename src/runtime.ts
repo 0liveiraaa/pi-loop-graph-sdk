@@ -10,18 +10,29 @@ export interface CallFrame {
   currentNodeId: string | null;
 }
 
+export interface NodeScopeDescriptor {
+  protocol: 2;
+  graphRunId: string;
+  instanceId: string;
+  scopeId: string;
+  graphId: string;
+  nodeId: string;
+  visit: number;
+  depth: number;
+}
+
 export class GraphRuntime {
   callStack: CallFrame[] = [];
   isNodeActive = false;
 
-  /** 当前节点的哨兵标记（customType="loop_graph_boundary" 的 content） */
-  nodeMarker: string | null = null;
+  /** 当前节点的语义作用域。details 用于匹配，不依赖消息正文。 */
+  currentScope: NodeScopeDescriptor | null = null;
 
   currentNode: Node | null = null;
   currentInput: NodeInput | null = null;
 
-  /** 哨兵递增计数，保证同节点重复进入也能区分 */
-  private runCounter = 0;
+  readonly graphRunId = crypto.randomUUID();
+  private nodeVisits = new Map<string, number>();
 
   get top(): CallFrame | null {
     return this.callStack.length > 0
@@ -58,13 +69,24 @@ export class GraphRuntime {
     return this.callStack.pop();
   }
 
-  /** 生成下一个哨兵标记（含随机后缀，保证跨调用唯一） */
-  nextMarker(nodeId: string): string {
-    this.runCounter++;
-    return `__node_boundary__:${nodeId}:${this.runCounter}:${crypto.randomUUID().slice(0, 8)}`;
+  nextScope(nodeId: string): NodeScopeDescriptor {
+    const top = this.top;
+    if (!top) throw new Error("callStack 为空");
+    const visit = (this.nodeVisits.get(nodeId) ?? 0) + 1;
+    this.nodeVisits.set(nodeId, visit);
+    return {
+      protocol: 2,
+      graphRunId: this.graphRunId,
+      instanceId: top.instance.id,
+      scopeId: crypto.randomUUID(),
+      graphId: top.graph.id,
+      nodeId,
+      visit,
+      depth: this.callStack.length,
+    };
   }
 
-  enterNode(nodeId: string, marker: string, input: NodeInput): Node {
+  enterNode(nodeId: string, scope: NodeScopeDescriptor, input: NodeInput): Node {
     const graph = this.topGraph;
     if (!graph) throw new Error("callStack 为空");
 
@@ -75,7 +97,7 @@ export class GraphRuntime {
     top.currentNodeId = nodeId;
     this.currentNode = node;
     this.currentInput = input;
-    this.nodeMarker = marker;
+    this.currentScope = scope;
     this.isNodeActive = true;
 
     return node;
@@ -89,15 +111,15 @@ export class GraphRuntime {
     this.isNodeActive = false;
     this.currentNode = null;
     this.currentInput = null;
-    this.nodeMarker = null;
+    this.currentScope = null;
   }
 
   reset(): void {
     this.callStack = [];
     this.isNodeActive = false;
-    this.nodeMarker = null;
+    this.currentScope = null;
     this.currentNode = null;
     this.currentInput = null;
-    this.runCounter = 0;
+    this.nodeVisits.clear();
   }
 }

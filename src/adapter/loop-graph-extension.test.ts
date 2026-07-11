@@ -443,7 +443,12 @@ describe("createLoopGraphExtension", () => {
       await expect(Promise.race([
         loop.executeGraph(parentGraph, { source: "command", args: "" }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("subgraph timed out")), 50)),
-      ])).resolves.toBeUndefined();
+      ])).resolves.toMatchObject({
+        graphId: "parent_graph",
+        status: "ok",
+        result: { fromAgent: true },
+        steps: 1,
+      });
     });
   });
 

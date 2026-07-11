@@ -34,7 +34,7 @@ export const debugLog = {
   enterNode(
     depth: number,
     nodeId: string,
-    marker: string,
+    scopeId: string,
     input: NodeInput,
     frames: ContextFrame[],
   ): void {
@@ -42,7 +42,7 @@ export const debugLog = {
       type: "enter_node",
       depth,
       nodeId,
-      marker,
+      scopeId,
       inputData: input.data,
       frameCount: frames.length,
       frameSummaries: frames.map((f) => f.summary),
@@ -70,9 +70,11 @@ export const debugLog = {
     log({
       type: "projection",
       messageCount: input.messages.length,
-      splitMarker: input.nodeMarker,
-      splitFound: input.nodeMarker
-        ? input.messages.some((m) => m.content === input.nodeMarker)
+      scopeId: input.activeScope?.scopeId ?? null,
+      splitFound: input.activeScope
+        ? input.messages.some((m) =>
+            m.customType === "loop_graph_node_scope" &&
+            (m.details as { scopeId?: string } | undefined)?.scopeId === input.activeScope?.scopeId)
         : false,
       frameCount: input.frames.length,
       currentNode: input.currentNode?.id ?? null,

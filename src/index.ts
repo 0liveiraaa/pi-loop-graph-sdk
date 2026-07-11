@@ -25,6 +25,20 @@ export { resolveNodeTools } from "./tools-resolve.js";
 export { createAgentExecute } from "./agent-execute.js";
 export type { AgentExecuteOptions } from "./agent-execute.js";
 
+// ── 隔离图执行载体 ──
+export { IsolatedSessionGraphHost } from "./adapter/graph-execution-host.js";
+export { createIsolatedGraphSessionFactory } from "./adapter/isolated-graph-session.js";
+export type {
+  GraphExecutionHost,
+  GraphInvocationKind,
+  GraphRunRequest,
+  GraphRunResult,
+  IsolatedGraphSession,
+  IsolatedGraphSessionFactory,
+  IsolatedSessionGraphHostOptions,
+} from "./adapter/graph-execution-host.js";
+export type { IsolatedGraphSessionFactoryOptions } from "./adapter/isolated-graph-session.js";
+
 // ── 核心类型 ──
 export * from "./type.js";
 

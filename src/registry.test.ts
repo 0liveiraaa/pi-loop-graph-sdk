@@ -64,8 +64,13 @@ function minimalGraph(name = "graph_cmd"): Graph {
 describe("GraphRegistry", () => {
   it("parses command args before executing a graph", async () => {
     const pi = fakePi();
-    const executeGraph = vi.fn().mockResolvedValue(undefined);
     const graph = minimalGraph("review_turn");
+    const executeGraph = vi.fn().mockResolvedValue({
+      graphId: graph.id,
+      status: "ok",
+      result: {},
+      steps: 1,
+    });
     const registry = new GraphRegistry(pi, executeGraph);
 
     registry.registerGraph(graph);
@@ -87,8 +92,14 @@ describe("GraphRegistry", () => {
 
   it("executes graph tools without relying on dynamic this binding", async () => {
     const pi = fakePi();
-    const executeGraph = vi.fn().mockResolvedValue(undefined);
     const graph = minimalGraph("review_tool");
+    const graphResult = {
+      graphId: graph.id,
+      status: "ok" as const,
+      result: { subject: "math" },
+      steps: 1,
+    };
+    const executeGraph = vi.fn().mockResolvedValue(graphResult);
     const registry = new GraphRegistry(pi, executeGraph);
 
     registry.registerGraph(graph);
@@ -96,9 +107,9 @@ describe("GraphRegistry", () => {
     const toolDefinition = pi.registerTool.mock.calls[0][0];
     await expect(
       toolDefinition.execute("tool-call-1", { subject: "math" }),
-    ).resolves.toMatchObject({
-      content: [{ type: "text", text: `图 "${graph.id}" 执行完成` }],
-      details: {},
+    ).resolves.toEqual({
+      content: [{ type: "text", text: JSON.stringify(graphResult) }],
+      details: graphResult,
     });
 
     expect(executeGraph).toHaveBeenCalledWith(pi, graph, {

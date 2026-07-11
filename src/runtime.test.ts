@@ -64,15 +64,16 @@ describe("GraphRuntime", () => {
     expect(runtime.topGraph).toBe(graph);
   });
 
-  it("creates unique boundary markers even when entering the same node repeatedly", () => {
+  it("creates unique semantic scopes even when entering the same node repeatedly", () => {
     const runtime = new GraphRuntime();
+    runtime.pushGraph(minimalGraph(), {});
 
-    const first = runtime.nextMarker("start");
-    const second = runtime.nextMarker("start");
+    const first = runtime.nextScope("start");
+    const second = runtime.nextScope("start");
 
-    expect(first).toMatch(/^__node_boundary__:start:1:/);
-    expect(second).toMatch(/^__node_boundary__:start:2:/);
-    expect(second).not.toBe(first);
+    expect(first).toMatchObject({ protocol: 2, nodeId: "start", visit: 1 });
+    expect(second).toMatchObject({ protocol: 2, nodeId: "start", visit: 2 });
+    expect(second.scopeId).not.toBe(first.scopeId);
   });
 
   it("enterNode activates only current transient node state and exitNode folds it into frames", () => {
@@ -80,12 +81,13 @@ describe("GraphRuntime", () => {
     runtime.pushGraph(minimalGraph(), { subject: "review" });
     const input = { data: { topic: "sdk" }, source: { kind: "entry" as const, entryId: "main" } };
 
-    const node = runtime.enterNode("start", "marker-1", input);
+    const scope = runtime.nextScope("start");
+    const node = runtime.enterNode("start", scope, input);
 
     expect(node.id).toBe("start");
     expect(runtime.currentNodeId).toBe("start");
     expect(runtime.currentInput).toBe(input);
-    expect(runtime.nodeMarker).toBe("marker-1");
+    expect(runtime.currentScope).toBe(scope);
     expect(runtime.isNodeActive).toBe(true);
 
     const frame = {
@@ -100,13 +102,13 @@ describe("GraphRuntime", () => {
     expect(runtime.isNodeActive).toBe(false);
     expect(runtime.currentNode).toBeNull();
     expect(runtime.currentInput).toBeNull();
-    expect(runtime.nodeMarker).toBeNull();
+    expect(runtime.currentScope).toBeNull();
   });
 
   it("reset clears graph stack and transient node state", () => {
     const runtime = new GraphRuntime();
     runtime.pushGraph(minimalGraph(), {});
-    runtime.enterNode("start", runtime.nextMarker("start"), {
+    runtime.enterNode("start", runtime.nextScope("start"), {
       data: {},
       source: { kind: "entry", entryId: "main" },
     });
@@ -118,6 +120,6 @@ describe("GraphRuntime", () => {
     expect(runtime.isNodeActive).toBe(false);
     expect(runtime.currentNode).toBeNull();
     expect(runtime.currentInput).toBeNull();
-    expect(runtime.nodeMarker).toBeNull();
+    expect(runtime.currentScope).toBeNull();
   });
 });

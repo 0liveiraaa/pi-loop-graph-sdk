@@ -54,7 +54,7 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 ## 三、不可妥协的原则
 
 1. **编排不推理**。框架不调用 LLM 做摘要、评估或决策。帧栈的 summary 是纯字符串。路由裁决是代码函数。
-2. **无隐式全局状态**。所有跨节点状态必须显式存在于帧栈中。没有隐藏在闭包、模块变量或副作用中的数据传递。**mechanism 有两个显式、受约束的作用通道**：(a) `AgentInstance.scratch`——代码侧横切工作状态，只有 `Mechanism.apply` 可写，不进 agent 上下文；(b) `MechanismContext.appendContext()`——向 agent 消息流追加上下文（append-only，落在当前节点哨兵之后，随 ReAct 折叠，天然隔离，遵循原则 6）。两者都**不得用作跨节点业务状态迁移通道**（那仍归帧栈/边）。这是"约束怎么做、开放做什么"（原则 5）的体现：框架固化通道形态，业务自由决定追加什么。
+2. **无隐式全局状态**。所有跨节点状态必须显式存在于帧栈中。没有隐藏在闭包、模块变量或副作用中的数据传递。**mechanism 有两个显式、受约束的作用通道**：(a) `AgentInstance.scratch`——代码侧横切工作状态，只有 `Mechanism.apply` 可写，不进 agent 上下文；(b) `MechanismContext.appendContext()`——向 agent 消息流追加上下文（append-only，落在当前 NodeScope 之后，随 ReAct 折叠，天然隔离，遵循原则 6）。两者都**不得用作跨节点业务状态迁移通道**（那仍归帧栈/边）。这是"约束怎么做、开放做什么"（原则 5）的体现：框架固化通道形态，业务自由决定追加什么。
 3. **图即真相**。所有跨阶段状态迁移必须表达为图的边和路由。不允许节点内部隐藏跨节点迁移逻辑。
 4. **隔离即边界**。子图创建新 AgentInstance，`frames = []`。父图不可窥探子图内部。
 5. **约束架构骨架，开放业务实现**。框架通过类型固化核心契约（Node、Edge、Router 的接口），但不阻拦合理的定制化需求。所有扩展点都是纯函数。
@@ -108,7 +108,7 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 ## 六、当前状态
 
 - **版本**：v0.1.0，单 agent MVP
-- **已验证**：帧栈折叠、子图隔离、哨兵投影、完成度验证、工厂实例隔离、包边界分离
+- **已验证**：帧栈折叠、子图隔离、NodeScope v2 严格投影、完成度验证、工厂实例隔离、包边界分离
 - **已知缺口**（详见 `docs/形态/implementation-status.md` 第五节）：agent-choice 路由、callTool、多 skill、schema helper、session 续跑、defaultTools 不流入 skill 节点
 - **能力债优先级**：先保障单 agent 编排完整性（callTool → 多 skill → agent-choice → schema helper）。多 agent 通讯（`docs/设计/communication-design.md`）为核心远期愿景，单 agent MVP 是第一步。
 - **质量承诺**：可靠性优先。已知问题必须修复且必须在文档中声明，才可声称 stable。

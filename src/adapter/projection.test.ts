@@ -1,285 +1,126 @@
-// ============================================================
-//  投影折叠正确性测试（脱离 pi，纯函数）
-// ============================================================
-
 import { describe, expect, it } from "vitest";
-import { projectMessages, defaultFrameFormatter, type MessageEntry } from "./projection.js";
+import { projectMessages, type MessageEntry } from "./projection.js";
 import type { ContextFrame, Node } from "../type.js";
-
-const B = "loop_graph_boundary";
+import type { NodeScopeDescriptor } from "../runtime.js";
 
 const agentNode = (id: string): Node => ({
-  kind: "code",
-  id,
-  subGoal: `子目标-${id}`,
-  tools: ["some_tool"],
+  kind: "code", id, subGoal: `子目标-${id}`, tools: ["some_tool"],
   execute: async () => ({ nodeId: id, status: "ok", result: {} }),
 });
 
-/** 一段模拟的两节点 transcript：node1 已完成，正处于 node2 的 turn */
-function twoNodeTranscript(): MessageEntry[] {
-  return [
-    { role: "system", content: "SYS" },
-    { role: "user", content: "/review 二叉树" },
-    { customType: B, content: "__node_boundary__:node1:1" },
-    { customType: "loop_graph_prompt", content: "开始执行: node1" },
-    { role: "assistant", content: "node1 思考…" },
-    { role: "toolResult", content: "node1 工具结果" },
-    { role: "assistant", content: "node1 __graph_complete__" },
-    { role: "toolResult", content: "node1 complete ok" },
-    { customType: B, content: "__node_boundary__:node2:2" },
-    { customType: "loop_graph_prompt", content: "开始执行: node2" },
-    { role: "assistant", content: "node2 正在工作…" },
-  ];
-}
+const scope = (nodeId: string, scopeId = `scope-${nodeId}`): NodeScopeDescriptor => ({
+  protocol: 2, graphRunId: "run-1", instanceId: "instance-1", scopeId,
+  graphId: "graph-1", nodeId, visit: 1, depth: 1,
+});
 
-const asText = (m: MessageEntry) =>
-  typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-const joined = (msgs: MessageEntry[]) => msgs.map(asText).join("\n");
+const scopeMessage = (descriptor: NodeScopeDescriptor, content = `=== CURRENT ===\nnodeId: ${descriptor.nodeId}\n=== END ===`): MessageEntry => ({
+  customType: "loop_graph_node_scope", content, details: descriptor,
+});
 
-describe("projectMessages 折叠", () => {
-  it("第一个节点：无帧、不丢任何东西（frames 为空）", () => {
+const text = (messages: MessageEntry[]) => messages.map((m) =>
+  typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n");
+
+const frame: ContextFrame = {
+  nodeId: "node1", status: "ok", summary: "node1 已完成", result: { value: 1 },
+};
+
+describe("projectMessages — NodeScope v2", () => {
+  it("只保留匹配 NodeScope 及其后的当前节点 live ReAct", () => {
+    const oldScope = scope("node1", "scope-old");
+    const activeScope = scope("node2", "scope-active");
     const messages: MessageEntry[] = [
-      { role: "system", content: "SYS" },
-      { role: "user", content: "/review" },
-      { customType: B, content: "__node_boundary__:node1:1" },
-      { customType: "loop_graph_prompt", content: "开始执行: node1" },
-      { role: "assistant", content: "node1 工作" },
+      { role: "system", content: "OUTER SYSTEM" },
+      { role: "user", content: "OUTER INVOCATION" },
+      scopeMessage(oldScope),
+      { role: "assistant", content: "old react" },
+      { role: "toolResult", content: "old tool result" },
+      scopeMessage(activeScope),
+      { customType: "loop_graph_prompt", content: "current prompt" },
+      { role: "assistant", content: "current react" },
     ];
-    const out = projectMessages({
-      messages,
-      frames: [],
-      currentNode: agentNode("node1"),
-      
-      nodeMarker: "__node_boundary__:node1:1",
-    });
 
-    // 系统提示与原始 invocation 保留
-    expect(asText(out[0])).toBe("SYS");
-    expect(asText(out[1])).toBe("/review");
-    // 无 COMPLETED 段
-    expect(joined(out)).not.toContain("=== COMPLETED ===");
-    // 有 CURRENT 段
-    expect(joined(out)).toContain("=== CURRENT ===");
-    // 当前节点的 live 内容还在
-    expect(joined(out)).toContain("node1 工作");
-    // 哨兵本身被 skip
-    expect(joined(out)).not.toContain("__node_boundary__:node1:1");
+    const out = projectMessages({ messages, frames: [frame], currentNode: agentNode("node2"), activeScope });
+    const projected = text(out);
+
+    expect(projected).toContain("=== COMPLETED ===");
+    expect(projected).toContain("node1 已完成");
+    expect(projected).toContain("=== CURRENT ===");
+    expect(projected).toContain("current prompt");
+    expect(projected).toContain("current react");
+    expect(projected).not.toContain("OUTER SYSTEM");
+    expect(projected).not.toContain("OUTER INVOCATION");
+    expect(projected).not.toContain("old react");
+    expect(projected).not.toContain("old tool result");
   });
 
-  it("第二个节点：前序节点 ReAct 被摘要顶替，且上下文变小", () => {
-    const messages = twoNodeTranscript();
-    const frame1: ContextFrame = {
-      nodeId: "node1",
-      status: "ok",
-      summary: "node1 已出题",
-      result: { question: "Q1" },
-    };
-
+  it("compaction summary 位于 scope 前时不会重新泄漏", () => {
+    const activeScope = scope("node2");
     const out = projectMessages({
-      messages,
-      frames: [frame1],
-      currentNode: agentNode("node2"),
-      
-      nodeMarker: "__node_boundary__:node2:2",
-    });
-
-    const text = joined(out);
-
-    // 1. 真正的 head（系统提示 + 原始 invocation）保留
-    expect(asText(out[0])).toBe("SYS");
-    expect(asText(out[1])).toBe("/review 二叉树");
-
-    // 2. node1 的 ReAct 全部消失
-    expect(text).not.toContain("node1 思考");
-    expect(text).not.toContain("node1 工具结果");
-    expect(text).not.toContain("node1 __graph_complete__");
-    expect(text).not.toContain("node1 complete ok");
-
-    // 3. node1 被一行摘要顶替
-    expect(text).toContain("=== COMPLETED ===");
-    expect(text).toContain("node1 已出题");
-
-    // 4. 当前节点 live 内容保留
-    expect(text).toContain("node2 正在工作");
-    expect(text).toContain("=== CURRENT ===");
-
-    // 5. 哨兵不出现在投影里
-    expect(text).not.toContain("__node_boundary__");
-
-    // 6. 上下文确实变小（投影消息数 < 原始）
-    expect(out.length).toBeLessThan(messages.length);
-  });
-
-  it("nodeMarker 未匹配时退化：摘要追加末尾，系统提示仍在最前", () => {
-    const messages: MessageEntry[] = [
-      { role: "system", content: "SYS" },
-      { role: "user", content: "hi" },
-    ];
-    const out = projectMessages({
-      messages,
-      frames: [
-        { nodeId: "n1", status: "ok", summary: "s1", result: {} },
+      messages: [
+        { role: "user", content: "compaction summary containing outer secrets" },
+        scopeMessage(activeScope),
+        { role: "assistant", content: "live" },
       ],
-      currentNode: null,
-      
-      nodeMarker: "__node_boundary__:missing:9",
+      frames: [], currentNode: agentNode("node2"), activeScope,
     });
-
-    // 系统提示保持在最前，不被插到前面
-    expect(asText(out[0])).toBe("SYS");
-    expect(asText(out[1])).toBe("hi");
-    // 摘要追加在末尾
-    expect(asText(out[out.length - 1])).toContain("=== COMPLETED ===");
+    expect(text(out)).toBe("=== CURRENT ===\nnodeId: node2\n=== END ===\nlive");
   });
 
-  it("合成消息带 timestamp（满足 UserMessage 类型契约）", () => {
+  it("同 scopeId 多次出现时取最后一个，兼容 compaction 重建锚点", () => {
+    const activeScope = scope("node2");
     const out = projectMessages({
-      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
-      frames: [{ nodeId: "n1", status: "ok", summary: "s", result: {} }],
-      currentNode: agentNode("node1"),
-      
-      nodeMarker: "__node_boundary__:node1:1",
+      messages: [scopeMessage(activeScope), { role: "assistant", content: "stale" }, scopeMessage(activeScope), { role: "assistant", content: "fresh" }],
+      frames: [], currentNode: agentNode("node2"), activeScope,
     });
-    for (const m of out) {
-      if (m.role === "user") {
-        expect(typeof m.timestamp).toBe("number");
-      }
-    }
+    expect(text(out)).not.toContain("stale");
+    expect(text(out)).toContain("fresh");
   });
 
-  it("CURRENT 段渲染 agent-choice 可用边列表", () => {
+  it("scope 缺失时 fail closed：仅输出 frames 与确定性 CURRENT", () => {
     const out = projectMessages({
-      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
-      frames: [],
-      currentNode: agentNode("node1"),
-      nodeMarker: "__node_boundary__:node1:1",
-      availableEdges: [
-        { id: "to_archive", description: "答对，归档结果", priority: 10, target: "archive_node" },
-        { id: "to_discuss", description: "答错，进入讨论", priority: 10, target: "discuss_node" },
-        { id: "to_end", description: "退出复习", priority: 1, target: "END" },
-      ],
+      messages: [{ role: "system", content: "SYS" }, { role: "user", content: "raw secret" }],
+      frames: [frame], currentNode: agentNode("node2"), activeScope: scope("node2", "missing"),
+      availableEdges: [{ id: "to_end", description: "结束", priority: 1, target: "END" }],
     });
-
-    const text = joined(out);
-    expect(text).toContain("availableEdges");
-    expect(text).toContain("to_archive");
-    expect(text).toContain("答对，归档结果");
-    expect(text).toContain("to_discuss");
-    expect(text).toContain("答错，进入讨论");
-    expect(text).toContain("chosen_edge_id");
+    const projected = text(out);
+    expect(projected).toContain("node1 已完成");
+    expect(projected).toContain("=== CURRENT ===");
+    expect(projected).toContain("to_end");
+    expect(projected).not.toContain("SYS");
+    expect(projected).not.toContain("raw secret");
   });
 
-  it("不传 availableEdges 时不渲染该段（向后兼容）", () => {
+  it("scope 缺失且无当前节点时只输出 frames", () => {
     const out = projectMessages({
-      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
-      frames: [],
-      currentNode: agentNode("node1"),
-      nodeMarker: "__node_boundary__:node1:1",
+      messages: [{ role: "user", content: "raw" }], frames: [frame], currentNode: null,
+      activeScope: scope("node2", "missing"),
     });
-
-    const text = joined(out);
-    expect(text).not.toContain("availableEdges");
-    expect(text).not.toContain("chosen_edge_id");
+    expect(text(out)).toContain("node1 已完成");
+    expect(text(out)).not.toContain("raw");
+    expect(text(out)).not.toContain("=== CURRENT ===");
   });
 
-  it("自定义 frameFormatter：key:value 格式", () => {
-    const messages: MessageEntry[] = [
-      { role: "system", content: "SYS" },
-      { customType: B, content: "__node_boundary__:node2:2" },
-    ];
-    const frame1: ContextFrame = {
-      nodeId: "node1",
-      status: "ok",
-      summary: "已出题",
-      result: { question: "Q1", difficulty: "easy" },
-    };
-
-    const customFormatter = (frames: ContextFrame[]) =>
-      frames
-        .map((f) => {
-          const kv = Object.entries(f.result)
-            .map(([k, v]) => `  ${k}: ${v}`)
-            .join("\n");
-          return `[${f.nodeId}] ${f.status}\n${kv}`;
-        })
-        .join("\n\n");
-
-    const out = projectMessages({
-      messages,
-      frames: [frame1],
-      currentNode: agentNode("node2"),
-      nodeMarker: "__node_boundary__:node2:2",
-      frameFormatter: customFormatter,
-    });
-
-    const text = joined(out);
-    expect(text).toContain("[node1] ok");
-    expect(text).toContain("question: Q1");
-    expect(text).toContain("difficulty: easy");
-    // 不应包含 JSON 默认格式
-    expect(text).not.toContain('"nodeId"');
-    expect(text).not.toContain('"summary"');
+  it("scope 元数据只用于匹配，不会序列化进可见正文", () => {
+    const activeScope = scope("node2", "secret-scope-id");
+    const out = projectMessages({ messages: [scopeMessage(activeScope)], frames: [], currentNode: agentNode("node2"), activeScope });
+    expect(text(out)).not.toContain("secret-scope-id");
+    expect(out[0].details).toEqual(activeScope);
   });
 
-  it("frameFormatter 返回 null 时跳过 COMPLETED 段", () => {
-    const messages: MessageEntry[] = [
-      { role: "system", content: "SYS" },
-      { customType: B, content: "__node_boundary__:node2:2" },
-    ];
-    const frame1: ContextFrame = {
-      nodeId: "node1",
-      status: "ok",
-      summary: "s1",
-      result: {},
-    };
-
-    const out = projectMessages({
-      messages,
-      frames: [frame1],
-      currentNode: agentNode("node2"),
-      nodeMarker: "__node_boundary__:node2:2",
-      frameFormatter: () => null,
-    });
-
-    const text = joined(out);
-    expect(text).not.toContain("=== COMPLETED ===");
-    expect(text).not.toContain("s1");
+  it("自定义 frameFormatter 与 null 跳过语义保持不变", () => {
+    const activeScope = scope("node2");
+    const messages = [scopeMessage(activeScope)];
+    const custom = projectMessages({ messages, frames: [frame], currentNode: agentNode("node2"), activeScope,
+      frameFormatter: (frames) => `[${frames[0].nodeId}] ${frames[0].summary}` });
+    expect(text(custom)).toContain("[node1] node1 已完成");
+    const skipped = projectMessages({ messages, frames: [frame], currentNode: agentNode("node2"), activeScope,
+      frameFormatter: () => null });
+    expect(text(skipped)).not.toContain("node1 已完成");
   });
 
-  it("不传 frameFormatter 时使用默认 JSON 格式（向后兼容）", () => {
-    const messages: MessageEntry[] = twoNodeTranscript();
-    const frame1: ContextFrame = {
-      nodeId: "node1",
-      status: "ok",
-      summary: "node1 已出题",
-      result: { question: "Q1" },
-    };
-
-    // 不传 frameFormatter
-    const out = projectMessages({
-      messages,
-      frames: [frame1],
-      currentNode: agentNode("node2"),
-      nodeMarker: "__node_boundary__:node2:2",
-    });
-
-    const text = joined(out);
-    expect(text).toContain("=== COMPLETED ===");
-    expect(text).toContain('"nodeId"');
-    expect(text).toContain('"node1 已出题"');
-  });
-
-  it("空 availableEdges 数组不渲染该段", () => {
-    const out = projectMessages({
-      messages: [{ customType: B, content: "__node_boundary__:node1:1" }],
-      frames: [],
-      currentNode: agentNode("node1"),
-      nodeMarker: "__node_boundary__:node1:1",
-      availableEdges: [],
-    });
-
-    const text = joined(out);
-    expect(text).not.toContain("availableEdges");
+  it("合成 frame 与 recovery CURRENT 消息包含 timestamp", () => {
+    const out = projectMessages({ messages: [], frames: [frame], currentNode: agentNode("node2"), activeScope: scope("node2") });
+    expect(out).toHaveLength(2);
+    expect(out.every((message) => typeof message.timestamp === "number")).toBe(true);
   });
 });

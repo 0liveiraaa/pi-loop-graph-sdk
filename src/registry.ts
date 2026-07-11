@@ -13,12 +13,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateGraphTools } from "./validate.js";
 import type { Entry, Graph } from "./type.js";
+import type { GraphRunResult } from "./adapter/graph-execution-host.js";
 
 export type ExecuteGraph = (
   pi: ExtensionAPI,
   graph: Graph,
   trigger: { source: string; args?: string; params?: Record<string, unknown> },
-) => Promise<void>;
+) => Promise<GraphRunResult>;
 
 /**
  * 实例级图注册表。
@@ -75,13 +76,13 @@ export class GraphRegistry {
       description: inv.description,
       parameters: inv.inputSchema as any,
       async execute(_toolCallId: any, params: any) {
-        await executeGraph(pi, graph, {
+        const result = await executeGraph(pi, graph, {
           source: "tool",
           params: params as Record<string, unknown>,
         });
         return {
-          content: [{ type: "text", text: `图 "${graph.id}" 执行完成` as string }],
-          details: {} as Record<string, unknown>,
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          details: result,
         };
       },
     } as any);

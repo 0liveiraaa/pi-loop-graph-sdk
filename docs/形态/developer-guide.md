@@ -446,7 +446,7 @@ const subNode: Node = {
 
 ### 机制
 
-`node.skill` 将对应的 SKILL.md 文件内容在节点进入时（哨兵之后）追加到消息流中。追加在哨兵之后，投影三段切分将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。
+`node.skill` 将对应的 SKILL.md 文件内容在节点进入时（NodeScope 之后）追加到消息流中。严格作用域投影将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。NodeScope 缺失时投影 fail closed，不会回退外层完整 transcript。
 
 底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
 
@@ -756,7 +756,7 @@ tail -f loop-graph-debug.log  # 实时观察
 | 事件               | 查看内容                     |
 | ------------------ | ---------------------------- |
 | `enter_node`     | 节点 ID、输入数据、当前帧栈  |
-| `projection`     | 消息总数、哨兵是否命中、帧数 |
+| `projection`     | 消息总数、scopeId 是否命中、帧数 |
 | `agent_complete` | 完成状态、result 字段列表    |
 | `exit_node`      | 推入的帧摘要、累计帧数       |
 | `agent_retry`    | 验证不通过的原因             |
