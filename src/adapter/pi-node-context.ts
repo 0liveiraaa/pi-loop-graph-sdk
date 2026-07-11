@@ -215,6 +215,11 @@ export class PiNodeContext implements NodeContext {
 
   setCurrentNodeId(nodeId: string): void {
     this.currentNodeId = nodeId;
+    // 一个 NodeContext 在统一 Runtime 的 callStack 中复用。每次进入节点都
+    // 必须切断前一节点（或前一子图）的 completion，节点内多次 runAgent 则不会
+    // 再次调用本方法，仍可保留其 allCompletions 语义。
+    this.pendingCompletions = [];
+    this.validateFn = undefined;
   }
 
   reset(): void {

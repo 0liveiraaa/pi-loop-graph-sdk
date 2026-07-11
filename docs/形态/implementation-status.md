@@ -2,7 +2,7 @@
 
 > 2026-07-11 | NodeScope v2 / 独立子会话重构阶段
 >
-> 上次更新：GraphExecutionHost 基础切片与 NodeScope v2 Phase 4 落地
+> 上次更新：NodeScope v2 Phase 8 compose 帧段与强制归约落地
 
 ## 2026-07-11 重构状态
 
@@ -12,7 +12,11 @@
 - scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
 - 图节点活跃期间收到 pi `session_compact` 后，会同步重发同一 `scopeId` 的 NodeScope checkpoint；overflow retry 因此从新 checkpoint 开始，`compactionGeneration` / `reason` / `willRetry` 写入 debug trace。
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
-- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、155 项测试通过（含真实 LLM Phase 0）。
+- Phase 7 已将 root/call 收敛到单一 `runGraphLoop`；call 使用同一 Runtime 的嵌套 CallFrame，仍创建独立 AgentInstance。
+- Phase 8 已接线 `compose`：同一 AgentInstance 上的 child frames 被 Runtime 限定为临时 FrameSegment，默认或自定义 fold 后强制截断；异常、fold throw、maxSteps 均回滚，父节点活动 Scope 在嵌套返回时恢复。
+- runtime-only 注册仅剥离顶层 `invocation`，不修改原 Graph；`nodes`/`routing` 作为含函数的只读定义引用共享，不能也不应结构化深拷贝。
+- `delegate` 仍未接线独立 host，会明确拒绝，绝不按 call 静默执行。
+- 验证：`npm test -- --run` 通过（12 文件、169 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
@@ -346,7 +350,7 @@ runSubgraphInExtension 创建 childRuntime：
 | 自定义 compaction 策略      | 不实现；SDK 不生成 LLM summary、不主动调用 compact，继续使用 pi 原生策略 |
 | session 续跑                 | 帧栈未持久化到磁盘                                                                           |
 | graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
-| 三类图调用边界               | Phase 6 类型与校验已完成；当前仅 `call` 语义可执行，compose/delegate graph-node 会明确拒绝，等待 Phase 8/10 接线 |
+| 三类图调用边界               | `call` 与 `compose` 已可执行；compose 强制 fold/截断临时帧段。`delegate` 等待 Phase 10 独立 host，当前明确拒绝 |
 
 ### 已关闭的缺口
 

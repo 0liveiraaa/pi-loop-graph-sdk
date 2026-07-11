@@ -221,10 +221,9 @@ export function createLoopGraphExtension(
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
   ): Promise<GraphRunResult> {
-    // Phase 6 只固化类型；compose/delegate graph-node 尚未执行接线，必须
-    // 明确拒绝，不能悄悄按旧 call 语义运行。
+    // Phase 8 已接线 compose；delegate 仍必须明确拒绝，不能悄悄按 call 执行。
     assertValidGraph(graph, {
-      supportedBoundaries: ["call"],
+      supportedBoundaries: ["call", "compose"],
       delegateHostAvailable: false,
     });
 
@@ -258,131 +257,22 @@ export function createLoopGraphExtension(
         trigger.source === "tool" || trigger.params
           ? (trigger.params ?? {})
           : { args: trigger.args ?? "" };
-      const entry = graph.entries.find((e) => {
-        try { return e.guard(background); } catch { return false; }
+      const result = await runGraphLoop({
+        runtime,
+        nodeContext,
+        graph,
+        background,
+        boundary: "root",
+        maxSteps: 100,
       });
-      if (!entry) {
-        piInner.sendMessage({
-          customType: "loop_graph_error",
-          content: `无匹配入口: ${JSON.stringify(background)}`,
-          display: true,
-        });
-        return {
-          graphId: graph.id,
-          status: "failed",
-          result: { reason: `无匹配入口: ${JSON.stringify(background)}` },
-          steps: 0,
-        };
-      }
-
-      runtime.pushGraph(graph, background);
-      let nodeId = entry.startNodeId;
-      let input: NodeInput = {
-        data: entry.mapInput ? entry.mapInput(background) : background,
-        source: { kind: "entry", entryId: entry.id },
-      };
-
-      for (let step = 0; step < 100; step++) {
-        const node = graph.nodes[nodeId];
-        if (!node) throw new Error(`节点未找到: ${nodeId}`);
-
-        const prevTools = saveActiveTools(piInner);
-        setNodeToolsForInstance(piInner, node);
-        debugLog.toolsChanged(nodeId, piInner.getActiveTools());
-
-        const scope = runtime.nextScope(nodeId);
-        appendNodeScope(piInner, node, scope, getAvailableEdges(graph, nodeId));
-
-        // 追加 skill 内容（NodeScope 之后，属于本节点 active 段，离开后随 ReAct 折叠）
-        appendSkillContent(piInner, node);
-
-        runtime.enterNode(nodeId, scope, input);
-        debugLog.enterNode(
-          runtime.callStack.length,
-          nodeId,
-          scope.scopeId,
-          input,
-          runtime.topInstance?.frames ?? [],
-        );
-        nodeContext.setCurrentNodeId(nodeId);
-
-        // 横切机制：节点进入后、execute 之前分派（预处理 scratch / 追加上下文） 机制应该是存在agent调用的节点在agent运行时工作的代码,类似hook机制,否则会和hybird节点打架,两者似乎是同一功能
-        await applyMechanisms(piInner, runtime.topInstance!, node, input);
-
-        // agent-choice 路由：注入边选择校验，agent 未正确声明 chosen_edge_id 时驳回重试
-        const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
-
-        const completion = await execNodeInGraph(
-          piInner,
-          runtime,
-          nodeContext,
-          effectiveNode,
-          input,
-          runSubgraphInExtension,
-        );
-
-        const routing = graph.routing[nodeId];
-        if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
-        const edge = await selectEdge(routing, completion, runtime.topInstance!);
-        if (!edge) {
-          runtime.exitNode({
-            nodeId: completion.nodeId,
-            status: completion.status,
-            summary: `${nodeId} 完成(${completion.status})，无匹配边，图结束`,
-            result: completion.result,
-          });
-          piInner.sendMessage({
-            customType: "loop_graph_complete",
-            content: `图结束（无边匹配 ${nodeId}）`,
-            display: true,
-          });
-          return {
-            graphId: graph.id,
-            status: completion.status,
-            result: completion.result,
-            steps: step + 1,
-          };
-        }
-
-        const migration = edge.migrate(runtime.topInstance!, completion);
-        runtime.exitNode(migration.frame);
-        debugLog.exitNode(
-          runtime.callStack.length,
-          nodeId,
-          migration.frame,
-          runtime.topInstance?.frames ?? [],
-        );
-
-        restoreActiveTools(piInner, prevTools);
-
-        if (edge.to === END) {
-          piInner.sendMessage({
-            customType: "loop_graph_complete",
-            content: `图完成（${step + 1} 步）`,
-            display: true,
-          });
-          debugLog.graphEnd(graph.id, step + 1, runtime.topInstance?.frames ?? []);
-          return {
-            graphId: graph.id,
-            status: migration.frame.status,
-            result: migration.frame.result,
-            steps: step + 1,
-          };
-        }
-
-        nodeId = edge.to as string;
-        input = {
-          data: migration.input ?? {},
-          source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
-        };
-      }
-
-      return {
-        graphId: graph.id,
-        status: "failed",
-        result: { reason: "Max steps (100) exceeded" },
-        steps: 100,
-      };
+      piInner.sendMessage({
+        customType: result.status === "failed" ? "loop_graph_error" : "loop_graph_complete",
+        content: result.status === "failed"
+          ? `图结束（失败）：${String(result.result.reason ?? "未知原因")}`
+          : `图完成（${result.steps} 步）`,
+        display: true,
+      });
+      return result;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       debugLog.graphError(graph.id, reason);
@@ -417,6 +307,8 @@ export function createLoopGraphExtension(
   return {
     registerGraph: (graph) => {
       if (options.runtimeOnly && graph.invocation) {
+        // Graph 定义（尤其 nodes/routing 内的函数）在 SDK 中是只读的。这里只
+        // 剥离顶层对外入口，刻意共享内部引用；深拷贝既无必要，也无法安全复制函数。
         registry.registerGraph({ ...graph, invocation: undefined }, defaultTools);
         return;
       }
@@ -428,116 +320,191 @@ export function createLoopGraphExtension(
     },
   };
 
-  async function runSubgraphInExtension(
-    piInner: ExtensionAPI,
-    graphNode: { id: string; subGoal: string; graph: Graph },
-    background: Record<string, unknown>,
-  ): Promise<NodeCompletion> {
-    const childRt = new GraphRuntime();
-    const childNc = new PiNodeContext(piInner);
-    const childGraph = graphNode.graph;
+  interface RunGraphLoopRequest {
+    runtime: GraphRuntime;
+    nodeContext: PiNodeContext;
+    graph: Graph;
+    background: Record<string, unknown>;
+    boundary: "root" | "call" | "compose";
+    maxSteps: number;
+    sharedInstance?: AgentInstance;
+    parentNodeId?: string;
+  }
 
-    const prevRt = activeRuntime;
-    const prevNc = activeNodeContext;
-    activeRuntime = childRt;
-    activeNodeContext = childNc;
+  /**
+   * 同一 Session 内 root、call 与 compose 的唯一执行循环。它只编排节点、边和 frames，
+   * 不负责命令/tool UI 或 AgentSession host 生命周期。
+   */
+  async function runGraphLoop(request: RunGraphLoopRequest): Promise<GraphRunResult> {
+    const { runtime, nodeContext, graph, background, boundary, maxSteps, sharedInstance, parentNodeId } = request;
+    const entry = graph.entries.find((candidate) => {
+      try { return candidate.guard(background); } catch { return false; }
+    });
+    if (!entry) {
+      if (boundary === "call") {
+        throw new Error(`子图 ${graph.id} 无匹配入口`);
+      }
+      return {
+        graphId: graph.id,
+        status: "failed",
+        result: { reason: `无匹配入口: ${JSON.stringify(background)}` },
+        steps: 0,
+      };
+    }
+
+    const instance = runtime.pushGraph(graph, background, boundary, sharedInstance, parentNodeId);
+    let nodeId = entry.startNodeId;
+    let input: NodeInput = {
+      data: entry.mapInput ? entry.mapInput(background) : background,
+      source: { kind: "entry", entryId: entry.id },
+    };
+
+    const finish = (result: GraphRunResult): GraphRunResult => {
+      debugLog.graphEnd(graph.id, result.steps, instance.frames);
+      return result;
+    };
 
     try {
-      childRt.pushGraph(childGraph, background);
-      const entry = childGraph.entries.find((e) => {
-        try { return e.guard(background); } catch { return false; }
-      });
-      if (!entry) throw new Error(`子图 ${childGraph.id} 无匹配入口`);
+      for (let step = 0; step < maxSteps; step++) {
+        const node = graph.nodes[nodeId];
+        if (!node) throw new Error(`节点未找到: ${nodeId}`);
 
-      let nodeId = entry.startNodeId;
-      let input: NodeInput = {
-        data: entry.mapInput ? entry.mapInput(background) : background,
-        source: { kind: "entry", entryId: entry.id },
-      };
+        const previousTools = saveActiveTools(pi);
+        try {
+          setNodeToolsForInstance(pi, node);
+          debugLog.toolsChanged(nodeId, pi.getActiveTools());
 
-      for (let step = 0; step < 50; step++) {
-        const node = childGraph.nodes[nodeId];
-        if (!node) throw new Error(`子图节点未找到: ${nodeId}`);
+          const scope = runtime.nextScope(nodeId);
+          appendNodeScope(pi, node, scope, getAvailableEdges(graph, nodeId));
+          appendSkillContent(pi, node);
 
-        const prevTools = saveActiveTools(piInner);
-        setNodeToolsForInstance(piInner, node);
+          runtime.enterNode(nodeId, scope, input);
+          debugLog.enterNode(
+            runtime.callStack.length,
+            nodeId,
+            scope.scopeId,
+            input,
+            runtime.topInstance?.frames ?? [],
+          );
+          nodeContext.setCurrentNodeId(nodeId);
 
-        const scope = childRt.nextScope(nodeId);
-        appendNodeScope(piInner, node, scope, getAvailableEdges(childGraph, nodeId));
+          await applyMechanisms(pi, runtime.topInstance!, node, input, runtime.top?.localMechanisms);
+          const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
+          const completion = await execNodeInGraph(
+            runtime,
+            nodeContext,
+            effectiveNode,
+            input,
+            async (graphNode, callBackground) => {
+              const graphBoundary = graphNode.boundary ?? "call";
+              if (graphBoundary === "compose") {
+                const parentInstance = runtime.topInstance;
+                if (!parentInstance) throw new Error("compose 调用缺少父 AgentInstance");
+                const segment = runtime.beginFrameSegment(graphNode.graph.id, graphNode.id);
+                debugLog.frameSegmentStart(segment.graphId, segment.parentNodeId, segment.baseIndex, segment.depth);
+                try {
+                  const child = await runGraphLoop({
+                    runtime,
+                    nodeContext,
+                    graph: graphNode.graph,
+                    background: callBackground,
+                    boundary: "compose",
+                    maxSteps: 50,
+                    sharedInstance: parentInstance,
+                    parentNodeId: graphNode.id,
+                  });
+                  const frames = runtime.readFrameSegment(segment);
+                  const folded = graphNode.fold
+                    ? graphNode.fold({ segment: frames, finalResult: child })
+                    : { status: child.status, result: child.result };
+                  const completion: NodeCompletion = {
+                    nodeId: graphNode.id,
+                    status: folded.status,
+                    result: folded.result,
+                  };
+                  debugLog.frameSegmentClose(segment.graphId, segment.parentNodeId, frames, completion);
+                  return runtime.closeFrameSegment(segment, completion);
+                } catch (error) {
+                  runtime.rollbackFrameSegment(segment);
+                  debugLog.frameSegmentRollback(
+                    segment.graphId,
+                    segment.parentNodeId,
+                    error instanceof Error ? error.message : String(error),
+                  );
+                  throw error;
+                }
+              }
 
-        // 追加 skill 内容（NodeScope 之后，属于本节点 active 段）
-        appendSkillContent(piInner, node);
+              const child = await runGraphLoop({
+                runtime,
+                nodeContext,
+                graph: graphNode.graph,
+                background: callBackground,
+                boundary: "call",
+                // 保持旧子图的独立上限，避免本次抽取改变 call 的失败语义。
+                maxSteps: 50,
+                parentNodeId: graphNode.id,
+              });
+              return { nodeId: graphNode.id, status: child.status, result: child.result };
+            },
+          );
 
-        childRt.enterNode(nodeId, scope, input);
-        debugLog.enterNode(
-          childRt.callStack.length,
-          nodeId,
-          scope.scopeId,
-          input,
-          childRt.topInstance?.frames ?? [],
-        );
-        childNc.setCurrentNodeId(nodeId);
+          const routing = graph.routing[nodeId];
+          if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
+          const edge = await selectEdge(routing, completion, runtime.topInstance!);
+          if (!edge) {
+            const frame = {
+              nodeId: completion.nodeId,
+              status: completion.status,
+              summary: `${nodeId} 完成(${completion.status})，无匹配边，图结束`,
+              result: completion.result,
+            };
+            runtime.exitNode(frame);
+            debugLog.exitNode(runtime.callStack.length, nodeId, frame, instance.frames);
+            return finish({
+              graphId: graph.id,
+              status: completion.status,
+              result: completion.result,
+              steps: step + 1,
+            });
+          }
 
-        // 横切机制：子图节点同样在进入后、execute 之前分派
-        await applyMechanisms(piInner, childRt.topInstance!, node, input);
+          const migration = edge.migrate(runtime.topInstance!, completion);
+          runtime.exitNode(migration.frame);
+          debugLog.exitNode(
+            runtime.callStack.length,
+            nodeId,
+            migration.frame,
+            instance.frames,
+          );
 
-        // agent-choice 路由：注入边选择校验
-        const effectiveNode = wrapWithAgentChoiceValidator(childGraph, nodeId, node);
+          if (edge.to === END) {
+            return finish({
+              graphId: graph.id,
+              status: migration.frame.status,
+              result: migration.frame.result,
+              steps: step + 1,
+            });
+          }
 
-        const completion = await execNodeInGraph(
-          piInner,
-          childRt,
-          childNc,
-          effectiveNode,
-          input,
-          runSubgraphInExtension,
-        );
-
-        const routing = childGraph.routing[nodeId];
-        if (!routing) throw new Error(`子图 ${nodeId} 无路由`);
-        const edge = await selectEdge(routing, completion, childRt.topInstance!);
-        if (!edge) {
-          childRt.exitNode({
-            nodeId: completion.nodeId,
-            status: completion.status,
-            summary: `子图 ${nodeId} 完成(${completion.status})，无匹配边`,
-            result: completion.result,
-          });
-          break;
+          nodeId = edge.to as string;
+          input = {
+            data: migration.input ?? {},
+            source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
+          };
+        } finally {
+          restoreActiveTools(pi, previousTools);
         }
-
-        const migration = edge.migrate(childRt.topInstance!, completion);
-        childRt.exitNode(migration.frame);
-        debugLog.exitNode(
-          childRt.callStack.length,
-          nodeId,
-          migration.frame,
-          childRt.topInstance?.frames ?? [],
-        );
-        restoreActiveTools(piInner, prevTools);
-
-        if (edge.to === END) break;
-
-        nodeId = edge.to as string;
-        input = {
-          data: migration.input ?? {},
-          source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
-        };
       }
 
-      const childInstance = childRt.topInstance!;
-      const lastFrame = childInstance.frames[childInstance.frames.length - 1];
-      return {
-        nodeId: graphNode.id,
-        status: lastFrame?.status ?? "failed",
-        result: lastFrame?.result ?? {},
-      };
+      return finish({
+        graphId: graph.id,
+        status: "failed",
+        result: { reason: `Max steps (${maxSteps}) exceeded` },
+        steps: maxSteps,
+      });
     } finally {
-      childRt.reset();
-      childNc.reset();
-      restoreDefaultTools(piInner);
-      activeRuntime = prevRt;
-      activeNodeContext = prevNc;
+      runtime.popGraph();
     }
   }
 
@@ -712,9 +679,11 @@ async function applyMechanisms(
   instance: AgentInstance,
   node: Node,
   input: NodeInput,
+  localMechanisms: readonly Mechanism[] = [],
 ): Promise<void> {
   const mechanisms: Mechanism[] = [
     ...instance.mechanisms,
+    ...localMechanisms,
     ...(node.kind === "code" ? (node.mechanisms ?? []) : []),
   ];
   if (mechanisms.length === 0) return;
@@ -742,20 +711,18 @@ async function applyMechanisms(
 }
 
 async function execNodeInGraph(
-  pi: ExtensionAPI,
   runtime: GraphRuntime,
   nodeContext: PiNodeContext,
   node: Node,
   input: NodeInput,
   runSubgraph: (
-    pi: ExtensionAPI,
-    graphNode: { id: string; subGoal: string; graph: Graph },
+    graphNode: Extract<Node, { kind: "graph" }>,
     background: Record<string, unknown>,
   ) => Promise<NodeCompletion>,
 ): Promise<NodeCompletion> {
   if (node.kind === "graph") {
     debugLog.subgraphPush(node.id, node.graph.id);
-    const result = await runSubgraph(pi, node, input.data);
+    const result = await runSubgraph(node, input.data);
     debugLog.subgraphPop(node.id, node.graph.id, result);
     return result;
   }

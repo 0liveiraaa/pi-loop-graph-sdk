@@ -147,6 +147,35 @@ export const debugLog = {
     log({ type: "subgraph_pop", parentNodeId, childGraphId, resultKeys: typeof result === "object" && result ? Object.keys(result as object) : [] });
   },
 
+  frameSegmentStart(graphId: string, parentNodeId: string, baseIndex: number, depth: number): void {
+    log({ type: "frame_segment_start", graphId, parentNodeId, baseIndex, depth });
+  },
+
+  frameSegmentClose(
+    graphId: string,
+    parentNodeId: string,
+    frames: readonly ContextFrame[],
+    completion: NodeCompletion,
+  ): void {
+    log({
+      type: "frame_segment_close",
+      graphId,
+      parentNodeId,
+      frameCount: frames.length,
+      frames: frames.map((frame) => ({
+        nodeId: frame.nodeId,
+        status: frame.status,
+        summary: frame.summary,
+        result: frame.result,
+      })),
+      foldedCompletion: completion,
+    });
+  },
+
+  frameSegmentRollback(graphId: string, parentNodeId: string, reason: string): void {
+    log({ type: "frame_segment_rollback", graphId, parentNodeId, reason });
+  },
+
   /** 工具切换 */
   toolsChanged(nodeId: string, tools: string[]): void {
     log({ type: "tools_changed", nodeId, tools });

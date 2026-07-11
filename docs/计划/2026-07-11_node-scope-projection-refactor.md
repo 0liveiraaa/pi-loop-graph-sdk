@@ -24,7 +24,7 @@
 
 | 不变项                       | 说明                                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------------------- |
-| `AgentInstance.frames`     | 节点帧与 call 语义不变；compose 将新增有界帧段归约能力                                |
+| `AgentInstance.frames`     | 节点帧与 call 语义不变；compose 使用有界帧段归约能力                                  |
 | `ContextFrame`             | 不变                                                                                  |
 | `Edge.migrate`             | 不变                                                                                  |
 | 现有`kind: "graph"`        | 默认保持`call` 隔离栈语义，避免破坏兼容性                                           |
@@ -577,7 +577,7 @@ pi.on("session_compact", ...)
 
 ### Phase 6 — 固化调用协议与类型边界
 
-**状态：✅ 已完成。** 来源与边界类型已移入核心类型层；旧 graph node 缺省 `call`，旧 `subgraph` request 可显式规范化为 `graph-node + call`。已增加 boundary/fold、delegate host、Graph 循环引用和未知 invocationKind 校验；当前 Runtime 对尚未接线的 compose/delegate 明确拒绝，避免静默按 call 执行。恢复独立 Session 的 call/mechanism 回归覆盖后，全量 155 项通过。
+**状态：✅ 已完成。** 来源与边界类型已移入核心类型层；旧 graph node 缺省 `call`，旧 `subgraph` request 可显式规范化为 `graph-node + call`。已增加 boundary/fold、delegate host、Graph 循环引用和未知 invocationKind 校验；Phase 8 前 Runtime 曾明确拒绝 compose/delegate，现 compose 已接线，delegate 仍明确拒绝而不会静默按 call 执行。
 
 **目标**：先让“来源”和“边界”在类型系统中分离，不改现有运行行为。
 
@@ -617,6 +617,8 @@ type GraphNode = {
 
 ### Phase 7 — 抽取单一 runGraphLoop，保持 call 行为等价
 
+**状态：✅ 已完成。** 主图和 call 子图均通过同一个 `runGraphLoop` 执行；同一 Session 只保留一个 `GraphRuntime` 和 `PiNodeContext`，call 通过 `callStack` push 新 AgentInstance。每个 CallFrame 独立统计 node visit，避免同名节点串计数；节点工具使用 `try/finally` 恢复。新增嵌套 scope 测试确认 child `depth=2`、父/子共享 graphRunId 且 instanceId 隔离。全量 157 项通过。
+
 **目标**：删除 [loop-graph-extension.ts](/src/adapter/loop-graph-extension.ts) 中主图与 `runSubgraphInExtension` 的双循环，但暂不实现 compose/delegate graph node。
 
 抽出不负责 UI、Registry 或 host 生命周期的执行核心：
@@ -652,6 +654,8 @@ runGraphLoop(request): Promise<GraphRunResult>;
 - 基础设施异常不再被执行核心伪装成业务 `failed`；入口适配器决定展示方式。
 
 ### Phase 8 — 实现 compose 帧段与强制归约
+
+**状态：✅ 已完成。** `GraphRuntime` 以不透明 `FrameSegmentScope` 管理 compose 的基线、快照、回滚和关闭；compose 复用父 `AgentInstance`，而 CallFrame 保持 child 的 graph/goal/mechanisms 局部配置。返回时恢复父节点的活动 NodeScope，避免嵌套图清空父节点投影状态。fold 得到深复制冻结的帧段快照，Runtime 无论正常归约或异常都会截断内部段；debug trace 记录段内容、fold completion 和 rollback。回归覆盖共享 frames/scratch、默认与自定义 fold、failed/cancelled、fold/节点异常、maxSteps，以及 compose→compose / compose→call / call→compose 的深度和 Instance 恢复。
 
 **目标**：在同一 AgentInstance 上实现真正的图组合，同时保持节点 ReAct 隔离。
 
@@ -801,7 +805,7 @@ interface LoopGraphExtensionOptions {
 验收基线：
 
 ```text
-现有 155 tests 全部通过
+Phase 8 完成时全量 169 tests 全部通过
 新增 compaction / scope 测试全部通过
 tsc --noEmit 通过
 debug log 中无 loop_graph_boundary

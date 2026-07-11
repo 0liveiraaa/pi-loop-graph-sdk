@@ -39,6 +39,7 @@ function fakePi() {
         }
       });
     }),
+    sendUserMessage: vi.fn(),
     emit(eventName: string, event: any) {
       let result: unknown;
       for (const handler of handlers.get(eventName) ?? []) {
@@ -106,6 +107,58 @@ function invocableGraph(name = "test_cmd"): Graph {
   return g;
 }
 
+function edgeToEnd(nodeId: string): Edge {
+  return {
+    id: `${nodeId}_end`,
+    from: nodeId,
+    to: END,
+    priority: 1,
+    guard: () => true,
+    migrate(_instance, completion) {
+      return {
+        frame: {
+          nodeId: completion.nodeId,
+          status: completion.status,
+          summary: `${nodeId} done`,
+          result: completion.result,
+        },
+      };
+    },
+  };
+}
+
+function edgeToNext(from: string, to: string): Edge {
+  return {
+    id: `${from}_to_${to}`,
+    from,
+    to,
+    priority: 1,
+    guard: () => true,
+    migrate(_instance, completion) {
+      return {
+        frame: {
+          nodeId: completion.nodeId,
+          status: completion.status,
+          summary: `${from} done`,
+          result: completion.result,
+        },
+      };
+    },
+  };
+}
+
+function terminalGraph(id: string, node: Node): Graph {
+  return {
+    id,
+    goal: id,
+    entries: [{ id: "entry", guard: () => true, startNodeId: node.id }],
+    nodes: { [node.id]: node },
+    routing: {
+      [node.id]: { nodeId: node.id, edges: [edgeToEnd(node.id)], router: { kind: "first-match" } },
+    },
+  };
+}
+
 // ── 测试 ──
 
 describe("createLoopGraphExtension", () => {
@@ -142,6 +195,24 @@ describe("createLoopGraphExtension", () => {
         expect.objectContaining({ description: "测试命令" }),
       );
       expect(pi.registerTool).toHaveBeenCalledTimes(2); // __graph_complete__ + my_cmd
+    });
+
+    it("runtimeOnly 剥离 invocation 时不改写原 graph 定义", () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, { runtimeOnly: true });
+      const graph = invocableGraph("isolated_cmd");
+      const originalNodes = graph.nodes;
+      const originalRouting = graph.routing;
+      const originalInvocation = graph.invocation;
+
+      loop.registerGraph(graph);
+
+      // runtime-only 只禁止向外层 pi 注册入口；定义内的函数与引用保持只读共享。
+      expect(graph.invocation).toBe(originalInvocation);
+      expect(graph.nodes).toBe(originalNodes);
+      expect(graph.routing).toBe(originalRouting);
+      expect(pi.registerCommand).not.toHaveBeenCalled();
+      expect(pi.registerTool).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -350,24 +421,21 @@ describe("createLoopGraphExtension", () => {
       ).rejects.toThrow(/TOOL_NOT_REGISTERED|工具存在性校验失败/);
     });
 
-    it.each(["compose", "delegate"] as const)(
-      "Phase 6 期间明确拒绝尚未接线的 %s graph-node，不静默按 call 执行",
-      async (boundary) => {
-        const pi = fakePi();
-        const loop = createLoopGraphExtension(pi);
-        const parent = minimalGraph(`unsupported_${boundary}`);
-        parent.nodes.start = {
-          kind: "graph",
-          id: "start",
-          subGoal: boundary,
-          graph: minimalGraph(`child_${boundary}`),
-          boundary,
-        };
+    it("delegate graph-node 在 host 接线前明确拒绝，不静默按 call 执行", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const parent = minimalGraph("unsupported_delegate");
+      parent.nodes.start = {
+        kind: "graph",
+        id: "start",
+        subGoal: "delegate",
+        graph: minimalGraph("child_delegate"),
+        boundary: "delegate",
+      };
 
-        await expect(loop.executeGraph(parent, { source: "command", args: "" }))
-          .rejects.toThrow(/UNSUPPORTED_GRAPH_BOUNDARY|尚未由当前执行载体支持/);
-      },
-    );
+      await expect(loop.executeGraph(parent, { source: "command", args: "" }))
+        .rejects.toThrow(/UNSUPPORTED_GRAPH_BOUNDARY|尚未由当前执行载体支持/);
+    });
   });
 
   describe("钩子注册", () => {
@@ -546,6 +614,308 @@ describe("createLoopGraphExtension", () => {
         result: { fromAgent: true },
         steps: 1,
       });
+    });
+
+    it("call 子图复用同一 Runtime callStack，子 Instance 与父 Instance 仍隔离", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const child: Graph = {
+        id: "scope_child",
+        goal: "child",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "child_start" }],
+        nodes: {
+          child_start: {
+            kind: "code", id: "child_start", subGoal: "child work",
+            async execute() { return { nodeId: "child_start", status: "ok", result: { child: true } }; },
+          },
+        },
+        routing: {
+          child_start: {
+            nodeId: "child_start", router: { kind: "first-match" }, edges: [{
+              id: "end", from: "child_start", to: END, priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { nodeId: completion.nodeId, status: completion.status, summary: "child", result: completion.result } };
+              },
+            }],
+          },
+        },
+      };
+      const parent: Graph = {
+        id: "scope_parent",
+        goal: "parent",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "invoke" }],
+        nodes: {
+          invoke: { kind: "graph", id: "invoke", subGoal: "call child", graph: child },
+          finish: {
+            kind: "code", id: "finish", subGoal: "finish",
+            async execute() { return { nodeId: "finish", status: "ok", result: { done: true } }; },
+          },
+        },
+        routing: {
+          invoke: {
+            nodeId: "invoke", router: { kind: "first-match" }, edges: [{
+              id: "next", from: "invoke", to: "finish", priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { nodeId: completion.nodeId, status: completion.status, summary: "invoke", result: completion.result } };
+              },
+            }],
+          },
+          finish: {
+            nodeId: "finish", router: { kind: "first-match" }, edges: [{
+              id: "end", from: "finish", to: END, priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { nodeId: completion.nodeId, status: completion.status, summary: "finish", result: completion.result } };
+              },
+            }],
+          },
+        },
+      };
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        graphId: "scope_parent", result: { done: true }, steps: 2,
+      });
+
+      const scopes = pi._sentMessages.filter((message: any) => message.customType === "loop_graph_node_scope");
+      const [parentScope, childScope, resumedParentScope] = scopes.map((message: any) => message.details);
+      expect([parentScope.nodeId, childScope.nodeId, resumedParentScope.nodeId]).toEqual([
+        "invoke", "child_start", "finish",
+      ]);
+      expect(childScope.depth).toBe(2);
+      expect(resumedParentScope.depth).toBe(1);
+      expect(childScope.graphRunId).toBe(parentScope.graphRunId);
+      expect(childScope.instanceId).not.toBe(parentScope.instanceId);
+      expect(resumedParentScope.instanceId).toBe(parentScope.instanceId);
+    });
+  });
+
+  describe("Phase 8 compose 帧段", () => {
+    it("共享父 instance 的 frames/scratch，但默认 fold 只向父节点交付结果", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let parentInstanceId = "";
+      let childInstanceId = "";
+      let childSawParentFrame = false;
+      let finishSawOnlyFoldedFrames = false;
+
+      const child = terminalGraph("compose_child", {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute(instance) {
+          childInstanceId = instance.id;
+          childSawParentFrame = instance.frames.some((frame) => frame.nodeId === "prepare");
+          instance.scratch.child = "shared";
+          return { nodeId: "child_work", status: "ok", result: { child: true } };
+        },
+      });
+      const parent: Graph = {
+        id: "compose_parent", goal: "parent",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "prepare" }],
+        nodes: {
+          prepare: {
+            kind: "code", id: "prepare", subGoal: "prepare",
+            async execute(instance) {
+              parentInstanceId = instance.id;
+              instance.scratch.parent = "shared";
+              return { nodeId: "prepare", status: "ok", result: { prepared: true } };
+            },
+          },
+          compose: { kind: "graph", id: "compose", subGoal: "compose", graph: child, boundary: "compose" },
+          finish: {
+            kind: "code", id: "finish", subGoal: "finish",
+            async execute(instance) {
+              finishSawOnlyFoldedFrames = instance.frames.map((frame) => frame.nodeId).join(",") === "prepare,compose";
+              return { nodeId: "finish", status: "ok", result: { scratch: instance.scratch.child } };
+            },
+          },
+        },
+        routing: {
+          prepare: { nodeId: "prepare", edges: [edgeToNext("prepare", "compose")], router: { kind: "first-match" } },
+          compose: { nodeId: "compose", edges: [edgeToNext("compose", "finish")], router: { kind: "first-match" } },
+          finish: { nodeId: "finish", edges: [edgeToEnd("finish")], router: { kind: "first-match" } },
+        },
+      };
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        status: "ok", result: { scratch: "shared" }, steps: 3,
+      });
+      expect(childInstanceId).toBe(parentInstanceId);
+      expect(childSawParentFrame).toBe(true);
+      expect(finishSawOnlyFoldedFrames).toBe(true);
+
+      const scopes = pi._sentMessages
+        .filter((message: any) => message.customType === "loop_graph_node_scope")
+        .map((message: any) => message.details);
+      expect(scopes.map((scope: any) => [scope.nodeId, scope.depth])).toEqual([
+        ["prepare", 1], ["compose", 1], ["child_work", 2], ["finish", 1],
+      ]);
+      expect(scopes[2].instanceId).toBe(scopes[0].instanceId);
+    });
+
+    it("custom fold 仅接收冻结快照，并可显式传出完整 segment", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let segmentWasFrozen = false;
+      const child = terminalGraph("fold_child", {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute() {
+          return { nodeId: "child_work", status: "ok", result: { nested: { value: 1 } } };
+        },
+      });
+      const parent = terminalGraph("fold_parent", {
+        kind: "graph", id: "compose", subGoal: "compose", graph: child, boundary: "compose",
+        fold({ segment, finalResult }) {
+          segmentWasFrozen = Object.isFrozen(segment)
+            && Object.isFrozen(segment[0])
+            && Object.isFrozen(segment[0].result)
+            && Object.isFrozen((segment[0].result as any).nested);
+          return {
+            status: finalResult.status,
+            result: { exported: segment.map((frame) => ({ nodeId: frame.nodeId, result: frame.result })) },
+          };
+        },
+      });
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        status: "ok",
+        result: { exported: [{ nodeId: "child_work", result: { nested: { value: 1 } } }] },
+      });
+      expect(segmentWasFrozen).toBe(true);
+    });
+
+    it.each(["failed", "cancelled"] as const)(
+      "业务 %s 仍经过默认 fold，且不残留 child frames",
+      async (status) => {
+        const pi = fakePi();
+        const loop = createLoopGraphExtension(pi);
+        let instance: any;
+        const child = terminalGraph(`compose_${status}_child`, {
+          kind: "code", id: "child_work", subGoal: "child",
+          async execute(shared) {
+            // run 结束后该引用仍可用于验证 segment 已被 Runtime 截断。
+            instance = shared;
+            return { nodeId: "child_work", status, result: { status } };
+          },
+        });
+        const parent = terminalGraph(`compose_${status}_parent`, {
+          kind: "graph", id: "compose", subGoal: "compose", graph: child, boundary: "compose",
+        });
+
+        const result = await loop.executeGraph(parent, { source: "command", args: "" });
+        expect(result).toMatchObject({ status, result: { status } });
+        expect(instance.frames.map((frame: any) => frame.nodeId)).toEqual(["compose"]);
+      },
+    );
+
+    it.each([
+      ["fold throw", true],
+      ["child throw", false],
+    ] as const)("%s 时回滚 segment，保留父图既有 frames", async (_name, foldThrows) => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let instance: any;
+      const child = terminalGraph(`rollback_child_${foldThrows}`, {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute(shared) {
+          instance = shared;
+          if (!foldThrows) throw new Error("child abort");
+          return { nodeId: "child_work", status: "ok", result: {} };
+        },
+      });
+      const parent: Graph = {
+        id: `rollback_parent_${foldThrows}`, goal: "parent",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "before" }],
+        nodes: {
+          before: { kind: "code", id: "before", subGoal: "before", async execute(shared) {
+            instance = shared;
+            return { nodeId: "before", status: "ok", result: {} };
+          } },
+          compose: {
+            kind: "graph", id: "compose", subGoal: "compose", graph: child, boundary: "compose",
+            fold: foldThrows ? () => { throw new Error("fold abort"); } : undefined,
+          },
+        },
+        routing: {
+          before: { nodeId: "before", edges: [edgeToNext("before", "compose")], router: { kind: "first-match" } },
+          compose: { nodeId: "compose", edges: [edgeToEnd("compose")], router: { kind: "first-match" } },
+        },
+      };
+
+      const result = await loop.executeGraph(parent, { source: "command", args: "" });
+      expect(result.status).toBe("failed");
+      expect(instance.frames.map((frame: any) => frame.nodeId)).toEqual(["before"]);
+    });
+
+    it("子图达到 maxSteps 后仍归约为一个父帧，不残留内部 frames", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let instance: any;
+      const child: Graph = {
+        id: "max_steps_child", goal: "loop",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "loop" }],
+        nodes: {
+          loop: {
+            kind: "code", id: "loop", subGoal: "loop",
+            async execute(shared) {
+              instance = shared;
+              return { nodeId: "loop", status: "ok", result: {} };
+            },
+          },
+        },
+        routing: {
+          loop: { nodeId: "loop", edges: [edgeToNext("loop", "loop")], router: { kind: "first-match" } },
+        },
+      };
+      const parent = terminalGraph("max_steps_parent", {
+        kind: "graph", id: "compose", subGoal: "compose", graph: child, boundary: "compose",
+      });
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        status: "failed", result: { reason: "Max steps (50) exceeded" },
+      });
+      expect(instance.frames.map((frame: any) => frame.nodeId)).toEqual(["compose"]);
+    });
+
+    it.each([
+      ["compose", "compose", [true, true, true]],
+      ["compose", "call", [true, true, false]],
+      ["call", "compose", [true, false, false]],
+    ] as const)("%s → %s 的嵌套恢复正确", async (outerBoundary, innerBoundary, sameAsParent) => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const grandchild = terminalGraph(`grand_${outerBoundary}_${innerBoundary}`, {
+        kind: "code", id: "grand_work", subGoal: "grand",
+        async execute() { return { nodeId: "grand_work", status: "ok", result: { grand: true } }; },
+      });
+      const child = terminalGraph(`child_${outerBoundary}_${innerBoundary}`, {
+        kind: "graph", id: "inner", subGoal: "inner", graph: grandchild, boundary: innerBoundary,
+      });
+      const parent: Graph = {
+        id: `parent_${outerBoundary}_${innerBoundary}`, goal: "parent",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "outer" }],
+        nodes: {
+          outer: { kind: "graph", id: "outer", subGoal: "outer", graph: child, boundary: outerBoundary },
+          finish: {
+            kind: "code", id: "finish", subGoal: "finish",
+            async execute() { return { nodeId: "finish", status: "ok", result: { done: true } }; },
+          },
+        },
+        routing: {
+          outer: { nodeId: "outer", edges: [edgeToNext("outer", "finish")], router: { kind: "first-match" } },
+          finish: { nodeId: "finish", edges: [edgeToEnd("finish")], router: { kind: "first-match" } },
+        },
+      };
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        status: "ok", result: { done: true },
+      });
+      const scopes = pi._sentMessages
+        .filter((message: any) => message.customType === "loop_graph_node_scope")
+        .map((message: any) => message.details);
+      expect(scopes.map((scope: any) => [scope.nodeId, scope.depth])).toEqual([
+        ["outer", 1], ["inner", 2], ["grand_work", 3], ["finish", 1],
+      ]);
+      const parentId = scopes[0].instanceId;
+      expect(scopes.slice(0, 3).map((scope: any) => scope.instanceId === parentId)).toEqual(sameAsParent);
+      expect(scopes[3].instanceId).toBe(parentId);
     });
   });
 

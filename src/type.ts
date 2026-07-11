@@ -7,11 +7,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 //
 //    AgentInstance 持有一个有序逻辑帧栈（frames），节点离开时由边折叠；
-//    compose 后续会以有界 frame segment 实现结构化生长与归约。
+//    compose 以有界 frame segment 实现结构化生长与归约。
 //
 //    子图调用是一等公民：Node 可以引用另一个 Graph 作为其实现。
 //    graph node 缺省使用 call：Runtime 为子图创建新的 AgentInstance；
-//    compose/delegate 已进入类型协议，但在对应阶段接线前会明确拒绝执行。
+//    compose 已可执行；delegate 保留在类型协议中，待独立 host 接线。
 //
 // ============================================================
 
@@ -189,8 +189,9 @@ export interface AgentRunRequest {
  *   - 子图 END 后归约为父图 graph 节点的一次 NodeCompletion
  *     （即子图 END 边的 frame.result 成为该节点的 NodeCompletion.result）
  *
- * compose/delegate 边界已可声明；在 Phase 8/10 接线前 Runtime 会明确拒绝，
- * 不会静默按 call 执行。fold 只对 compose 合法。
+ * compose 在父 Instance 上建立临时帧段，退出时必须归约为当前 graph node 的
+ * completion；delegate 尚未接线，会明确拒绝，绝不静默按 call 执行。fold 只对
+ * compose 合法。
  */
 export type Node =
   | {

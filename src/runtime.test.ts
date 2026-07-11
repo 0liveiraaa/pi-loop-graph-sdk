@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GraphRuntime } from "./runtime.js";
-import type { Edge, Entry, Graph, Node } from "./type.js";
+import type { ContextFrame, Edge, Entry, Graph, Node } from "./type.js";
 import { END } from "./type.js";
 
 function minimalGraph(): Graph {
@@ -74,6 +74,70 @@ describe("GraphRuntime", () => {
     expect(first).toMatchObject({ protocol: 2, nodeId: "start", visit: 1 });
     expect(second).toMatchObject({ protocol: 2, nodeId: "start", visit: 2 });
     expect(second.scopeId).not.toBe(first.scopeId);
+  });
+
+  it("keeps visit counters per call frame while exposing nested depth", () => {
+    const runtime = new GraphRuntime();
+    const parent = minimalGraph();
+    const child = minimalGraph();
+    runtime.pushGraph(parent, {}, "root");
+    expect(runtime.nextScope("start")).toMatchObject({ visit: 1, depth: 1 });
+
+    runtime.pushGraph(child, {}, "call");
+    expect(runtime.nextScope("start")).toMatchObject({ visit: 1, depth: 2 });
+    runtime.popGraph();
+
+    expect(runtime.nextScope("start")).toMatchObject({ visit: 2, depth: 1 });
+  });
+
+  it("popping a nested graph restores the active parent node scope", () => {
+    const runtime = new GraphRuntime();
+    const parent = minimalGraph();
+    const child = minimalGraph();
+    runtime.pushGraph(parent, {}, "root");
+    const parentScope = runtime.nextScope("start");
+    const parentInput = { data: { parent: true }, source: { kind: "entry" as const, entryId: "main" } };
+    runtime.enterNode("start", parentScope, parentInput);
+
+    runtime.pushGraph(child, {}, "call");
+    const childScope = runtime.nextScope("start");
+    runtime.enterNode("start", childScope, {
+      data: { child: true }, source: { kind: "entry", entryId: "main" },
+    });
+    runtime.exitNode({ nodeId: "start", status: "ok", summary: "child", result: {} });
+    runtime.popGraph();
+
+    expect(runtime.isNodeActive).toBe(true);
+    expect(runtime.currentScope).toBe(parentScope);
+    expect(runtime.currentInput).toBe(parentInput);
+    expect(runtime.currentNode?.id).toBe("start");
+  });
+
+  it("reads an immutable compose segment and closes it back to the baseline", () => {
+    const runtime = new GraphRuntime();
+    const parent = minimalGraph();
+    runtime.pushGraph(parent, {}, "root");
+    const instance = runtime.topInstance!;
+    instance.frames.push({ nodeId: "parent", status: "ok", summary: "parent", result: { preserved: true } });
+    const segment = runtime.beginFrameSegment("child", "compose");
+    instance.frames.push({
+      nodeId: "child", status: "ok", summary: "child", result: { nested: { value: 1 } },
+    });
+
+    const snapshot = runtime.readFrameSegment(segment);
+    expect(snapshot).toHaveLength(1);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot[0])).toBe(true);
+    expect(Object.isFrozen(snapshot[0].result)).toBe(true);
+    expect(Object.isFrozen((snapshot[0].result as any).nested)).toBe(true);
+    expect(() => (snapshot as ContextFrame[]).push(instance.frames[0])).toThrow();
+    expect(() => { (snapshot[0].result as any).nested.value = 2; }).toThrow();
+    expect(instance.frames[1].result).toEqual({ nested: { value: 1 } });
+
+    runtime.closeFrameSegment(segment, { nodeId: "compose", status: "ok", result: {} });
+    expect(instance.frames).toEqual([
+      { nodeId: "parent", status: "ok", summary: "parent", result: { preserved: true } },
+    ]);
   });
 
   it("enterNode activates only current transient node state and exitNode folds it into frames", () => {

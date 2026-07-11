@@ -566,11 +566,13 @@ validateCompletion(result) {
 
 ---
 
-## 子图（当前实现：call）
+## 子图（call 与 compose）
 
-当前 `kind: "graph"` 使用 `call` 边界：复用 AgentSession，但创建新的 `AgentInstance`，`frames = []`，`background` 来自调用点的 `NodeInput.data`。已接受的 `compose` 与 `delegate` 边界尚未成为公开 API，见 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)。
+`kind: "graph"` 缺省使用 `call`：复用当前 AgentSession/Runtime，但创建新的 `AgentInstance`，因此 `frames`、`scratch` 和 global mechanisms 都与父图隔离；调用点的 `NodeInput.data` 成为 child background。root 图和 call 子图共用 call stack，child NodeScope 的 `depth` 会增加，返回后工具集、父 CallFrame 和父节点作用域都会恢复。
 
-Phase 6 已允许在类型层声明 `boundary` 与 compose-only `fold`，但当前 Runtime 只执行 `call`；声明 `compose` 或 `delegate` 会得到明确的 unsupported-boundary 错误，不会静默降级。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用也会在校验阶段报错。
+需要把图作为“替代一个点”的代码组织手段时，显式使用 `boundary: "compose"`。它复用父 `AgentInstance`：child 可见父已完成 frames、共享 scratch，并在同一帧栈上运行；但 child 的 Graph.goal / mechanisms 只在其 CallFrame 内有效。child 新增的全部 frames 是受 Runtime 管理的临时段，退出时**一定**由 `fold`（或默认 fold）归约，父图只留下 graph node 经 Edge.migrate 写入的一帧，内部 ReAct 不会泄漏。
+
+`fold` 收到的是独立、冻结的帧段快照和 child `GraphRunResult`；默认 fold 仅返回 child 的 `status/result`。业务 `failed`/`cancelled` 同样执行 fold；节点、fold 或运行基础设施错误会回滚临时段并继续抛出。`delegate` 仍等待独立 AgentSession host 接线，目前会明确报 unsupported-boundary 错误，不会静默降级。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用仍在校验阶段报错。
 
 ```typescript
 const childGraph: Graph = {
@@ -587,14 +589,19 @@ const graphNode: Node = {
   id: "invoke_child",
   subGoal: "委托子图处理",
   graph: childGraph,
+  boundary: "compose",
+  fold: ({ segment, finalResult }) => ({
+    status: finalResult.status,
+    result: { child: finalResult.result, completedNodes: segment.map((frame) => frame.nodeId) },
+  }),
 };
 ```
 
-**隔离保证**：
+**边界保证**：
 
-- 子图运行时，父图的帧栈对其不可见
-- 子图结束后归约为一帧，包含子图内部帧和最终结果
-- 父图路由决定这一帧怎么折叠进父图帧栈
+- `call`：父 frames/scratch 对 child 不可见；child 最终 result 归约为父 graph node completion。
+- `compose`：child 可读父 frames 并共享 scratch；child 内部 frames 在退出时被截断，只有开发者在 fold 中显式传出的数据才会跨组合边界。
+- 两种边界都由父图的 Edge 决定如何把 graph node completion 折叠进父图帧栈。
 
 ---
 
