@@ -105,6 +105,17 @@ describe("GraphRuntime", () => {
     expect(runtime.currentScope).toBeNull();
   });
 
+  it("records compaction generations without changing the active scope identity", () => {
+    const runtime = new GraphRuntime();
+    runtime.pushGraph(minimalGraph(), {});
+    const scope = runtime.nextScope("start");
+    runtime.enterNode("start", scope, { data: {}, source: { kind: "entry", entryId: "entry" } });
+
+    expect(runtime.recordCompaction()).toBe(1);
+    expect(runtime.recordCompaction()).toBe(2);
+    expect(runtime.currentScope?.scopeId).toBe(scope.scopeId);
+  });
+
   it("reset clears graph stack and transient node state", () => {
     const runtime = new GraphRuntime();
     runtime.pushGraph(minimalGraph(), {});

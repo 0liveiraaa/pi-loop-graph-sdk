@@ -43,3 +43,4 @@
 - 想看设计理念 → [核心设计](%E8%AE%BE%E8%AE%A1/loop-graph-sdk-design.md)
 - 想看术语定义 → [CONTEXT](%E8%AE%BE%E8%AE%A1/CONTEXT.md)
 - 当前高优先级计划 → [节点作用域投影与图调用隔离重构](%E8%AE%A1%E5%88%92/2026-07-11_node-scope-projection-refactor.md)
+- 架构决策 → [ADR-0001：图调用边界](adr/0001-graph-invocation-boundaries.md)

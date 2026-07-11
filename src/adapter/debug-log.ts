@@ -91,6 +91,16 @@ export const debugLog = {
     });
   },
 
+  /** 图运行期间发生 compaction 后，当前 NodeScope 的 checkpoint 已重发。 */
+  scopeCheckpoint(
+    scopeId: string,
+    generation: number,
+    reason: unknown,
+    willRetry: unknown,
+  ): void {
+    log({ type: "scope_checkpoint", scopeId, generation, reason, willRetry });
+  },
+
   /** agent 完成（__graph_complete__ 被调用） */
   agentComplete(nodeId: string, completion: NodeCompletion): void {
     log({

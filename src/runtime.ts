@@ -32,6 +32,8 @@ export class GraphRuntime {
   currentInput: NodeInput | null = null;
 
   readonly graphRunId = crypto.randomUUID();
+  /** 当前 graph run 已发生的 compaction 次数，仅用于诊断和 checkpoint 观测。 */
+  compactionGeneration = 0;
   private nodeVisits = new Map<string, number>();
 
   get top(): CallFrame | null {
@@ -114,12 +116,22 @@ export class GraphRuntime {
     this.currentScope = null;
   }
 
+  /**
+   * 记录一次 session compaction。NodeScope 的身份（scopeId）不变；
+   * extension 会在消息流末尾重发该 scope 作为新的 checkpoint。
+   */
+  recordCompaction(): number {
+    this.compactionGeneration += 1;
+    return this.compactionGeneration;
+  }
+
   reset(): void {
     this.callStack = [];
     this.isNodeActive = false;
     this.currentScope = null;
     this.currentNode = null;
     this.currentInput = null;
+    this.compactionGeneration = 0;
     this.nodeVisits.clear();
   }
 }

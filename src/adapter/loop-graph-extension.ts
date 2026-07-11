@@ -148,6 +148,22 @@ export function createLoopGraphExtension(
     return { messages: projected };
   });
 
+  // compaction 会移除旧 transcript，因而可能带走活动 NodeScope。压缩完成后
+  // 在消息流末尾重发相同 scopeId 的 checkpoint；下一次（包括 overflow retry）
+  // 的严格投影将从此处开始，而不会回退到 compaction summary 或外层消息。
+  (pi as any).on("session_compact", (event: any) => {
+    const rt = activeRuntime;
+    const node = rt?.currentNode;
+    const scope = rt?.currentScope;
+    const graph = rt?.topGraph;
+    const nodeId = rt?.currentNodeId;
+    if (!rt?.isNodeActive || !node || !scope || !graph || !nodeId) return;
+
+    const generation = rt.recordCompaction();
+    appendNodeScope(pi, node, scope, getAvailableEdges(graph, nodeId));
+    debugLog.scopeCheckpoint(scope.scopeId, generation, event?.reason, event?.willRetry);
+  });
+
   // 捕获 __graph_complete__ 调用
   pi.on("tool_result", (event) => {
     if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;

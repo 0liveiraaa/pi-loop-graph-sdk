@@ -450,6 +450,8 @@ const subNode: Node = {
 
 底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
 
+图节点运行期间如果 pi 发生自动、手动或 overflow compaction，SDK 会在 `session_compact` 后重发当前 NodeScope checkpoint（同一 `scopeId`）。这不会生成摘要或改写 system prompt；下一次调用仅通过 frames + checkpoint 后的 live 消息恢复上下文。
+
 ### 位置约定
 
 `skillBasePath/{skill名称}/SKILL.md`。默认 `skillBasePath` 为 `cwd/skills`，可通过 `createLoopGraphExtension(pi, { skillBasePath: "..." })` 配置。SDK 通过 `resources_discover` 事件将 `skillBasePath` 注册到 pi 的原生 skill 系统，pi 自动扫描 frontmatter 并在系统提示中以 XML 形式列出可用 skill。

@@ -10,6 +10,7 @@
 - `GraphRuntime` 使用结构化 `NodeScopeDescriptor`（graphRunId / instanceId / scopeId / graphId / nodeId / visit / depth），主路径已删除随机 `loop_graph_boundary` 哨兵。
 - projection 从尾部匹配当前 `scopeId`，输出 frames + 当前 NodeScope 后的 live ReAct；外层 transcript、旧节点 ReAct、scope 前 compaction summary 均不保留。
 - scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
+- 图节点活跃期间收到 pi `session_compact` 后，会同步重发同一 `scopeId` 的 NodeScope checkpoint；overflow retry 因此从新 checkpoint 开始，`compactionGeneration` / `reason` / `willRetry` 写入 debug trace。
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
 - 验证：`tsc --noEmit` 通过；全量 12 个测试文件、138 项测试通过（含真实 LLM Phase 0）。
 
@@ -342,9 +343,10 @@ runSubgraphInExtension 创建 childRuntime：
 | `pi-node-context.callTool` | `throw Error` 占位                                                                         |
 | schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
 | 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
-| compaction 主动重锚定        | Phase 4 已提供 fail-closed 基线；Phase 5 仍需监听 `session_compact` 重发当前 NodeScope checkpoint |
+| 自定义 compaction 策略      | 不实现；SDK 不生成 LLM summary、不主动调用 compact，继续使用 pi 原生策略 |
 | session 续跑                 | 帧栈未持久化到磁盘                                                                           |
 | graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
+| 三类图调用边界               | 设计已接受 `compose/call/delegate`；当前仅 `call` 语义完整，compose 帧段与命令/tool 统一 delegate 接线尚未实现 |
 
 ### 已关闭的缺口
 

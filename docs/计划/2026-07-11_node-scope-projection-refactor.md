@@ -491,6 +491,8 @@ projectActiveNodeScope(messages, ...) // 有活动图时执行，构造 frames +
 
 ### Phase 5 — 增加 compaction 协同
 
+**状态：✅ 已完成基础协同。** 运行时监听 `session_compact`；仅当图节点活跃时，同步在消息流末尾重发相同 `scopeId` 的 NodeScope checkpoint，并记录 `compactionGeneration`、`reason` 与 `willRetry`。因此 overflow retry 将从新 checkpoint 进行严格投影，frames 不变，scope 前 compaction summary 不会进入图上下文。尚未实现自定义 compaction 或主动调用 `ctx.compact()`，两者均不属于本阶段。
+
 注册：
 
 ```typescript
@@ -513,6 +515,8 @@ pi.on("session_compact", ...)
 - 不覆盖图之外的正常 session compaction 行为
 
 ### Phase 6 — 统一主图和子图循环
+
+> 设计补充：根据 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)，统一循环不能再把所有嵌套图等同为隔离子图。内部执行核心应支持 `compose`、`call`、`delegate` 三种边界；本阶段先保持现有 `kind: "graph" = call` 的兼容语义，再为 compose 帧段和 delegate host 留出明确策略接口。
 
 [loop-graph-extension.ts](/src/adapter/loop-graph-extension.ts:368) 的子图循环复制了主图循环。
 

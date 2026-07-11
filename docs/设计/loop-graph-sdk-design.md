@@ -122,11 +122,11 @@ Node 产出 `NodeCompletion`（原始数据）。Edge.migrate 将 completion 折
 
 **原则**：图显式表达业务阶段，ReAct 内化在节点。
 
-### 决策 7：子图是一等公民，但使用隔离栈
+### 决策 7：图复用是一等公民，调用边界必须显式
 
-Node 可以是另一个 Graph（`Node.graph`），形成嵌套调用。进入子图时不复用父图 `AgentInstance.frames`，而是创建新的子图实例：`background = NodeInput.data`，`frames = []`。子图完成后，Runtime 将子图最终结果归约为父图 graph 节点的一次 `NodeCompletion`，再由父图 Edge 决定如何折叠进父图 frames。
+Graph 可以作为另一个 Graph 的节点实现，也可以通过命令或工具调用。调用入口与执行边界正交，边界分为 `compose`、`call`、`delegate`：组合复用 Session/Instance 并在父栈形成必须折叠的帧段；调用复用 Session 但创建新 Instance；委托同时创建新 Session 和新 Instance。
 
-**原则**：子图是函数式调用边界。父图只看调用结果，不偷看子图内部历史。
+**原则**：命令与工具共享同一图调用协议；图复用必须显式选择上下文共享强度。当前 `kind: "graph"` 保持 `call` 语义以兼容已有行为，`compose` 与统一 `delegate` 接线属于后续实现。
 
 ### 决策 8：END 为类型安全的 sentinel
 
@@ -410,9 +410,15 @@ const reviewGraph: Graph = {
 
 `ContextFrame.graphId` 被删除，MVP 阶段只保留线性执行历史，子图路径等调试信息后续通过 trace 表达。`all-satisfied` 和 `Edge[]` 返回被删除；单 agent 栈模型只允许单一后继边。
 
-### 修订 11：子图调用改为隔离栈
+### 修订 11：子图调用改为隔离栈（已被修订 12 扩展）
 
 **原设计**：子图执行期间沿用父图 frames 继续生长。**问题**：父子图历史混在一条栈里，复合节点边界不清晰，也会重新制造 graphId/tracePath 的压力。**决策**：子图调用创建新的 AgentInstance，`background` 来自调用点传入，`frames = []`。父图 frames 对子图不可见；子图 END 后整体归约为父图 graph 节点的一次 NodeCompletion。
+
+### 修订 12：AgentSession 与 AgentInstance 解耦，图调用分为三种边界
+
+**问题**：顶层工具使用独立 AgentSession，内部子图使用 AgentInstance 隔离，使二者看起来像两套互斥的图执行模型；同时，“图代替点”的代码组合需求与函数式隔离需求被压进同一个 `kind: "graph"`。**决策**：AgentSession 是物理执行边界，AgentInstance 是逻辑活动身份；图调用显式区分 `compose`、`call`、`delegate`。`compose` 共享父 frames 前缀并在退出时强制折叠新增帧段；`call` 使用同 Session 的新 Instance；`delegate` 使用新 Session 与新 Instance。命令和 agent 工具统一产生 GraphRunRequest 并消费 GraphRunResult，仅展示适配不同。
+
+完整决策见 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)。
 
 ---
 

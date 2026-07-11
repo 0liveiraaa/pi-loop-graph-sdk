@@ -12,6 +12,7 @@ import { END } from "../type.js";
 
 function fakePi() {
   const handlers = new Map<string, Function[]>();
+  const sentMessages: any[] = [];
   return {
     registerTool: vi.fn(),
     registerCommand: vi.fn(),
@@ -23,7 +24,8 @@ function fakePi() {
     setActiveTools: vi.fn(),
     getActiveTools: vi.fn(() => ["read", "__graph_complete__"]),
     getAllTools: vi.fn(() => [{ name: "read" }, { name: "__graph_complete__" }]),
-    sendMessage: vi.fn((_message: any, options?: { triggerTurn?: boolean }) => {
+    sendMessage: vi.fn((message: any, options?: { triggerTurn?: boolean }) => {
+      sentMessages.push({ ...message, _options: options });
       if (!options?.triggerTurn) return;
       queueMicrotask(() => {
         for (const handler of handlers.get("tool_result") ?? []) {
@@ -38,10 +40,13 @@ function fakePi() {
       });
     }),
     emit(eventName: string, event: any) {
+      let result: unknown;
       for (const handler of handlers.get(eventName) ?? []) {
-        handler(event);
+        result = handler(event);
       }
+      return result;
     },
+    _sentMessages: sentMessages,
   } as any;
 }
 
@@ -347,7 +352,7 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("钩子注册", () => {
-    it("注册 context / tool_result / agent_end / session_start 钩子", () => {
+    it("注册 context / tool_result / agent_end / session_start / session_compact 钩子", () => {
       const pi = fakePi();
       createLoopGraphExtension(pi);
 
@@ -356,6 +361,79 @@ describe("createLoopGraphExtension", () => {
       expect(eventNames).toContain("tool_result");
       expect(eventNames).toContain("agent_end");
       expect(eventNames).toContain("session_start");
+      expect(eventNames).toContain("session_compact");
+    });
+  });
+
+  describe("compaction checkpoint", () => {
+    it("活动节点 compaction 后以相同 scopeId 重发 checkpoint，retry 投影保留 frames 且不泄漏 summary", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let retryProjection: any;
+
+      const first: Node = {
+        kind: "code", id: "first", subGoal: "先完成",
+        async execute() {
+          return { nodeId: "first", status: "ok", result: { carried: true } };
+        },
+      };
+      const second: Node = {
+        kind: "code", id: "second", subGoal: "压缩后继续",
+        async execute() {
+          pi.emit("session_compact", { reason: "overflow", willRetry: true });
+          retryProjection = pi.emit("context", {
+            messages: [
+              { role: "user", content: "outer transcript" },
+              { role: "compactionSummary", content: "compaction secret" },
+              ...pi._sentMessages,
+            ],
+          });
+          return { nodeId: "second", status: "ok", result: {} };
+        },
+      };
+      const graph: Graph = {
+        id: "compact_graph", goal: "compaction",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "first" }],
+        nodes: { first, second },
+        routing: {
+          first: {
+            nodeId: "first", router: { kind: "first-match" }, edges: [{
+              id: "next", from: "first", to: "second", priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { nodeId: completion.nodeId, status: completion.status, summary: "first done", result: completion.result } };
+              },
+            }],
+          },
+          second: {
+            nodeId: "second", router: { kind: "first-match" }, edges: [{
+              id: "end", from: "second", to: END, priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { nodeId: completion.nodeId, status: completion.status, summary: "second done", result: completion.result } };
+              },
+            }],
+          },
+        },
+      };
+
+      await loop.executeGraph(graph, { source: "command", args: "" });
+
+      const scopes = pi._sentMessages.filter((message: any) => message.customType === "loop_graph_node_scope");
+      const secondScopes = scopes.filter((message: any) => message.details.nodeId === "second");
+      expect(secondScopes).toHaveLength(2);
+      expect(secondScopes[0].details.scopeId).toBe(secondScopes[1].details.scopeId);
+
+      const text = retryProjection.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).toContain("first done");
+      expect(text).toContain("nodeId: second");
+      expect(text).not.toContain("outer transcript");
+      expect(text).not.toContain("compaction secret");
+    });
+
+    it("无活动图节点时忽略 compaction，不写入 checkpoint", () => {
+      const pi = fakePi();
+      createLoopGraphExtension(pi);
+      pi.emit("session_compact", { reason: "manual", willRetry: false });
+      expect(pi._sentMessages).toHaveLength(0);
     });
   });
 

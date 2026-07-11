@@ -71,4 +71,4 @@ completeWith: __graph_complete__({ status, result })
 
 ## 与 compaction 的关系
 
-Phase 4 的安全基线是 fail closed：当前 scope 被 compaction 删除后，投影不会回退原始 transcript，而是从 `AgentInstance.frames` 重建 COMPLETED，并从当前 Node 重建确定性 CURRENT。Phase 5 将监听 `session_compact`，主动重新发出当前 NodeScope checkpoint；frames 始终是跨节点状态的唯一事实来源。
+当前安全基线是 fail closed：当前 scope 被 compaction 删除后，投影不会回退原始 transcript，而是从 `AgentInstance.frames` 重建 COMPLETED，并从当前 Node 重建确定性 CURRENT。Phase 5 已监听 `session_compact`，在图节点活跃时同步重新发出相同 `scopeId` 的 NodeScope checkpoint；overflow retry 从新 checkpoint 继续。frames 始终是跨节点状态的唯一事实来源。
