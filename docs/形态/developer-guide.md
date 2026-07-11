@@ -9,7 +9,7 @@ Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
 **关键特性**：
 
 - **帧栈折叠**：已完成节点的 ReAct 过程被折叠为摘要帧，后续节点只看到摘要，不看到原始展开过程
-- **隔离栈**：子图创建独立的 AgentInstance，帧栈从零开始，父图的帧对子图不可见
+- **隔离栈**：当前 `kind: "graph"` 实现的是 `call` 边界——创建独立 AgentInstance，帧栈从零开始，父图帧不可见
 - **不干预 ReAct**：框架只编排"什么时候跑什么节点"，不干涉节点内部的 LLM 推理循环
 - **全员函数扩展**：所有定制点都是函数（`guard`、`migrate`、`execute`、`validateCompletion`、`custom router`），无黑盒限制
 - **框架不引入全局隐式状态**：所有跨节点数据流经帧栈显式传递，不依赖闭包或模块变量
@@ -566,9 +566,9 @@ validateCompletion(result) {
 
 ---
 
-## 子图
+## 子图（当前实现：call）
 
-子图使用隔离栈：创建新的 `AgentInstance`，`frames = []`，`background` 来自调用点的 `NodeInput.data`。
+当前 `kind: "graph"` 使用 `call` 边界：复用 AgentSession，但创建新的 `AgentInstance`，`frames = []`，`background` 来自调用点的 `NodeInput.data`。已接受的 `compose` 与 `delegate` 边界尚未成为公开 API，见 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)。
 
 ```typescript
 const childGraph: Graph = {

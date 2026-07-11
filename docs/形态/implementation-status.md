@@ -12,7 +12,7 @@
 - scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
 - 图节点活跃期间收到 pi `session_compact` 后，会同步重发同一 `scopeId` 的 NodeScope checkpoint；overflow retry 因此从新 checkpoint 开始，`compactionGeneration` / `reason` / `willRetry` 写入 debug trace。
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
-- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、138 项测试通过（含真实 LLM Phase 0）。
+- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、141 项测试通过（含真实 LLM Phase 0）。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
