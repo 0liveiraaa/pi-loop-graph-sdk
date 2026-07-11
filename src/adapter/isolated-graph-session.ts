@@ -5,6 +5,7 @@ import {
   SessionManager,
   SettingsManager,
   type AuthStorage,
+  type CompactionSettings,
   type CreateAgentSessionOptions,
   type ModelRegistry,
   type ToolDefinition,
@@ -12,9 +13,11 @@ import {
 import type { ContextFrame, GraphRunRequest } from "../type.js";
 import { createLoopGraphExtension, type LoopGraphExtension } from "./loop-graph-extension.js";
 import type {
+  DelegateHostFactory,
   IsolatedGraphSession,
   IsolatedGraphSessionFactory,
 } from "./graph-execution-host.js";
+import { IsolatedSessionGraphHost } from "./graph-execution-host.js";
 
 export interface IsolatedGraphSessionFactoryOptions {
   authStorage: AuthStorage;
@@ -27,6 +30,10 @@ export interface IsolatedGraphSessionFactoryOptions {
   skillBasePath?: string;
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
+  /** 省略时遵循 pi 默认 compaction；可由 host 显式覆盖。 */
+  compaction?: CompactionSettings;
+  /** 供子图继续使用 delegate；runtime-only adapter 不注册对外入口。 */
+  createDelegateHost?: DelegateHostFactory;
 }
 
 /**
@@ -41,7 +48,9 @@ export function createIsolatedGraphSessionFactory(
   return async (_request: GraphRunRequest): Promise<IsolatedGraphSession> => {
     const cwd = options.cwd ?? process.cwd();
     const agentDir = options.agentDir ?? getAgentDir();
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory(
+      options.compaction ? { compaction: options.compaction } : undefined,
+    );
     let loop: LoopGraphExtension | null = null;
 
     const resourceLoader = new DefaultResourceLoader({
@@ -60,6 +69,9 @@ export function createIsolatedGraphSessionFactory(
             defaultTools: options.defaultTools,
             skillBasePath: options.skillBasePath,
             frameFormatter: options.frameFormatter,
+            createDelegateHost: options.createDelegateHost,
+            delegateTools: options.customTools,
+            delegateCompaction: options.compaction,
           });
         },
       ],
@@ -109,4 +121,21 @@ export function createIsolatedGraphSessionFactory(
       },
     };
   };
+}
+
+/**
+ * 构造可递归 delegate 的一次性 host factory。每次调用创建新 host/session，
+ * 子 session 内的 delegate graph-node 继续复用同一份认证、模型与真实工具实现。
+ */
+export function createIsolatedDelegateHostFactory(
+  options: Omit<IsolatedGraphSessionFactoryOptions, "createDelegateHost">,
+): DelegateHostFactory {
+  let createSession!: IsolatedGraphSessionFactory;
+  const createHost: DelegateHostFactory = async () =>
+    new IsolatedSessionGraphHost({ createSession });
+  createSession = createIsolatedGraphSessionFactory({
+    ...options,
+    createDelegateHost: createHost,
+  });
+  return createHost;
 }

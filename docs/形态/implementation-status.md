@@ -14,9 +14,11 @@
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
 - Phase 7 已将 root/call 收敛到单一 `runGraphLoop`；call 使用同一 Runtime 的嵌套 CallFrame，仍创建独立 AgentInstance。
 - Phase 8 已接线 `compose`：同一 AgentInstance 上的 child frames 被 Runtime 限定为临时 FrameSegment，默认或自定义 fold 后强制截断；异常、fold throw、maxSteps 均回滚，父节点活动 Scope 在嵌套返回时恢复。
+- Phase 9 已接线持久 GraphCallScope：call/compose 使用配对 start/end，context 在有无活动图时都清除闭合区段；end 记录 boundary、invocationKind 和真实业务状态，异常路径固定恢复 CallFrame。
+- 共享 Session 的嵌套 call/compose 活跃期间会取消 compaction，避免 pi 基于原始 transcript 生成的混合 summary 穿透调用边界；root-only 图继续使用 NodeScope checkpoint。长任务 compaction 由 Phase 10 delegate host 承担。
 - runtime-only 注册仅剥离顶层 `invocation`，不修改原 Graph；`nodes`/`routing` 作为含函数的只读定义引用共享，不能也不应结构化深拷贝。
 - `delegate` 仍未接线独立 host，会明确拒绝，绝不按 call 静默执行。
-- 验证：`npm test -- --run` 通过（12 文件、169 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
+- 验证：`npm test -- --run` 通过（12 文件、183 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
@@ -347,7 +349,7 @@ runSubgraphInExtension 创建 childRuntime：
 | `pi-node-context.callTool` | `throw Error` 占位                                                                         |
 | schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
 | 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
-| 自定义 compaction 策略      | 不实现；SDK 不生成 LLM summary、不主动调用 compact，继续使用 pi 原生策略 |
+| 自定义 compaction 策略      | SDK 不生成 LLM summary、不主动调用 compact；root 使用 pi 原生策略，嵌套 call/compose 期间为保证边界安全而取消压缩 |
 | session 续跑                 | 帧栈未持久化到磁盘                                                                           |
 | graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
 | 三类图调用边界               | `call` 与 `compose` 已可执行；compose 强制 fold/截断临时帧段。`delegate` 等待 Phase 10 独立 host，当前明确拒绝 |

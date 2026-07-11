@@ -452,6 +452,8 @@ const subNode: Node = {
 
 图节点运行期间如果 pi 发生自动、手动或 overflow compaction，SDK 会在 `session_compact` 后重发当前 NodeScope checkpoint（同一 `scopeId`）。这不会生成摘要或改写 system prompt；下一次调用仅通过 frames + checkpoint 后的 live 消息恢复上下文。
 
+这一规则只适用于 root-only 图。共享 Session 的嵌套 `call/compose` 活跃时，SDK 会在 `session_before_compact` 取消本次压缩：pi 的 compaction summary 基于原始 session entries，可能同时包含父上下文和子图内部 transcript，事后补发调用锚点无法安全拆开。需要独立 compaction 生命周期或可能运行很久的子任务，应使用 `delegate` 边界。
+
 ### 位置约定
 
 `skillBasePath/{skill名称}/SKILL.md`。默认 `skillBasePath` 为 `cwd/skills`，可通过 `createLoopGraphExtension(pi, { skillBasePath: "..." })` 配置。SDK 通过 `resources_discover` 事件将 `skillBasePath` 注册到 pi 的原生 skill 系统，pi 自动扫描 frontmatter 并在系统提示中以 XML 形式列出可用 skill。

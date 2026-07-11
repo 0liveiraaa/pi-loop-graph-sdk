@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectMessages, type MessageEntry } from "./projection.js";
+import { projectMessages, stripClosedGraphCalls, type MessageEntry } from "./projection.js";
 import type { ContextFrame, Node } from "../type.js";
 import type { NodeScopeDescriptor } from "../runtime.js";
 
@@ -122,5 +122,141 @@ describe("projectMessages — NodeScope v2", () => {
     const out = projectMessages({ messages: [], frames: [frame], currentNode: agentNode("node2"), activeScope: scope("node2") });
     expect(out).toHaveLength(2);
     expect(out.every((message) => typeof message.timestamp === "number")).toBe(true);
+  });
+});
+
+// ── stripClosedGraphCalls 单元测试 ──
+
+describe("stripClosedGraphCalls", () => {
+  const callStart = (callId: string, graphId = "g"): MessageEntry => ({
+    customType: "loop_graph_call_start",
+    content: `start ${graphId}`,
+    display: false,
+    details: { protocol: 2, callId, graphRunId: "r1", graphId, boundary: "call" },
+  });
+
+  const callEnd = (callId: string): MessageEntry => ({
+    customType: "loop_graph_call_end",
+    content: "end",
+    display: false,
+    details: { protocol: 2, callId, graphRunId: "r1", graphId: "g", status: "ok" },
+  });
+
+  it("空消息数组返回空", () => {
+    expect(stripClosedGraphCalls([])).toEqual([]);
+  });
+
+  it("无 call_start/end 时原样返回", () => {
+    const msgs: MessageEntry[] = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ];
+    expect(stripClosedGraphCalls(msgs)).toEqual(msgs);
+  });
+
+  it("闭合的 call 区段被删除", () => {
+    const msgs: MessageEntry[] = [
+      { role: "user", content: "before" },
+      callStart("c1"),
+      { role: "custom", customType: "node_scope", content: "inner", display: false },
+      { role: "assistant", content: "inner assistant" },
+      callEnd("c1"),
+      { role: "user", content: "after" },
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ role: "user", content: "before" });
+    expect(result[1]).toEqual({ role: "user", content: "after" });
+  });
+
+  it("未闭合的 call_start 保留（图仍在运行中）", () => {
+    const msgs: MessageEntry[] = [
+      { role: "user", content: "before" },
+      callStart("c1"),
+      { role: "custom", customType: "node_scope", content: "active inner", display: false },
+      { role: "assistant", content: "currently running" },
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    expect(result).toHaveLength(4); // all messages preserved
+    expect(result[1]).toEqual(callStart("c1"));
+    expect(result[3]).toEqual({ role: "assistant", content: "currently running" });
+  });
+
+  it("嵌套闭合 call 全部清洗", () => {
+    const msgs: MessageEntry[] = [
+      { role: "user", content: "outer before" },
+      callStart("outer"),
+      { role: "custom", customType: "node_scope", content: "outer node", display: false },
+      callStart("inner"),
+      { role: "custom", customType: "node_scope", content: "inner node", display: false },
+      callEnd("inner"),
+      callEnd("outer"),
+      { role: "user", content: "outer after" },
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ role: "user", content: "outer before" });
+    expect(result[1]).toEqual({ role: "user", content: "outer after" });
+  });
+
+  it("嵌套中仅内层闭合时只删除内层", () => {
+    const msgs: MessageEntry[] = [
+      callStart("outer"),
+      { role: "custom", customType: "n", content: "outer running", display: false },
+      callStart("inner"),
+      { role: "custom", customType: "n", content: "inner done", display: false },
+      callEnd("inner"),
+      { role: "custom", customType: "n", content: "back to outer", display: false },
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    expect(text(result)).toContain("outer running");
+    expect(text(result)).toContain("back to outer");
+    expect(text(result)).not.toContain("inner done");
+  });
+
+  it("多次独立图调用各自闭合后全部清洗", () => {
+    const msgs: MessageEntry[] = [
+      callStart("c1"),
+      { role: "custom", customType: "n", content: "run1", display: false },
+      callEnd("c1"),
+      { role: "user", content: "between" },
+      callStart("c2"),
+      { role: "custom", customType: "n", content: "run2", display: false },
+      callEnd("c2"),
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ role: "user", content: "between" });
+  });
+
+  it("异常状态（有 start 无 end + 有 end 无 start）正确保留未闭合区段", () => {
+    const msgs: MessageEntry[] = [
+      callStart("open"),
+      { role: "custom", customType: "n", content: "open inner", display: false },
+      callEnd("orphan"), // 无匹配 start → 不影响清洗
+    ];
+    const result = stripClosedGraphCalls(msgs);
+    // open 未闭合 → 全部保留（包括 orphan end）
+    expect(result).toHaveLength(3);
+    expect(text(result)).toContain("open inner");
+    // orphan end 也在保留的消息中（不匹配任何 start，不触发删除）
+    const hasOrphanEnd = result.some(
+      (m) => m.customType === "loop_graph_call_end" && (m.details as any)?.callId === "orphan",
+    );
+    expect(hasOrphanEnd).toBe(true);
+  });
+
+  it("callId 精确匹配，不同 callId 不混淆", () => {
+    const msgs: MessageEntry[] = [
+      callStart("a"),
+      { role: "custom", customType: "n", content: "A inner", display: false },
+      callEnd("b"),   // 不匹配 a 的 start
+      callEnd("a"),
+    ];
+    // callEnd("b") 不匹配任何 start，callEnd("a") 匹配 callStart("a")
+    const result = stripClosedGraphCalls(msgs);
+    // 区段 [start("a"), end("a")] 被删除；end("b") 不匹配，但其位置在范围内所以也被删
+    // 实际上 end("b") 在 start("a") 和 end("a") 之间，所以会被删除
+    expect(result).toHaveLength(0);
   });
 });

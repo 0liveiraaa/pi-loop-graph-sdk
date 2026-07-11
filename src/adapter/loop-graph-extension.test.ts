@@ -439,7 +439,7 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("钩子注册", () => {
-    it("注册 context / tool_result / agent_end / session_start / session_compact 钩子", () => {
+    it("注册 context / tool_result / agent_end / session_start / compaction 钩子", () => {
       const pi = fakePi();
       createLoopGraphExtension(pi);
 
@@ -448,6 +448,7 @@ describe("createLoopGraphExtension", () => {
       expect(eventNames).toContain("tool_result");
       expect(eventNames).toContain("agent_end");
       expect(eventNames).toContain("session_start");
+      expect(eventNames).toContain("session_before_compact");
       expect(eventNames).toContain("session_compact");
     });
   });
@@ -916,6 +917,134 @@ describe("createLoopGraphExtension", () => {
       const parentId = scopes[0].instanceId;
       expect(scopes.slice(0, 3).map((scope: any) => scope.instanceId === parentId)).toEqual(sameAsParent);
       expect(scopes[3].instanceId).toBe(parentId);
+    });
+  });
+
+  describe("Phase 9 GraphCallScope", () => {
+    it("真实 call 生成配对且自描述的 start/end，并在返回后的 context 中清除内部消息", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const child = terminalGraph("call_scope_child", {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute() { return { nodeId: "child_work", status: "ok", result: { child: true } }; },
+      });
+      const parent = terminalGraph("call_scope_parent", {
+        kind: "graph", id: "invoke", subGoal: "invoke", graph: child, boundary: "call",
+      });
+
+      await loop.executeGraph(parent, { source: "command", args: "" });
+
+      const start = pi._sentMessages.find((message: any) => message.customType === "loop_graph_call_start");
+      const end = pi._sentMessages.find((message: any) => message.customType === "loop_graph_call_end");
+      expect(start?.details).toMatchObject({
+        protocol: 2, graphId: "call_scope_child", boundary: "call", invocationKind: "graph-node",
+      });
+      expect(end?.details).toMatchObject({
+        protocol: 2,
+        callId: start.details.callId,
+        graphId: "call_scope_child",
+        boundary: "call",
+        invocationKind: "graph-node",
+        status: "ok",
+      });
+
+      const projected = pi.emit("context", { messages: pi._sentMessages });
+      expect(projected.messages.some((message: any) =>
+        message.details?.graphId === "call_scope_child"
+        || message.details?.nodeId === "child_work",
+      )).toBe(false);
+    });
+
+    it("无匹配边出口把真实 cancelled 状态写入 call_end", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const child: Graph = {
+        id: "no_edge_child", goal: "no edge",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "child_work" }],
+        nodes: {
+          child_work: {
+            kind: "code", id: "child_work", subGoal: "cancel",
+            async execute() { return { nodeId: "child_work", status: "cancelled", result: { stopped: true } }; },
+          },
+        },
+        routing: {
+          child_work: { nodeId: "child_work", edges: [], router: { kind: "first-match" } },
+        },
+      };
+      const parent = terminalGraph("no_edge_parent", {
+        kind: "graph", id: "invoke", subGoal: "invoke", graph: child, boundary: "call",
+      });
+
+      await loop.executeGraph(parent, { source: "command", args: "" });
+      const end = pi._sentMessages.find((message: any) =>
+        message.customType === "loop_graph_call_end" && message.details?.graphId === "no_edge_child",
+      );
+      expect(end?.details.status).toBe("cancelled");
+    });
+
+    it("共享 Session 的 call 活跃时阻止 compaction，避免 summary 穿透边界", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let compactDecision: unknown;
+      const child = terminalGraph("compact_guard_child", {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute() {
+          compactDecision = pi.emit("session_before_compact", {
+            reason: "overflow", willRetry: true,
+          });
+          return { nodeId: "child_work", status: "ok", result: {} };
+        },
+      });
+      const parent = terminalGraph("compact_guard_parent", {
+        kind: "graph", id: "invoke", subGoal: "invoke", graph: child, boundary: "call",
+      });
+
+      await loop.executeGraph(parent, { source: "command", args: "" });
+      expect(compactDecision).toEqual({ cancel: true });
+    });
+
+    it("root 节点没有共享子调用时不阻止正常 compaction", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let compactDecision: unknown = "unset";
+      const graph = terminalGraph("root_compact", {
+        kind: "code", id: "root_work", subGoal: "root",
+        async execute() {
+          compactDecision = pi.emit("session_before_compact", {
+            reason: "threshold", willRetry: false,
+          });
+          return { nodeId: "root_work", status: "ok", result: {} };
+        },
+      });
+
+      await loop.executeGraph(graph, { source: "command", args: "" });
+      expect(compactDecision).toBeUndefined();
+    });
+
+    it("mapInput 抛错仍闭合 call scope，且后续图可正常执行", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const child = terminalGraph("map_input_error_child", {
+        kind: "code", id: "child_work", subGoal: "child",
+        async execute() { return { nodeId: "child_work", status: "ok", result: {} }; },
+      });
+      child.entries[0].mapInput = () => { throw new Error("map input failed"); };
+      const parent = terminalGraph("map_input_error_parent", {
+        kind: "graph", id: "invoke", subGoal: "invoke", graph: child, boundary: "call",
+      });
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" })).resolves.toMatchObject({
+        status: "failed", result: { reason: "map input failed" },
+      });
+      const start = pi._sentMessages.find((message: any) =>
+        message.customType === "loop_graph_call_start" && message.details?.graphId === "map_input_error_child",
+      );
+      const end = pi._sentMessages.find((message: any) =>
+        message.customType === "loop_graph_call_end" && message.details?.callId === start?.details.callId,
+      );
+      expect(end?.details.status).toBe("failed");
+      await expect(loop.executeGraph(minimalGraph("after_map_error"), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "ok" });
     });
   });
 

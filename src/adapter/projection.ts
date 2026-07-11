@@ -30,6 +30,10 @@ export interface MessageEntry {
   id?: string;
   role?: string;
   content?: unknown;
+  /** pi CustomMessage 的 UI 展示标记。 */
+  display?: boolean;
+  /** pi compactionSummary / branchSummary 使用 summary 而不是 content。 */
+  summary?: string;
   timestamp?: number;
   customType?: string;
   details?: unknown;
@@ -61,6 +65,61 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
     result.push(buildNodeInfo(currentNode, input.availableEdges));
   }
   return result;
+}
+
+// ── GraphCallScope 清洗（Phase 9）─────────────────────────
+
+/**
+ * 从消息数组中删除已闭合的图调用区段。
+ *
+ * compose / call 子图运行时在当前 session 的 transcript 中产生内部消息（NodeScope、
+ * skill、mechanism、prompt 和 live ReAct）。这些消息由 loop_graph_call_start / end
+ * 区段包围。子图结束后调用方不应再看到这些内部消息——它们必须从上下文中删除。
+ *
+ * 算法：
+ *   1. 从 tail 向 head 扫描，为每个 call_end 寻找最近的前驱 call_start（按 callId 匹配）
+ *   2. 已闭合区段内的全部消息标记为删除
+ *   3. 未闭合的 call_start（图仍在运行中）对应的区段保留
+ *
+ * 此函数始终执行（无论当前是否有活动图），因为之前图调用的闭合区段需要在后续对话中持续清洗。
+ */
+export function stripClosedGraphCalls(messages: MessageEntry[]): MessageEntry[] {
+  // 从尾部收集已闭合的区段
+  const closedRanges: Array<[number, number]> = [];
+  const endStack: Array<{ callId: string; endIdx: number }> = [];
+
+  // tail → head 单次扫描：遇到 call_end 压栈，遇到匹配的 call_start 弹出并记录区段
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.customType === "loop_graph_call_end") {
+      const d = m.details as Record<string, unknown> | undefined;
+      if (d?.callId && typeof d.callId === "string") {
+        endStack.push({ callId: d.callId, endIdx: i });
+      }
+    } else if (m.customType === "loop_graph_call_start") {
+      const d = m.details as Record<string, unknown> | undefined;
+      if (d?.callId && typeof d.callId === "string") {
+        // 找最近匹配的 call_end
+        for (let j = endStack.length - 1; j >= 0; j--) {
+          if (endStack[j].callId === d.callId) {
+            closedRanges.push([i, endStack[j].endIdx]);
+            endStack.splice(j, 1);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (closedRanges.length === 0) return messages;
+
+  // 构建排除索引集合
+  const exclude = new Set<number>();
+  for (const [start, end] of closedRanges) {
+    for (let i = start; i <= end; i++) exclude.add(i);
+  }
+
+  return messages.filter((_, i) => !exclude.has(i));
 }
 
 function findLastMatchingScope(

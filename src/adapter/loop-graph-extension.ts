@@ -35,7 +35,7 @@ import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
 import { assertValidGraph, validateGraphTools } from "../validate.js";
 import { selectEdge } from "../router.js";
-import { buildNodeInfoContent, projectMessages, type EdgeChoice } from "./projection.js";
+import { buildNodeInfoContent, projectMessages, stripClosedGraphCalls, type EdgeChoice } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
@@ -117,10 +117,12 @@ export function createLoopGraphExtension(
 
   // ── 注册钩子 ──
 
-  // context 投影钩子
+  // context 投影钩子 — 始终清洗已闭合图调用区段；仅活动图时再做节点级投影
   (pi as any).on("context", (e: any) => {
+    let messages = stripClosedGraphCalls(e.messages as any[]);
+
     const rt = activeRuntime;
-    if (!rt?.isNodeActive) return;
+    if (!rt?.isNodeActive) return { messages };
 
     // agent-choice 路由：提取可用边描述供 projection 渲染
     const nodeId = rt.currentNodeId;
@@ -136,7 +138,7 @@ export function createLoopGraphExtension(
         : undefined;
 
     const input = {
-      messages: e.messages as any[],
+      messages,
       frames: rt.topInstance?.frames ?? [],
       currentNode: rt.currentNode,
       activeScope: rt.currentScope,
@@ -151,6 +153,24 @@ export function createLoopGraphExtension(
   // compaction 会移除旧 transcript，因而可能带走活动 NodeScope。压缩完成后
   // 在消息流末尾重发相同 scopeId 的 checkpoint；下一次（包括 overflow retry）
   // 的严格投影将从此处开始，而不会回退到 compaction summary 或外层消息。
+  //
+  // 共享 Session 的嵌套 call/compose 不能允许 compaction 跨越 GraphCallScope：
+  // pi 的 summary 基于原始 session entries 生成，可能混入子图内部 transcript；
+  // 事后补发 start checkpoint 无法从混合摘要中可靠剥离这些内容。
+  (pi as any).on("session_before_compact", (event: any) => {
+    const rt = activeRuntime;
+    const activeSharedCall = rt?.callStack.some(
+      (frame) => frame.boundary === "call" || frame.boundary === "compose",
+    );
+    if (!activeSharedCall) return;
+
+    debugLog.compactionBlocked(
+      event?.reason,
+      rt!.callStack.length,
+    );
+    return { cancel: true };
+  });
+
   (pi as any).on("session_compact", (event: any) => {
     const rt = activeRuntime;
     const node = rt?.currentNode;
@@ -264,6 +284,7 @@ export function createLoopGraphExtension(
         background,
         boundary: "root",
         maxSteps: 100,
+        invocationKind: trigger.source === "command" ? "command" : "tool",
       });
       piInner.sendMessage({
         customType: result.status === "failed" ? "loop_graph_error" : "loop_graph_complete",
@@ -329,6 +350,8 @@ export function createLoopGraphExtension(
     maxSteps: number;
     sharedInstance?: AgentInstance;
     parentNodeId?: string;
+    /** root 调用时由 executeGraph 传入；子调用默认为 "graph-node"。 */
+    invocationKind?: import("../type.js").GraphInvocationKind;
   }
 
   /**
@@ -336,35 +359,64 @@ export function createLoopGraphExtension(
    * 不负责命令/tool UI 或 AgentSession host 生命周期。
    */
   async function runGraphLoop(request: RunGraphLoopRequest): Promise<GraphRunResult> {
-    const { runtime, nodeContext, graph, background, boundary, maxSteps, sharedInstance, parentNodeId } = request;
-    const entry = graph.entries.find((candidate) => {
-      try { return candidate.guard(background); } catch { return false; }
-    });
-    if (!entry) {
-      if (boundary === "call") {
-        throw new Error(`子图 ${graph.id} 无匹配入口`);
-      }
-      return {
-        graphId: graph.id,
-        status: "failed",
-        result: { reason: `无匹配入口: ${JSON.stringify(background)}` },
-        steps: 0,
-      };
-    }
-
-    const instance = runtime.pushGraph(graph, background, boundary, sharedInstance, parentNodeId);
-    let nodeId = entry.startNodeId;
-    let input: NodeInput = {
-      data: entry.mapInput ? entry.mapInput(background) : background,
-      source: { kind: "entry", entryId: entry.id },
-    };
-
-    const finish = (result: GraphRunResult): GraphRunResult => {
-      debugLog.graphEnd(graph.id, result.steps, instance.frames);
-      return result;
-    };
-
+    const { runtime, nodeContext, graph, background, boundary, maxSteps, sharedInstance, parentNodeId, invocationKind } = request;
+    // ── GraphCallScope 调用边界消息 ──
+    const callId = crypto.randomUUID();
+    let callStarted = false;
+    let graphPushed = false;
+    let instance: AgentInstance | null = null;
+    const effectiveInvocationKind = invocationKind ?? "graph-node";
+    let lastResult: GraphRunResult = { graphId: graph.id, status: "failed", result: { reason: "unknown" }, steps: 0 };
     try {
+      instance = runtime.pushGraph(graph, background, boundary, sharedInstance, parentNodeId);
+      graphPushed = true;
+
+      if (boundary === "call" || boundary === "compose") {
+        pi.sendMessage({
+          customType: "loop_graph_call_start",
+          content: `[Loop Graph call started: ${graph.id}]`,
+          display: false,
+          details: {
+            protocol: 2,
+            callId,
+            graphRunId: runtime.graphRunId,
+            graphId: graph.id,
+            boundary,
+            invocationKind: effectiveInvocationKind,
+            parentNodeId: parentNodeId ?? undefined,
+          },
+        });
+        callStarted = true;
+      }
+
+      const entry = graph.entries.find((candidate) => {
+        try { return candidate.guard(background); } catch { return false; }
+      });
+      if (!entry) {
+        lastResult = {
+          graphId: graph.id,
+          status: "failed",
+          result: { reason: `无匹配入口: ${JSON.stringify(background)}` },
+          steps: 0,
+        };
+        if (boundary === "call") {
+          throw new Error(`子图 ${graph.id} 无匹配入口`);
+        }
+        debugLog.graphEnd(graph.id, lastResult.steps, instance.frames);
+        return lastResult;
+      }
+
+      let nodeId = entry.startNodeId;
+      let input: NodeInput = {
+        data: entry.mapInput ? entry.mapInput(background) : background,
+        source: { kind: "entry", entryId: entry.id },
+      };
+
+      const finish = (result: GraphRunResult): GraphRunResult => {
+        debugLog.graphEnd(graph.id, result.steps, instance!.frames);
+        return result;
+      };
+
       for (let step = 0; step < maxSteps; step++) {
         const node = graph.nodes[nodeId];
         if (!node) throw new Error(`节点未找到: ${nodeId}`);
@@ -461,12 +513,13 @@ export function createLoopGraphExtension(
             };
             runtime.exitNode(frame);
             debugLog.exitNode(runtime.callStack.length, nodeId, frame, instance.frames);
-            return finish({
+            lastResult = {
               graphId: graph.id,
               status: completion.status,
               result: completion.result,
               steps: step + 1,
-            });
+            };
+            return finish(lastResult);
           }
 
           const migration = edge.migrate(runtime.topInstance!, completion);
@@ -479,12 +532,13 @@ export function createLoopGraphExtension(
           );
 
           if (edge.to === END) {
-            return finish({
+            lastResult = {
               graphId: graph.id,
               status: migration.frame.status,
               result: migration.frame.result,
               steps: step + 1,
-            });
+            };
+            return finish(lastResult);
           }
 
           nodeId = edge.to as string;
@@ -497,14 +551,34 @@ export function createLoopGraphExtension(
         }
       }
 
-      return finish({
+      lastResult = {
         graphId: graph.id,
         status: "failed",
         result: { reason: `Max steps (${maxSteps}) exceeded` },
         steps: maxSteps,
-      });
+      };
+      return finish(lastResult);
     } finally {
-      runtime.popGraph();
+      try {
+        if (callStarted) {
+          pi.sendMessage({
+            customType: "loop_graph_call_end",
+            content: `[Loop Graph call completed: ${graph.id}]`,
+            display: false,
+            details: {
+              protocol: 2,
+              callId,
+              graphRunId: runtime.graphRunId,
+              graphId: graph.id,
+              boundary,
+              invocationKind: effectiveInvocationKind,
+              status: lastResult.status,
+            },
+          });
+        }
+      } finally {
+        if (graphPushed) runtime.popGraph();
+      }
     }
   }
 

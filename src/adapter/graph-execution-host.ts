@@ -5,6 +5,10 @@ import type {
   GraphRunRequest,
   GraphRunResult,
 } from "../type.js";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 /** 为旧调用（仅有 invocationKind，无 boundary）填补默认值。
  *  旧 `"subgraph"` → `graph-node` + `call`。 */
@@ -37,6 +41,69 @@ export function normalizeGraphRunRequest(
 export interface GraphExecutionHost {
   run(graph: Graph, request: GraphRunRequest): Promise<GraphRunResult>;
   dispose(): Promise<void>;
+}
+
+/** 创建 delegate host 时可用的调用现场；不包含外层 transcript。 */
+export interface GraphHostContext {
+  pi: ExtensionAPI;
+  extensionContext?: ExtensionContext;
+  graph: Graph;
+  request: GraphRunRequest;
+}
+
+export type DelegateHostFactory = (
+  context: GraphHostContext,
+) => Promise<GraphExecutionHost>;
+
+/** 入口无关的统一图调用器。第三个参数只提供运行配置，不改变业务请求。 */
+export interface GraphInvoker {
+  invoke(
+    graph: Graph,
+    request: GraphRunRequest,
+    extensionContext?: ExtensionContext,
+  ): Promise<GraphRunResult>;
+}
+
+/** 每次 invoke 创建一次性 host，并固定执行 run → abort/dispose 生命周期。 */
+export class DelegateGraphInvoker implements GraphInvoker {
+  constructor(
+    private readonly pi: ExtensionAPI,
+    private readonly createHost: DelegateHostFactory,
+  ) {}
+
+  async invoke(
+    graph: Graph,
+    request: GraphRunRequest,
+    extensionContext?: ExtensionContext,
+  ): Promise<GraphRunResult> {
+    if (request.boundary !== "delegate") {
+      throw new Error(`DelegateGraphInvoker 只接受 delegate boundary，收到: ${request.boundary}`);
+    }
+
+    const host = await this.createHost({
+      pi: this.pi,
+      extensionContext,
+      graph,
+      request,
+    });
+    let runError: unknown;
+    try {
+      return await host.run(graph, request);
+    } catch (error) {
+      runError = error;
+      throw error;
+    } finally {
+      try {
+        await host.dispose();
+      } catch (disposeError) {
+        if (runError != null) {
+          (runError as any).suppressed = disposeError;
+        } else {
+          throw disposeError;
+        }
+      }
+    }
+  }
 }
 
 /**

@@ -13,12 +13,18 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateGraphTools } from "./validate.js";
 import type { Entry, Graph, GraphRunResult } from "./type.js";
+import type { GraphInvoker } from "./adapter/graph-execution-host.js";
 
 export type ExecuteGraph = (
   pi: ExtensionAPI,
   graph: Graph,
   trigger: { source: string; args?: string; params?: Record<string, unknown> },
 ) => Promise<GraphRunResult>;
+
+export interface GraphRegistryOptions {
+  /** graph tool 返回给模型的最大 UTF-8 字节数。默认 16 KiB。 */
+  toolResultMaxBytes?: number;
+}
 
 /**
  * 实例级图注册表。
@@ -31,7 +37,8 @@ export class GraphRegistry {
 
   constructor(
     private readonly pi: ExtensionAPI,
-    private readonly executeGraph: ExecuteGraph,
+    private readonly invoker: GraphInvoker,
+    private readonly options: GraphRegistryOptions = {},
   ) {}
 
   /** 注册一张图。有 invocation 的图自动注册为 pi 命令 + 工具。
@@ -62,25 +69,38 @@ export class GraphRegistry {
       handler: async (args, ctx) => {
         const params = inv.parseArgs ? inv.parseArgs(args) : { args };
         ctx.ui.notify(`启动图: ${graph.id}`, "info");
-        await this.executeGraph(this.pi, graph, { source: "command", args, params });
+        const result = await this.invoker.invoke(graph, {
+          background: params,
+          invocationKind: "command",
+          boundary: "delegate",
+          signal: ctx.signal,
+        }, ctx);
+        ctx.ui.notify(
+          result.status === "ok"
+            ? `图完成: ${graph.id}（${result.steps} 步）`
+            : `图结束: ${graph.id}（${result.status}）`,
+          result.status === "ok" ? "info" : "warning",
+        );
       },
     });
 
     // 注册 pi 工具（供 LLM tool-call）
-    const pi = this.pi;
-    const executeGraph = this.executeGraph;
+    const invoker = this.invoker;
+    const maxBytes = this.options.toolResultMaxBytes;
     this.pi.registerTool({
       name: inv.name,
       label: inv.name,
       description: inv.description,
       parameters: inv.inputSchema as any,
-      async execute(_toolCallId: any, params: any) {
-        const result = await executeGraph(pi, graph, {
-          source: "tool",
-          params: params as Record<string, unknown>,
-        });
+      async execute(_toolCallId: any, params: any, signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
+        const result = await invoker.invoke(graph, {
+          background: params as Record<string, unknown>,
+          invocationKind: "tool",
+          boundary: "delegate",
+          signal: signal ?? ctx?.signal,
+        }, ctx);
         return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
+          content: [{ type: "text", text: encodeGraphToolResult(result, maxBytes) }],
           details: result,
         };
       },
@@ -116,6 +136,39 @@ export class GraphRegistry {
   }
 }
 
+/** 对模型可见的结果始终是有效 JSON；过大时只保留有界 preview。 */
+export function encodeGraphToolResult(
+  result: GraphRunResult,
+  maxBytes = 16 * 1024,
+): string {
+  const full = JSON.stringify(result);
+  if (Buffer.byteLength(full, "utf8") <= maxBytes) return full;
+
+  const minimum = JSON.stringify({ truncated: true });
+  if (maxBytes <= Buffer.byteLength(minimum, "utf8")) return minimum;
+
+  let low = 0;
+  let high = full.length;
+  let best = minimum;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = JSON.stringify({
+      graphId: result.graphId,
+      status: result.status,
+      steps: result.steps,
+      truncated: true,
+      preview: full.slice(0, mid),
+    });
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
 // ── @deprecated 全局兼容层 ──────────────────────────────────
 //
 //  以下导出保留向后兼容，委托到默认实例。
@@ -141,7 +194,15 @@ export function registerGraph(pi: ExtensionAPI, graph: Graph): void {
     if (!_defaultExecuteGraph) {
       throw new Error("loop-graph Registry 尚未初始化。请使用 createLoopGraphExtension(pi) 创建实例。");
     }
-    _defaultRegistry = new GraphRegistry(pi, _defaultExecuteGraph);
+    const executeGraph = _defaultExecuteGraph;
+    _defaultRegistry = new GraphRegistry(pi, {
+      invoke(target, request) {
+        return executeGraph(pi, target, {
+          source: request.invocationKind === "command" ? "command" : "tool",
+          params: request.background,
+        });
+      },
+    });
   }
   _defaultRegistry.registerGraph(graph);
 }

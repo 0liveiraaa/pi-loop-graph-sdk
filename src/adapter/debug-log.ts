@@ -101,6 +101,11 @@ export const debugLog = {
     log({ type: "scope_checkpoint", scopeId, generation, reason, willRetry });
   },
 
+  /** 共享 Session 的嵌套调用期间阻止 compaction 跨越 GraphCallScope。 */
+  compactionBlocked(reason: unknown, depth: number): void {
+    log({ type: "compaction_blocked", reason, depth });
+  },
+
   /** agent 完成（__graph_complete__ 被调用） */
   agentComplete(nodeId: string, completion: NodeCompletion): void {
     log({

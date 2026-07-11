@@ -47,7 +47,7 @@ export type { GraphValidationIssue, GraphValidationOptions } from "./validate.js
 export { selectEdge } from "./router.js";
 
 // ── 消息投影（高级）──
-export { projectMessages, defaultFrameFormatter } from "./adapter/projection.js";
+export { projectMessages, defaultFrameFormatter, stripClosedGraphCalls } from "./adapter/projection.js";
 export type { ProjectionInput, MessageEntry, EdgeChoice } from "./adapter/projection.js";
 
 // ── @deprecated 全局兼容层（向后兼容旧代码）──

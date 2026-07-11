@@ -711,6 +711,8 @@ closeFrameSegment(scope, completion): NodeCompletion;
 
 ### Phase 9 — 完成 call 与 GraphCallScope 的统一实现
 
+**状态：✅ 已完成。** `call/compose` 现在写入配对、可自描述的 `loop_graph_call_start/end`，所有入口解析、节点、路由、无边、maxSteps 与异常路径共享同一 `try/finally`，并保证发送 end 失败时仍 pop CallFrame。context 始终先删除已闭合调用区段，再按活动 NodeScope 投影。由于 pi compaction 基于原始 session entries 生成 summary，可能把调用区段内部内容混入不可拆分的摘要，本阶段选择安全策略：共享 Session 的嵌套 `call/compose` 活跃期间由 `session_before_compact` 返回 `{ cancel: true }`；root-only 图仍沿用 Phase 5 的 checkpoint 协同。长任务和独立 compaction 生命周期交给 Phase 10 `delegate`。完成时全量 12 文件、183 项测试（含真实 LLM）与 `tsc --noEmit` 均通过。
+
 **目标**：把当前隔离子图正式收敛为 call 策略，并完成共享 Session 的调用区段审计。
 
 - call 创建新 AgentInstance、frames、scratch，但复用 Session/Runtime/工具实现。
@@ -725,8 +727,9 @@ projectActiveNodeScope(messages, runtime);
 
 - call 返回时恢复父 CallFrame、NodeScope 状态和工具集。
 - 父图只收到 NodeCompletion status/result；child frames 仅进入 trace。
+- 共享 Session 的嵌套 call/compose 活跃期间拒绝 compaction；不能用事后补发 start 的方式信任已经混合生成的 compaction summary。
 
-验收：连续图调用、嵌套 call、compaction 切断 start/end、异常退出后的下一次普通 provider request 均不包含已闭合图内 transcript。
+验收：连续图调用、嵌套 call、正常/无边/异常出口、返回后的普通 context 清洗均有集成覆盖；嵌套调用期间 compaction 被显式取消，root-only compaction 不受影响。
 
 ### Phase 10 — command/tool/graph-node 统一接入 delegate host
 
@@ -889,7 +892,7 @@ compose/call/delegate 混合嵌套后 callStack、frames、工具集全部恢复
 | 工具结果过大重新撑爆外层上下文                    | 对模型可见 content 设置上限；完整结果进入 details 或显式外部引用                                                   |
 | 业务失败和基础设施错误混淆                        | `GraphRunResult.status` 只表达业务终态；host/runtime 异常直接 throw                                              |
 | 图异常导致没有 call_end                           | `finally` 中闭合调用作用域；基础设施异常完成清理后继续抛出                                                       |
-| compaction 切断 GraphCallScope start/end          | `session_compact` 重建活动调用 checkpoint；closed-scope 清洗加入跨 compaction 测试                               |
+| compaction 切断 GraphCallScope start/end          | `session_before_compact` 在共享 Session 的嵌套 call/compose 活跃期间取消压缩；混合 summary 无法靠事后 checkpoint 安全拆分 |
 | call/delegate frames 作为 result 泄漏             | 普通返回只含 final result；frames 转移到 debug trace                                                               |
 | delegate 默认关闭 compaction 导致长图溢出         | host compaction 改为显式配置，默认遵循 pi 并复用 NodeScope checkpoint                                              |
 
