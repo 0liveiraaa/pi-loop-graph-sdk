@@ -570,6 +570,8 @@ validateCompletion(result) {
 
 当前 `kind: "graph"` 使用 `call` 边界：复用 AgentSession，但创建新的 `AgentInstance`，`frames = []`，`background` 来自调用点的 `NodeInput.data`。已接受的 `compose` 与 `delegate` 边界尚未成为公开 API，见 [ADR-0001](../adr/0001-graph-invocation-boundaries.md)。
 
+Phase 6 已允许在类型层声明 `boundary` 与 compose-only `fold`，但当前 Runtime 只执行 `call`；声明 `compose` 或 `delegate` 会得到明确的 unsupported-boundary 错误，不会静默降级。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用也会在校验阶段报错。
+
 ```typescript
 const childGraph: Graph = {
   id: "child",

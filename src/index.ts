@@ -30,9 +30,6 @@ export { IsolatedSessionGraphHost } from "./adapter/graph-execution-host.js";
 export { createIsolatedGraphSessionFactory } from "./adapter/isolated-graph-session.js";
 export type {
   GraphExecutionHost,
-  GraphInvocationKind,
-  GraphRunRequest,
-  GraphRunResult,
   IsolatedGraphSession,
   IsolatedGraphSessionFactory,
   IsolatedSessionGraphHostOptions,
@@ -46,7 +43,7 @@ export * from "./type.js";
 export { GraphRuntime } from "./runtime.js";
 export type { CallFrame } from "./runtime.js";
 export { validateGraph, assertValidGraph, validateGraphTools } from "./validate.js";
-export type { GraphValidationIssue } from "./validate.js";
+export type { GraphValidationIssue, GraphValidationOptions } from "./validate.js";
 export { selectEdge } from "./router.js";
 
 // ── 消息投影（高级）──

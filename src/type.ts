@@ -6,13 +6,12 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 //
-//    AgentInstance 持有一个有序帧栈（frames），每进入一个节点就在栈上生长一层，
-//    离开节点时边负责折叠栈顶层。栈只增不减，保持信息连续性。
+//    AgentInstance 持有一个有序逻辑帧栈（frames），节点离开时由边折叠；
+//    compose 后续会以有界 frame segment 实现结构化生长与归约。
 //
 //    子图调用是一等公民：Node 可以引用另一个 Graph 作为其实现。
-//    子图执行使用隔离栈：Runtime 为子图创建新的 AgentInstance，
-//    子图 END 时整段帧归约为父图该 Node 的一次产出。
-//    "顶层调用"只是子图调用的一个特例（无调用者）。
+//    graph node 缺省使用 call：Runtime 为子图创建新的 AgentInstance；
+//    compose/delegate 已进入类型协议，但在对应阶段接线前会明确拒绝执行。
 //
 // ============================================================
 
@@ -56,13 +55,48 @@ export interface ContextFrame {
   result: Record<string, unknown>;
 }
 
+// ── 图调用协议 ──
+
+/** 图调用来源。只记录谁触发了运行，不决定上下文共享语义。 */
+export type GraphInvocationKind = "command" | "tool" | "graph-node" | "api";
+
+/** 图调用边界。来源和边界是两个正交维度。 */
+export type GraphInvocationBoundary = "compose" | "call" | "delegate";
+
+/** 一次图运行的稳定业务返回；frames/trace 不属于普通返回。 */
+export interface GraphRunResult {
+  graphId: string;
+  status: "ok" | "failed" | "cancelled";
+  result: Record<string, unknown>;
+  steps: number;
+}
+
+/** 一次图运行的显式请求。 */
+export interface GraphRunRequest {
+  background: Record<string, unknown>;
+  invocationKind: GraphInvocationKind;
+  boundary: GraphInvocationBoundary;
+  signal?: AbortSignal;
+}
+
+/** compose fold 接收的帧段只读快照与子图最终结果。 */
+export interface ComposeFoldInput {
+  segment: readonly ContextFrame[];
+  finalResult: GraphRunResult;
+}
+
+/** fold 不能伪造父 graph node 的 nodeId，该身份由 Runtime 补齐。 */
+export type ComposeFoldResult = Pick<NodeCompletion, "status" | "result">;
+
+export type ComposeFrameFolder = (input: ComposeFoldInput) => ComposeFoldResult;
+
 // ── Agent 实例 ──
 
 /**
  * 回路图中的活动主体，持有一个有序帧栈。
  *
  *   background  — 进入当前图时的背景上下文（不变）
- *   frames      — 有序执行历史，只增不减，只由 Edge.migrate 折叠
+ *   frames      — 模型可见的有序逻辑工作栈；普通 call 当前只由 Edge.migrate 追加
  *   mechanisms  — 全局横切机制，跨节点持续生效
  *   scratch     — mechanism 的唯一合法可变区（见下）
  *
@@ -148,15 +182,15 @@ export interface AgentRunRequest {
  *   - tools       本阶段工具白名单
  *   - mechanisms  局部横切机制，叠加在全局机制之上
  *
- * graph 节点只声明子图调用本身。Runtime 进入子图时创建新的 AgentInstance：
+ * graph 节点声明被调用图及调用边界。缺省 call 创建新的 AgentInstance：
  *   - globalGoal 来自子图 Graph.goal
  *   - background 来自调用点传入的 NodeInput.data
  *   - frames 从空数组开始，父图 frames 对子图不可见
  *   - 子图 END 后归约为父图 graph 节点的一次 NodeCompletion
  *     （即子图 END 边的 frame.result 成为该节点的 NodeCompletion.result）
  *
- * 子图内部节点拥有各自的 skill/tools/mechanisms；父图 graph 节点的 subGoal
- * 仅作为调用意图和外层追踪标签。
+ * compose/delegate 边界已可声明；在 Phase 8/10 接线前 Runtime 会明确拒绝，
+ * 不会静默按 call 执行。fold 只对 compose 合法。
  */
 export type Node =
   | {
@@ -179,6 +213,10 @@ export type Node =
       id: string;
       subGoal: string;
       graph: Graph;
+      /** 图调用边界。缺省 `call`，保持当前子图隔离语义。 */
+      boundary?: GraphInvocationBoundary;
+      /** compose 边界的帧段归约策略。非 compose 边界上配置 fold 在校验期报错。 */
+      fold?: ComposeFrameFolder;
     };
 
 // ── 机制 ──

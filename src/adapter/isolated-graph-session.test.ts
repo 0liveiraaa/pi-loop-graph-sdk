@@ -4,11 +4,10 @@
 
 import { describe, expect, it, beforeAll, vi } from "vitest";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { Edge, Entry, Graph, Node, NodeCompletion, NodeInput } from "../type.js";
+import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Node, NodeCompletion, NodeInput } from "../type.js";
 import { END } from "../type.js";
 import { createIsolatedGraphSessionFactory } from "./isolated-graph-session.js";
 import type { IsolatedGraphSessionFactoryOptions } from "./isolated-graph-session.js";
-import type { GraphRunResult } from "./graph-execution-host.js";
 
 // ── 共享基础设施 ──
 
@@ -27,6 +26,11 @@ function factoryOptions(overrides?: Partial<IsolatedGraphSessionFactoryOptions>)
     defaultTools: [],
     ...overrides,
   };
+}
+
+/** 委托请求（工厂创建 delegate session 用） */
+function delegateReq(bg?: Record<string, unknown>): GraphRunRequest {
+  return { background: bg ?? {}, invocationKind: "tool", boundary: "delegate" };
 }
 
 // ── 测试图构造 ──
@@ -185,7 +189,7 @@ describe("createIsolatedGraphSessionFactory", () => {
 
   it("工厂创建的 session 具有 run / abort / dispose", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
     expect(session.run).toBeTypeOf("function");
     expect(session.abort).toBeTypeOf("function");
@@ -198,12 +202,9 @@ describe("createIsolatedGraphSessionFactory", () => {
 describe("纯代码节点图", () => {
   it("单节点纯代码图返回 GraphRunResult", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(pureCodeGraph(), {
-      background: { x: 1 },
-      invocationKind: "tool",
-    });
+    const result = await session.run(pureCodeGraph(), delegateReq({ x: 1 }));
 
     expect(result.graphId).toBe("pure_code");
     expect(result.status).toBe("ok");
@@ -214,16 +215,12 @@ describe("纯代码节点图", () => {
 
   it("两节点链式图正确传递 input 并返回 END result", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(twoNodeChainGraph(), {
-      background: {},
-      invocationKind: "tool",
-    });
+    const result = await session.run(twoNodeChainGraph(), delegateReq());
 
     expect(result.status).toBe("ok");
     expect(result.steps).toBe(2);
-    // node2 的 result 应包含 doubled: 20
     expect((result.result as any).doubled).toBe(20);
     expect((result.result as any).received).toBe(10);
 
@@ -231,7 +228,6 @@ describe("纯代码节点图", () => {
   });
 
   it("max steps 100 触发时返回 failed", async () => {
-    // 构造一个死循环图（自环，永不 END）
     const selfLoopNode: Node = {
       kind: "code",
       id: "loop",
@@ -265,12 +261,9 @@ describe("纯代码节点图", () => {
     };
 
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(selfLoopGraph, {
-      background: {},
-      invocationKind: "tool",
-    });
+    const result = await session.run(selfLoopGraph, delegateReq());
 
     expect(result.status).toBe("failed");
     expect(result.steps).toBe(100);
@@ -281,19 +274,18 @@ describe("纯代码节点图", () => {
 
   it("两次 run 之间的 frames 不串线", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const r1 = await session.run(twoNodeChainGraph(), { background: {}, invocationKind: "tool" });
-    const r2 = await session.run(pureCodeGraph(), { background: {}, invocationKind: "tool" });
+    const r1 = await session.run(twoNodeChainGraph(), delegateReq());
+    const r2 = await session.run(pureCodeGraph(), delegateReq());
 
-    // 两次 run 各自返回正确步数
     expect(r1.steps).toBe(2);
     expect(r2.steps).toBe(1);
 
     session.dispose();
   });
 
-  it("graph 节点复用主 Runtime 的子图隔离与最终结果归约", async () => {
+  it("graph 节点复用真实 Runtime 的 call 隔离与最终结果归约", async () => {
     const child = pureCodeGraph();
     const parent: Graph = {
       id: "parent_with_child",
@@ -332,12 +324,9 @@ describe("纯代码节点图", () => {
       },
     };
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(parent, {
-      background: { x: 3 },
-      invocationKind: "tool",
-    });
+    const result = await session.run(parent, delegateReq({ x: 3 }));
 
     expect(result).toMatchObject({
       graphId: "parent_with_child",
@@ -370,9 +359,9 @@ describe("纯代码节点图", () => {
       },
     };
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(graph, { background: {}, invocationKind: "tool" });
+    const result = await session.run(graph, delegateReq());
 
     expect(result.result).toEqual({ prepared: true });
     session.dispose();
@@ -388,12 +377,11 @@ describe("frameFormatter", () => {
         return `CUSTOM: ${frames.length} frames`;
       },
     }));
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    await session.run(twoNodeChainGraph(), { background: {}, invocationKind: "tool" });
+    await session.run(twoNodeChainGraph(), delegateReq());
 
     expect(calls).toHaveLength(0);
-
     session.dispose();
   });
 });
@@ -401,19 +389,15 @@ describe("frameFormatter", () => {
 describe("agent 节点（需要 LLM）", () => {
   it("agent 节点调用 __graph_complete__ 后返回结果", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
     try {
-      const result = await session.run(agentNodeGraph(), {
-        background: {},
-        invocationKind: "tool",
-      });
+      const result = await session.run(agentNodeGraph(), delegateReq());
 
       expect(result.graphId).toBe("agent_graph");
       expect(result.status).toBe("ok");
       expect((result.result as any).done).toBe(true);
     } catch (err: any) {
-      // API key 缺失时跳过
       if (err.message?.includes("API key") || err.message?.includes("auth")) {
         // 预期内的失败
       } else {
@@ -459,12 +443,9 @@ describe("entry 匹配", () => {
     };
 
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
-    const session = await factory({ background: {}, invocationKind: "tool" });
+    const session = await factory(delegateReq());
 
-    const result = await session.run(graph, {
-      background: { role: "guest" },
-      invocationKind: "tool",
-    });
+    const result = await session.run(graph, delegateReq({ role: "guest" }));
 
     expect(result.status).toBe("failed");
     expect((result.result as any).reason).toContain("无匹配入口");

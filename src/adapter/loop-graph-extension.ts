@@ -24,6 +24,7 @@ import type {
   AgentInstance,
   Edge,
   Graph,
+  GraphRunResult,
   Mechanism,
   MechanismContext,
   Node,
@@ -40,7 +41,6 @@ import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
 import { GraphRegistry } from "../registry.js";
-import type { GraphRunResult } from "./graph-execution-host.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 import { probeGraph } from "../graphs/probe-graph.js";
 import { chainGraph } from "../graphs/chain-graph.js";
@@ -221,7 +221,12 @@ export function createLoopGraphExtension(
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
   ): Promise<GraphRunResult> {
-    assertValidGraph(graph);
+    // Phase 6 只固化类型；compose/delegate graph-node 尚未执行接线，必须
+    // 明确拒绝，不能悄悄按旧 call 语义运行。
+    assertValidGraph(graph, {
+      supportedBoundaries: ["call"],
+      delegateHostAvailable: false,
+    });
 
     // 首次执行：校验工具存在性（pi.getAllTools() 此时已包含所有已注册工具）
     if (!toolValidated.has(graph.id)) {

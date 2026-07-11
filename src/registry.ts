@@ -12,8 +12,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateGraphTools } from "./validate.js";
-import type { Entry, Graph } from "./type.js";
-import type { GraphRunResult } from "./adapter/graph-execution-host.js";
+import type { Entry, Graph, GraphRunResult } from "./type.js";
 
 export type ExecuteGraph = (
   pi: ExtensionAPI,

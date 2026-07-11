@@ -577,6 +577,8 @@ pi.on("session_compact", ...)
 
 ### Phase 6 — 固化调用协议与类型边界
 
+**状态：✅ 已完成。** 来源与边界类型已移入核心类型层；旧 graph node 缺省 `call`，旧 `subgraph` request 可显式规范化为 `graph-node + call`。已增加 boundary/fold、delegate host、Graph 循环引用和未知 invocationKind 校验；当前 Runtime 对尚未接线的 compose/delegate 明确拒绝，避免静默按 call 执行。恢复独立 Session 的 call/mechanism 回归覆盖后，全量 155 项通过。
+
 **目标**：先让“来源”和“边界”在类型系统中分离，不改现有运行行为。
 
 修改建议：
@@ -799,7 +801,7 @@ interface LoopGraphExtensionOptions {
 验收基线：
 
 ```text
-现有 141 tests 全部通过
+现有 155 tests 全部通过
 新增 compaction / scope 测试全部通过
 tsc --noEmit 通过
 debug log 中无 loop_graph_boundary

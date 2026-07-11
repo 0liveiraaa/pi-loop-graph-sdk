@@ -1,20 +1,36 @@
-import type { Graph } from "../type.js";
+import type {
+  Graph,
+  GraphInvocationBoundary,
+  GraphInvocationKind,
+  GraphRunRequest,
+  GraphRunResult,
+} from "../type.js";
 
-export type GraphInvocationKind = "tool" | "command" | "subgraph";
-
-/** 一次图执行的显式调用参数。调用方上下文只能经 background 穿越边界。 */
-export interface GraphRunRequest {
-  background: Record<string, unknown>;
-  invocationKind: GraphInvocationKind;
-  signal?: AbortSignal;
-}
-
-/** 一次图执行的稳定返回值。frames/trace 不属于普通业务返回。 */
-export interface GraphRunResult {
-  graphId: string;
-  status: "ok" | "failed" | "cancelled";
-  result: Record<string, unknown>;
-  steps: number;
+/** 为旧调用（仅有 invocationKind，无 boundary）填补默认值。
+ *  旧 `"subgraph"` → `graph-node` + `call`。 */
+export function normalizeGraphRunRequest(
+  partial: {
+    background: Record<string, unknown>;
+    invocationKind: string;
+    boundary?: GraphInvocationBoundary;
+    signal?: AbortSignal;
+  },
+): GraphRunRequest {
+  let kind: GraphInvocationKind;
+  if (partial.invocationKind === "subgraph") {
+    kind = "graph-node";
+  } else if (
+    partial.invocationKind === "command" ||
+    partial.invocationKind === "tool" ||
+    partial.invocationKind === "graph-node" ||
+    partial.invocationKind === "api"
+  ) {
+    kind = partial.invocationKind;
+  } else {
+    throw new Error(`未知 GraphInvocationKind: ${partial.invocationKind}`);
+  }
+  const boundary = partial.boundary ?? (kind === "tool" || kind === "command" ? "delegate" : "call");
+  return { background: partial.background, invocationKind: kind, boundary, signal: partial.signal };
 }
 
 /** 图执行载体。不同实现可以承载进程内子会话、子进程或远程 worker。 */

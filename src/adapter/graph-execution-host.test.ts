@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Graph } from "../type.js";
+import type { Graph, GraphRunRequest, GraphRunResult } from "../type.js";
 import {
   IsolatedSessionGraphHost,
-  type GraphRunRequest,
-  type GraphRunResult,
+  normalizeGraphRunRequest,
   type IsolatedGraphSession,
 } from "./graph-execution-host.js";
 
@@ -11,6 +10,46 @@ const graph = { id: "g" } as Graph;
 const request = (): GraphRunRequest => ({
   background: { input: "hello" },
   invocationKind: "tool",
+  boundary: "delegate",
+});
+
+describe("normalizeGraphRunRequest", () => {
+  it("兼容旧 subgraph，并默认映射为 graph-node + call", () => {
+    expect(normalizeGraphRunRequest({
+      background: { value: 1 },
+      invocationKind: "subgraph",
+    })).toMatchObject({
+      background: { value: 1 },
+      invocationKind: "graph-node",
+      boundary: "call",
+    });
+  });
+
+  it("command/tool 默认 delegate，api/graph-node 默认 call", () => {
+    expect(normalizeGraphRunRequest({ background: {}, invocationKind: "command" }).boundary).toBe("delegate");
+    expect(normalizeGraphRunRequest({ background: {}, invocationKind: "tool" }).boundary).toBe("delegate");
+    expect(normalizeGraphRunRequest({ background: {}, invocationKind: "api" }).boundary).toBe("call");
+    expect(normalizeGraphRunRequest({ background: {}, invocationKind: "graph-node" }).boundary).toBe("call");
+  });
+
+  it("保留显式 boundary 与 signal", () => {
+    const controller = new AbortController();
+    const normalized = normalizeGraphRunRequest({
+      background: {},
+      invocationKind: "api",
+      boundary: "compose",
+      signal: controller.signal,
+    });
+    expect(normalized.boundary).toBe("compose");
+    expect(normalized.signal).toBe(controller.signal);
+  });
+
+  it("未知 invocationKind 明确报错，不静默降级为 api", () => {
+    expect(() => normalizeGraphRunRequest({
+      background: {},
+      invocationKind: "typo",
+    })).toThrow(/未知 GraphInvocationKind/);
+  });
 });
 
 function fakeSession(result?: Partial<GraphRunResult>): IsolatedGraphSession & {

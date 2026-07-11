@@ -201,6 +201,91 @@ describe("validateGraph", () => {
       }))).toEqual([]);
     });
   });
+
+  describe("graph invocation boundaries", () => {
+    function graphWithChild(
+      boundary?: "compose" | "call" | "delegate",
+      fold?: Extract<Node, { kind: "graph" }>["fold"],
+    ): Graph {
+      const child = graph({ id: "child" });
+      return graph({
+        id: "parent",
+        nodes: {
+          start: {
+            kind: "graph",
+            id: "start",
+            subGoal: "child",
+            graph: child,
+            boundary,
+            fold,
+          },
+        },
+      });
+    }
+
+    it("旧 graph node 缺省为 call 且通过结构校验", () => {
+      expect(validateGraph(graphWithChild())).toEqual([]);
+    });
+
+    it("compose 支持默认 fold 与自定义 fold", () => {
+      expect(validateGraph(graphWithChild("compose"))).toEqual([]);
+      expect(validateGraph(graphWithChild("compose", ({ finalResult }) => ({
+        status: finalResult.status,
+        result: finalResult.result,
+      })))).toEqual([]);
+    });
+
+    it.each(["call", "delegate"] as const)("%s + fold 明确失败", (boundary) => {
+      const issues = validateGraph(graphWithChild(boundary, () => ({ status: "ok", result: {} })));
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "INVALID_BOUNDARY_FOLD" }),
+      ]));
+    });
+
+    it("当前执行载体明确拒绝尚未支持的 compose", () => {
+      const issues = validateGraph(graphWithChild("compose"), {
+        supportedBoundaries: ["call"],
+        delegateHostAvailable: false,
+      });
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "UNSUPPORTED_GRAPH_BOUNDARY" }),
+      ]));
+    });
+
+    it("delegate 支持已声明但 host 不可用时明确失败", () => {
+      const issues = validateGraph(graphWithChild("delegate"), {
+        supportedBoundaries: ["call", "delegate"],
+        delegateHostAvailable: false,
+      });
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "DELEGATE_HOST_UNAVAILABLE" }),
+      ]));
+    });
+
+    it("检测直接 Graph 自引用", () => {
+      const cyclic = graph({ id: "cyclic" });
+      cyclic.nodes.start = {
+        kind: "graph",
+        id: "start",
+        subGoal: "self",
+        graph: cyclic,
+      };
+      const issues = validateGraph(cyclic);
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "GRAPH_REFERENCE_CYCLE" }),
+      ]));
+    });
+
+    it("检测多层 Graph 循环引用", () => {
+      const a = graph({ id: "a" });
+      const b = graph({ id: "b" });
+      a.nodes.start = { kind: "graph", id: "start", subGoal: "b", graph: b };
+      b.nodes.start = { kind: "graph", id: "start", subGoal: "a", graph: a };
+      expect(validateGraph(a)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "GRAPH_REFERENCE_CYCLE" }),
+      ]));
+    });
+  });
 });
 
 // ── validateGraphTools ──

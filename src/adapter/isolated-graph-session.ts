@@ -9,10 +9,9 @@ import {
   type ModelRegistry,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { ContextFrame } from "../type.js";
+import type { ContextFrame, GraphRunRequest } from "../type.js";
 import { createLoopGraphExtension, type LoopGraphExtension } from "./loop-graph-extension.js";
 import type {
-  GraphRunRequest,
   IsolatedGraphSession,
   IsolatedGraphSessionFactory,
 } from "./graph-execution-host.js";

@@ -2,7 +2,7 @@
 //  图校验
 // ============================================================
 
-import type { Graph } from "./type.js";
+import type { Graph, GraphInvocationBoundary } from "./type.js";
 import { END } from "./type.js";
 
 export interface GraphValidationIssue {
@@ -15,13 +15,30 @@ export interface GraphValidationIssue {
     | "NODE_ROUTING_MISSING"
     | "DUPLICATE_TOOL_IN_NODE"
     | "TOOL_NOT_REGISTERED"
-    | "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION";
+    | "AGENT_CHOICE_EDGE_MISSING_DESCRIPTION"
+    | "INVALID_BOUNDARY_FOLD"
+    | "GRAPH_REFERENCE_CYCLE"
+    | "UNSUPPORTED_GRAPH_BOUNDARY"
+    | "DELEGATE_HOST_UNAVAILABLE";
   message: string;
   path: string;
 }
 
-export function validateGraph(graph: Graph): GraphValidationIssue[] {
+export interface GraphValidationOptions {
+  /** 当前执行载体已实现的 graph-node 边界。省略时只做结构校验。 */
+  supportedBoundaries?: readonly GraphInvocationBoundary[];
+  /** 当前注册/执行环境是否声明了 delegate host。 */
+  delegateHostAvailable?: boolean;
+}
+
+export function validateGraph(
+  graph: Graph,
+  options: GraphValidationOptions = {},
+): GraphValidationIssue[] {
   const issues: GraphValidationIssue[] = [];
+
+  detectGraphReferenceCycles(graph, issues);
+  validateGraphInvocationBoundaries(graph, options, issues);
 
   // 必须有入口
   if (!graph.entries || graph.entries.length === 0) {
@@ -96,18 +113,93 @@ export function validateGraph(graph: Graph): GraphValidationIssue[] {
         });
       }
     }
+
   }
 
   return issues;
 }
 
-export function assertValidGraph(graph: Graph): void {
-  const issues = validateGraph(graph);
+export function assertValidGraph(
+  graph: Graph,
+  options: GraphValidationOptions = {},
+): void {
+  const issues = validateGraph(graph, options);
   if (issues.length > 0) {
     throw new Error(
       issues.map((i) => `${i.path}: ${i.message}`).join("\n"),
     );
   }
+}
+
+function detectGraphReferenceCycles(
+  root: Graph,
+  issues: GraphValidationIssue[],
+): void {
+  const ancestors = new Set<Graph>();
+
+  const visit = (graph: Graph, path: string): void => {
+    ancestors.add(graph);
+    for (const [nodeId, node] of Object.entries(graph.nodes)) {
+      if (node.kind !== "graph") continue;
+      const childPath = `${path}.nodes.${nodeId}.graph`;
+      if (ancestors.has(node.graph)) {
+        issues.push({
+          code: "GRAPH_REFERENCE_CYCLE",
+          message: `检测到嵌套 Graph 循环引用: "${graph.id}" → "${node.graph.id}"。`,
+          path: childPath,
+        });
+        continue;
+      }
+      visit(node.graph, childPath);
+    }
+    ancestors.delete(graph);
+  };
+
+  visit(root, `graph.${root.id}`);
+}
+
+function validateGraphInvocationBoundaries(
+  root: Graph,
+  options: GraphValidationOptions,
+  issues: GraphValidationIssue[],
+): void {
+  const visited = new Set<Graph>();
+
+  const visit = (graph: Graph, path: string): void => {
+    if (visited.has(graph)) return;
+    visited.add(graph);
+    for (const [nodeId, node] of Object.entries(graph.nodes)) {
+      if (node.kind !== "graph") continue;
+      const nodePath = `${path}.nodes.${nodeId}`;
+      const boundary = node.boundary ?? "call";
+
+      if ((boundary === "call" || boundary === "delegate") && node.fold) {
+        issues.push({
+          code: "INVALID_BOUNDARY_FOLD",
+          message: `graph 节点 "${nodeId}" 的 boundary 为 "${boundary}"，不能配置 fold。fold 仅对 compose 边界有效。`,
+          path: `${nodePath}.boundary`,
+        });
+      }
+
+      if (options.supportedBoundaries && !options.supportedBoundaries.includes(boundary)) {
+        issues.push({
+          code: "UNSUPPORTED_GRAPH_BOUNDARY",
+          message: `graph 节点 "${nodeId}" 使用尚未由当前执行载体支持的 boundary: "${boundary}"。`,
+          path: `${nodePath}.boundary`,
+        });
+      } else if (boundary === "delegate" && options.delegateHostAvailable === false) {
+        issues.push({
+          code: "DELEGATE_HOST_UNAVAILABLE",
+          message: `graph 节点 "${nodeId}" 使用 delegate，但当前环境未提供 delegate host。`,
+          path: `${nodePath}.boundary`,
+        });
+      }
+
+      visit(node.graph, `${nodePath}.graph`);
+    }
+  };
+
+  visit(root, `graph.${root.id}`);
 }
 
 // ── 工具校验 ──

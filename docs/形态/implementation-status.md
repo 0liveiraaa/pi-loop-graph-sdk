@@ -12,7 +12,7 @@
 - scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
 - 图节点活跃期间收到 pi `session_compact` 后，会同步重发同一 `scopeId` 的 NodeScope checkpoint；overflow retry 因此从新 checkpoint 开始，`compactionGeneration` / `reason` / `willRetry` 写入 debug trace。
 - 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
-- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、141 项测试通过（含真实 LLM Phase 0）。
+- 验证：`tsc --noEmit` 通过；全量 12 个测试文件、155 项测试通过（含真实 LLM Phase 0）。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
@@ -346,7 +346,7 @@ runSubgraphInExtension 创建 childRuntime：
 | 自定义 compaction 策略      | 不实现；SDK 不生成 LLM summary、不主动调用 compact，继续使用 pi 原生策略 |
 | session 续跑                 | 帧栈未持久化到磁盘                                                                           |
 | graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
-| 三类图调用边界               | 设计已接受 `compose/call/delegate`；当前仅 `call` 语义完整，compose 帧段与命令/tool 统一 delegate 接线尚未实现 |
+| 三类图调用边界               | Phase 6 类型与校验已完成；当前仅 `call` 语义可执行，compose/delegate graph-node 会明确拒绝，等待 Phase 8/10 接线 |
 
 ### 已关闭的缺口
 

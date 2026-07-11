@@ -349,6 +349,25 @@ describe("createLoopGraphExtension", () => {
         loop.executeGraph(g, { source: "command", args: "" }),
       ).rejects.toThrow(/TOOL_NOT_REGISTERED|工具存在性校验失败/);
     });
+
+    it.each(["compose", "delegate"] as const)(
+      "Phase 6 期间明确拒绝尚未接线的 %s graph-node，不静默按 call 执行",
+      async (boundary) => {
+        const pi = fakePi();
+        const loop = createLoopGraphExtension(pi);
+        const parent = minimalGraph(`unsupported_${boundary}`);
+        parent.nodes.start = {
+          kind: "graph",
+          id: "start",
+          subGoal: boundary,
+          graph: minimalGraph(`child_${boundary}`),
+          boundary,
+        };
+
+        await expect(loop.executeGraph(parent, { source: "command", args: "" }))
+          .rejects.toThrow(/UNSUPPORTED_GRAPH_BOUNDARY|尚未由当前执行载体支持/);
+      },
+    );
   });
 
   describe("钩子注册", () => {
