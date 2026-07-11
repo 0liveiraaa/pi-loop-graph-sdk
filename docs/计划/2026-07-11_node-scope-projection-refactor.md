@@ -554,7 +554,7 @@ projectActiveNodeScope(messages, ...) // 有活动图时执行，构造 frames +
 
 ### Phase 5 — 增加 compaction 协同
 
-**状态：✅ 已完成基础协同。** 运行时监听 `session_compact`；仅当图节点活跃时，同步在消息流末尾重发相同 `scopeId` 的 NodeScope checkpoint，并记录 `compactionGeneration`、`reason` 与 `willRetry`。因此 overflow retry 将从新 checkpoint 进行严格投影，frames 不变，scope 前 compaction summary 不会进入图上下文。尚未实现自定义 compaction 或主动调用 `ctx.compact()`，两者均不属于本阶段。
+**状态：✅ 已完成基础协同（行为已更新）。** 运行时监听 `session_compact` 与 `session_before_compact`；pi 原生 `compactionSummary` 与 recent messages 是压缩历史的权威替代，SDK 只推进 projectedFrameBase，不重发 NodeScope，不遮挡 summary。共享 call/compose 活跃期间通过 `session_before_compact` 返回 `{ cancel: true }` 取消压缩；若取消策略异常失效且仍收到 `session_compact`，Runtime 终止当前共享调用，并在下次 `session_start` 前拒绝该 Session 的全部 context 投影（fail-closed），因为 orphan recent transcript 已无法可靠归属。尚未实现自定义 compaction 或主动调用 `ctx.compact()`。
 
 注册：
 
@@ -713,7 +713,7 @@ closeFrameSegment(scope, completion): NodeCompletion;
 
 ### Phase 9 — 完成 call 与 GraphCallScope 的统一实现
 
-**状态：✅ 已完成。** `call/compose` 现在写入配对、可自描述的 `loop_graph_call_start/end`，所有入口解析、节点、路由、无边、maxSteps 与异常路径共享同一 `try/finally`，并保证发送 end 失败时仍 pop CallFrame。context 始终先删除已闭合调用区段，再按活动 NodeScope 投影。由于 pi compaction 基于原始 session entries 生成 summary，可能把调用区段内部内容混入不可拆分的摘要，本阶段选择安全策略：共享 Session 的嵌套 `call/compose` 活跃期间由 `session_before_compact` 返回 `{ cancel: true }`；root-only 图仍沿用 Phase 5 的 checkpoint 协同。若取消策略因竞态或第三方 extension 异常失效，Runtime 会终止当前共享调用，并在本 session 后续投影中 fail closed 地丢弃 compactionSummary；不会通过重发 `call_start` 假装恢复。长任务和独立 compaction 生命周期交给 Phase 10 `delegate`。完成时全量测试与 `tsc --noEmit` 均通过。
+**状态：✅ 已完成。** `call/compose` 现在写入配对、可自描述的 `loop_graph_call_start/end`，所有入口解析、节点、路由、无边、maxSteps 与异常路径共享同一 `try/finally`，并保证发送 end 失败时仍 pop CallFrame。context 始终先删除已闭合调用区段，再按活动 NodeScope 投影。由于 pi compaction 基于原始 session entries 生成 summary，可能把调用区段内部内容混入不可拆分的摘要，本阶段选择安全策略：共享 Session 的嵌套 `call/compose` 活跃期间由 `session_before_compact` 返回 `{ cancel: true }`；root-only 图仍沿用 Phase 5 的 checkpoint 协同。若取消策略因竞态或第三方 extension 异常失效，Runtime 终止当前共享调用，并在下次 `session_start` 前拒绝该 Session 的 context 投影；不会通过重发 `call_start` 假装恢复。长任务和独立 compaction 生命周期交给 Phase 10 `delegate`。完成时全量测试与 `tsc --noEmit` 均通过。
 
 **目标**：把当前隔离子图正式收敛为 call 策略，并完成共享 Session 的调用区段审计。
 

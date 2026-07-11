@@ -122,6 +122,12 @@ export function createLoopGraphExtension(
   const toolValidated = new Set<string>();
   let pendingCompactionFrameBase: number | null = null;
 
+  /**
+   * Session 级 compaction 边界违规标记。共享 call/compose 活跃期间异常收到
+   * session_compact 时设为 true，此后本 session 投影持续过滤 compactionSummary。
+   */
+  let sessionCompactionBoundaryViolated = false;
+
   // ── 实例级图注册表（替代原全局 graphs Map）──
 
   const delegateInvoker: GraphInvoker = options.createDelegateHost
@@ -146,6 +152,10 @@ export function createLoopGraphExtension(
 
   // context 投影钩子 — 始终清洗已闭合图调用区段；仅活动图时再做节点级投影
   (pi as any).on("context", (e: any) => {
+    // start/end 配对已可能被 compaction 切断，任何保留 transcript 的归属都
+    // 无法证明。宁可让该 session 丧失上下文，也绝不把子图细节泄到外层。
+    if (sessionCompactionBoundaryViolated) return { messages: [] };
+
     let messages = stripClosedGraphCalls(e.messages as any[]);
 
     const rt = activeRuntime;
@@ -178,18 +188,15 @@ export function createLoopGraphExtension(
     return { messages: projected };
   });
 
-  // compaction summary + firstKeptEntryId 后的 recent messages 是 pi 对旧上下文
+  // pi 原生 compaction summary + firstKeptEntryId 后的 recent messages 是旧上下文
   // 的权威替代。SDK 只推进 frame 投影基线，不重发 scope，也不遮挡 summary。
   //
   // 共享 Session 的嵌套 call/compose 不能允许 compaction 跨越 GraphCallScope：
   // pi 的 summary 基于原始 session entries 生成，可能混入子图内部 transcript；
-  // 事后补发 start checkpoint 无法从混合摘要中可靠剥离这些内容。
+  // 混合摘要事后无法可靠拆分。
   (pi as any).on("session_before_compact", (event: any) => {
     const rt = activeRuntime;
-    const activeSharedCall = rt?.callStack.some(
-      (frame) => frame.boundary === "call" || frame.boundary === "compose",
-    );
-    if (!activeSharedCall) {
+    if (!rt?.hasActiveSharedCall) {
       if (rt?.isNodeActive) {
         pendingCompactionFrameBase = findCompactedFrameBase(
           event?.branchEntries,
@@ -202,13 +209,28 @@ export function createLoopGraphExtension(
 
     debugLog.compactionBlocked(
       event?.reason,
-      rt!.callStack.length,
+      rt.callStack.length,
     );
     return { cancel: true };
   });
 
   (pi as any).on("session_compact", (event: any) => {
     const rt = activeRuntime;
+
+    // 共享 call/compose 活跃期间如果异常收到 session_compact（cancel 策略被
+    // 竞态或第三方 extension 绕过），标记为边界违规。此后本 session 投影中将
+    // 持续过滤 compactionSummary，优先保证不泄漏混合摘要；不会重发 call_start。
+    if (rt?.hasActiveSharedCall) {
+      sessionCompactionBoundaryViolated = true;
+      rt.compactionBoundaryViolated = true;
+      pendingCompactionFrameBase = null;
+      debugLog.graphError(
+        rt.topGraph?.id ?? "?",
+        `compaction 边界违规：共享 call/compose 活跃期间收到 session_compact (reason: ${JSON.stringify(event?.reason)})`,
+      );
+      return;
+    }
+
     const node = rt?.currentNode;
     const scope = rt?.currentScope;
     const graph = rt?.topGraph;
@@ -243,13 +265,14 @@ export function createLoopGraphExtension(
     activeNodeContext?.onAgentEnd();
   });
 
-  // session 启动通知
-  if (!options.runtimeOnly) {
-    pi.on("session_start", async (_event, ctx) => {
-      pendingCompactionFrameBase = null;
+  // 新 session 必须解除 fail-closed；runtime-only session 同样需要该重置。
+  pi.on("session_start", async (_event, ctx) => {
+    pendingCompactionFrameBase = null;
+    sessionCompactionBoundaryViolated = false;
+    if (!options.runtimeOnly) {
       ctx.ui.notify("Loop Graph Extension 已加载", "info");
-    });
-  }
+    }
+  });
 
   // 注册 skill 路径（pi 原生 skill 系统扫描）
   if (!options.runtimeOnly) {
@@ -440,7 +463,7 @@ export function createLoopGraphExtension(
         if (boundary === "call") {
           throw new Error(`子图 ${graph.id} 无匹配入口`);
         }
-        debugLog.graphEnd(graph.id, lastResult.steps, instance.frames);
+        debugLog.graphEnd(graph.id, lastResult.steps, lastResult.status, debugLog.preview(lastResult.result, 200), instance.frames);
         return lastResult;
       }
 
@@ -451,7 +474,7 @@ export function createLoopGraphExtension(
       };
 
       const finish = (result: GraphRunResult): GraphRunResult => {
-        debugLog.graphEnd(graph.id, result.steps, instance!.frames);
+        debugLog.graphEnd(graph.id, result.steps, result.status, debugLog.preview(result.result, 200), instance!.frames);
         return result;
       };
 
@@ -479,6 +502,7 @@ export function createLoopGraphExtension(
           nodeContext.setCurrentNodeId(nodeId);
 
           await applyMechanisms(pi, runtime.topInstance!, node, input, runtime.top?.localMechanisms);
+          runtime.assertNoCompactionBoundaryViolation();
           const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
           const completion = await execNodeInGraph(
             runtime,
@@ -550,6 +574,7 @@ export function createLoopGraphExtension(
               return { nodeId: graphNode.id, status: child.status, result: child.result };
             },
           );
+          runtime.assertNoCompactionBoundaryViolation();
 
           const routing = graph.routing[nodeId];
           if (!routing) throw new Error(`节点 ${nodeId} 无路由`);
@@ -562,7 +587,7 @@ export function createLoopGraphExtension(
               result: completion.result,
             };
             runtime.exitNode(frame);
-            debugLog.exitNode(runtime.callStack.length, nodeId, frame, instance.frames);
+            debugLog.exitNode(runtime.callStack.length, nodeId, completion, frame, instance.frames);
             lastResult = {
               graphId: graph.id,
               status: completion.status,
@@ -577,6 +602,7 @@ export function createLoopGraphExtension(
           debugLog.exitNode(
             runtime.callStack.length,
             nodeId,
+            completion,
             migration.frame,
             instance.frames,
           );
@@ -752,14 +778,15 @@ function createAgentChoiceValidator(
   };
 }
 
-function findCompactedFrameBase(
+export function findCompactedFrameBase(
   branchEntries: any[] | undefined,
   firstKeptEntryId: string | undefined,
   frameScopes: readonly import("../runtime.js").NodeScopeDescriptor[],
 ): number {
-  if (!Array.isArray(branchEntries) || !firstKeptEntryId) return frameScopes.length;
+  // 边界元数据缺失时不能声称已有 frame 已被 summary 覆盖；保持旧基线。
+  if (!Array.isArray(branchEntries) || !firstKeptEntryId) return 0;
   const cut = branchEntries.findIndex((entry) => entry?.id === firstKeptEntryId);
-  if (cut < 0) return frameScopes.length;
+  if (cut < 0) return 0;
 
   const scopePositions = new Map<string, number>();
   for (let index = 0; index < branchEntries.length; index++) {

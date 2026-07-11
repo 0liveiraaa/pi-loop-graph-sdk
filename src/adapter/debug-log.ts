@@ -8,12 +8,23 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentInstance, ContextFrame, Node, NodeCompletion, NodeInput } from "../type.js";
+import type { ContextFrame, Node, NodeCompletion, NodeInput } from "../type.js";
 import type { ProjectionInput, MessageEntry } from "./projection.js";
 
 const LOG_PATH = path.resolve("loop-graph-debug.log");
 
 let fileOpened = false;
+
+/** 截断序列化帧的预览，避免日志爆量。 */
+export function safePreview(value: unknown, maxLength = 500): string {
+  try {
+    const s = JSON.stringify(value);
+    if (s === undefined) return "[unserializable]";
+    return s.length <= maxLength ? s : s.slice(0, maxLength) + "…";
+  } catch {
+    return "[unserializable]";
+  }
+}
 
 function log(entry: Record<string, unknown>): void {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
@@ -25,6 +36,9 @@ function log(entry: Record<string, unknown>): void {
 }
 
 export const debugLog = {
+  preview(value: unknown, maxLength?: number): string {
+    return safePreview(value, maxLength);
+  },
   /** 图启动 */
   graphStart(graphId: string, trigger: unknown): void {
     log({ type: "graph_start", graphId, trigger });
@@ -45,14 +59,14 @@ export const debugLog = {
       scopeId,
       inputData: input.data,
       frameCount: frames.length,
-      frameSummaries: frames.map((f) => f.summary),
     });
   },
 
-  /** 退出节点（折叠帧） */
+  /** 退出节点（折叠帧）。控制信息来自 completion；frame 作为 opaque payload。 */
   exitNode(
     depth: number,
     nodeId: string,
+    completion: NodeCompletion,
     frame: ContextFrame,
     allFrames: ContextFrame[],
   ): void {
@@ -60,7 +74,9 @@ export const debugLog = {
       type: "exit_node",
       depth,
       nodeId,
-      pushedFrame: { nodeId: frame.nodeId, status: frame.status, summary: frame.summary },
+      status: completion.status,
+      resultKeys: Object.keys(completion.result),
+      framePreview: safePreview(frame),
       totalFrames: allFrames.length,
     });
   },
@@ -91,7 +107,7 @@ export const debugLog = {
     });
   },
 
-  /** 图运行期间发生 compaction 后，当前 NodeScope 的 checkpoint 已重发。 */
+  /** 图运行期间发生 compaction 后记录 checkpoint 信息。 */
   scopeCheckpoint(
     scopeId: string,
     generation: number,
@@ -126,14 +142,15 @@ export const debugLog = {
     log({ type: "agent_retry", nodeId, reason });
   },
 
-  /** 图结束 */
-  graphEnd(graphId: string, steps: number, frames: ContextFrame[]): void {
+  /** 图结束。控制信息来自 result；frames 作为 opaque payload。 */
+  graphEnd(graphId: string, steps: number, resultStatus: string, resultPreview: string, frames: ContextFrame[]): void {
     log({
       type: "graph_end",
       graphId,
       steps,
+      status: resultStatus,
+      resultPreview,
       frameCount: frames.length,
-      frameSummaries: frames.map((f) => ({ nodeId: f.nodeId, summary: f.summary })),
     });
   },
 
@@ -167,12 +184,6 @@ export const debugLog = {
       graphId,
       parentNodeId,
       frameCount: frames.length,
-      frames: frames.map((frame) => ({
-        nodeId: frame.nodeId,
-        status: frame.status,
-        summary: frame.summary,
-        result: frame.result,
-      })),
       foldedCompletion: completion,
     });
   },

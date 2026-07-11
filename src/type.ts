@@ -21,13 +21,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * 图的终止标记，也是图的「返回」出口。
  *
  * 当一条边的 to 指向 END，Runtime 弹出当前图的栈帧，
- * 并将该边 migrate 产出的 output 作为本图的返回值；旧代码仍可使用
- * frame.status/result 兼容通道：
+ * 并将该边 migrate 产出的 output 作为本图的返回值：
  *   · 子图调用   → 成为父图 kind="graph" 节点的 NodeCompletion.result
  *   · tool 调用  → 成为返回给 agent 的工具结果
  *   · 顶层调用   → 成为整次运行的最终产出
  *
- * 即:END 边的 migrate 承担双重身份——既自由定义最后一层工作记忆，
+ * 向后兼容：未声明 output 时依次回退到 frame.status/result、completion。
+ *
+ * END 边的 migrate 承担双重身份——既自由定义最后一层工作记忆，
  * 又通过 output 声明「这张图对外交付什么」。
  */
 export const END = Symbol("graph.end");
@@ -195,8 +196,8 @@ export interface AgentRunRequest {
  *     （即子图 END 边的 frame.result 成为该节点的 NodeCompletion.result）
  *
  * compose 在父 Instance 上建立临时帧段，退出时必须归约为当前 graph node 的
- * completion；delegate 尚未接线，会明确拒绝，绝不静默按 call 执行。fold 只对
- * compose 合法。
+ * completion；delegate 需要独立 GraphExecutionHost，未配置 createDelegateHost
+ * 时会在校验阶段明确拒绝，绝不静默按 call 执行。fold 只对 compose 合法。
  */
 export type Node =
   | {

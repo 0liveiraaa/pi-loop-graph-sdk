@@ -63,6 +63,11 @@ export class GraphRuntime {
   readonly graphRunId = crypto.randomUUID();
   /** 当前 graph run 已发生的 compaction 次数，仅用于诊断和 checkpoint 观测。 */
   compactionGeneration = 0;
+  /**
+   * 共享 call/compose 活跃期间异常收到 session_compact 时设为 true。
+   * 此后本 session 投影中将持续过滤 compactionSummary，优先保证不泄漏。
+   */
+  compactionBoundaryViolated = false;
   /** Runtime 控制平面的 frame → NodeScope 对齐表，不进入开发者 frame/LLM。 */
   private readonly frameScopes = new Map<string, NodeScopeDescriptor[]>();
 
@@ -215,8 +220,9 @@ export class GraphRuntime {
   }
 
   /**
-   * 记录一次 session compaction。NodeScope 的身份（scopeId）不变；
-   * extension 会在消息流末尾重发该 scope 作为新的 checkpoint。
+   * 记录一次 session compaction。NodeScope 的身份（scopeId）不变。
+   * Runtime 只推进 projectedFrameBase；pi 原生 summary 与 recent messages
+   * 是压缩历史的权威替代，SDK 不重发 scope，也不遮挡 summary。
    */
   recordCompaction(projectedFrameBase?: number): number {
     this.compactionGeneration += 1;
@@ -229,6 +235,20 @@ export class GraphRuntime {
       );
     }
     return this.compactionGeneration;
+  }
+
+  /** 当前 callStack 是否存在嵌套 call/compose（非 root-only）。 */
+  get hasActiveSharedCall(): boolean {
+    return this.callStack.some(
+      (frame) => frame.boundary === "call" || frame.boundary === "compose",
+    );
+  }
+
+  /** 共享调用边界被 compaction 切断后，继续运行会泄漏无法归属的 transcript。 */
+  assertNoCompactionBoundaryViolation(): void {
+    if (this.compactionBoundaryViolated) {
+      throw new Error("compaction 边界违规：共享 call/compose 已终止，当前 Session 上下文已进入 fail-closed 状态");
+    }
   }
 
   get completedFrameScopes(): readonly NodeScopeDescriptor[] {
@@ -249,6 +269,7 @@ export class GraphRuntime {
     this.currentNode = null;
     this.currentInput = null;
     this.compactionGeneration = 0;
+    this.compactionBoundaryViolated = false;
     this.frameScopes.clear();
   }
 

@@ -21,10 +21,10 @@
 - Phase 8 已接线 `compose`：同一 AgentInstance 上的 child frames 被 Runtime 限定为临时 FrameSegment，默认或自定义 fold 后强制截断；异常、fold throw、maxSteps 均回滚，父节点活动 Scope 在嵌套返回时恢复。
 - Phase 9 已接线持久 GraphCallScope：call/compose 使用配对 start/end，context 在有无活动图时都清除闭合区段；end 记录 boundary、invocationKind 和真实业务状态，异常路径固定恢复 CallFrame。
 - 共享 Session 的嵌套 call/compose 活跃期间会取消 compaction，避免 pi 基于原始 transcript 生成的混合 summary 穿透调用边界；root-only 图直接采用原生 compaction 基底。长任务 compaction 由 Phase 10 delegate host 承担。
-- 若嵌套调用期间仍异常收到 `session_compact`，Runtime fail closed：标记边界违规、终止当前图调用，并持续过滤该 session 的 compactionSummary；CallFrame 不保存 callId，也不尝试用重发 start 修复不可拆分的混合摘要。
+- 若嵌套调用期间仍异常收到 `session_compact`，Runtime fail-closed：当前共享图调用在安全检查点失败；由于 GraphCallScope 的 start/end 配对可能已被切断，当前 Session 在下次 `session_start` 前拒绝投影任何消息，避免 orphan recent transcript 泄漏。不会重发 start 伪造恢复。
 - runtime-only 注册仅剥离顶层 `invocation`，不修改原 Graph；`nodes`/`routing` 作为含函数的只读定义引用共享，不能也不应结构化深拷贝。
 - `delegate` 仍未接线独立 host，会明确拒绝，绝不按 call 静默执行。
-- 验证：`npm test -- --run` 通过（12 文件、183 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
+- 验证：`npm test -- --run` 通过（13 文件、206 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
 
@@ -35,7 +35,7 @@
 ```
 src/
 ├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, …）
-├── runtime.ts              # GraphRuntime（调用栈 + 帧栈 + 哨兵）
+├── runtime.ts              # GraphRuntime（调用栈 + 帧栈 + NodeScope）
 ├── validate.ts             # 图校验 + 工具校验（validateGraphTools）
 ├── router.ts               # 单边裁决
 ├── tools-resolve.ts        # ★ 工具解析单一真相源（resolveNodeTools：去重 + 排序）
@@ -49,8 +49,15 @@ src/
 │   ├── projection.test.ts       # 投影测试
 │   ├── pi-node-context.ts       # Promise 桥接：runAgent + after_provider_response 错误回流
 │   ├── complete-tool.ts         # __graph_complete__ 工具定义
-│   ├── debug-log.ts             # 调试日志（现在读 getActiveTools() 真值）
+│   ├── debug-log.ts             # 调试日志（不再假设 frame 必含兼容字段）
+│   ├── compaction-frame.test.ts # Compaction 边界 / frame 行为 / fail-closed 测试
 │   ├── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent + 工具校验
+│   ├── characterization.test.ts # NodeScope 行为冻结基准
+│   ├── graph-execution-host.ts       # DelegateGraphInvoker / IsolatedSessionGraphHost
+│   ├── graph-execution-host.test.ts  # Host 生命周期测试
+│   ├── graph-execution-host.spike.test.ts  # 独立 AgentSession 可行性验证
+│   ├── isolated-graph-session.ts     # In-memory 隔离 session 工厂
+│   ├── isolated-graph-session.test.ts # 隔离 session 集成测试
 ├── graphs/
 │   ├── review-graph.ts     # echo 测试图
 │   ├── probe-graph.ts      # 哨兵可见性验证图
