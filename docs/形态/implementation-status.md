@@ -305,6 +305,7 @@ runSubgraphInExtension 创建 childRuntime：
 | **input 不进 agent 上下文**          | projection 删 input 渲染 + 显式 prompt                  | ✅   |
 | **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`                        | ✅   |
 | **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                        | ✅   |
+| **自定义帧格式 frameFormatter** | `projection.test.ts`                        | ✅   |
 | **agent-choice 路由** | `router.test.ts` + `validate.test.ts` + `projection.test.ts` | ✅ |
 
 ---
@@ -329,6 +330,7 @@ runSubgraphInExtension 创建 childRuntime：
 | `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                          | v0.1.0+stage1/2 |
 | 注册期无校验                                    | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查                                            | v0.1.0+stage2   |
 | `agent-choice` 路由未实现 | agent 通过 `completion.result.chosen_edge_id` 声明边选择；CURRENT 段渲染 `availableEdges`；`description` 注册期必填校验 | v0.1.0+stage5 |
+| COMPLETED 段硬编码 JSON 格式 | `frameFormatter` 选项让开发者完全自定义帧折叠后的上下文内容与格式 | v0.1.0+stage6 |
 
 ---
 

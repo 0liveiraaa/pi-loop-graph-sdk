@@ -19,6 +19,11 @@ export interface ProjectionInput {
   nodeMarker: string | null;
   /** agent-choice 路由下可供 agent 选择的边列表，渲染在 CURRENT 段 */
   availableEdges?: EdgeChoice[];
+  /** 自定义帧折叠后的 COMPLETED 段内容格式。
+   *  接收所有已完成帧，返回完整文本注入上下文。
+   *  返回 null 则跳过 COMPLETED 段（不折叠）。
+   *  默认：保持当前 JSON 格式（向后兼容）。 */
+  frameFormatter?: (frames: ContextFrame[]) => string | null;
 }
 
 export interface MessageEntry {
@@ -59,19 +64,15 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
 
   // frame 段
   if (frames.length > 0) {
-    result.push({
-      role: "user",
-      content:
-        `=== COMPLETED ===\n${JSON.stringify(
-          frames.map((f) => ({
-            nodeId: f.nodeId,
-            status: f.status,
-            summary: f.summary,
-            result: f.result,
-          })),
-        )}\n=== END ===`,
-      timestamp: Date.now(),
-    });
+    const fmt = input.frameFormatter ?? defaultFrameFormatter;
+    const content = fmt(frames);
+    if (content != null) {
+      result.push({
+        role: "user",
+        content,
+        timestamp: Date.now(),
+      });
+    }
   }
 
   // 当前节点段
@@ -82,6 +83,17 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
   result.push(...active);
   return result;
 }
+
+/** 默认帧格式化器：保持向后兼容的 JSON 格式（=== COMPLETED === / === END === 包裹）。 */
+export const defaultFrameFormatter = (frames: ContextFrame[]) =>
+  `=== COMPLETED ===\n${JSON.stringify(
+    frames.map((f) => ({
+      nodeId: f.nodeId,
+      status: f.status,
+      summary: f.summary,
+      result: f.result,
+    })),
+  )}\n=== END ===`;
 
 function buildNodeInfo(node: Node, availableEdges?: EdgeChoice[]): MessageEntry {
   const lines: string[] = ["=== CURRENT ==="];

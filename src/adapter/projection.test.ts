@@ -3,7 +3,7 @@
 // ============================================================
 
 import { describe, expect, it } from "vitest";
-import { projectMessages, type MessageEntry } from "./projection.js";
+import { projectMessages, defaultFrameFormatter, type MessageEntry } from "./projection.js";
 import type { ContextFrame, Node } from "../type.js";
 
 const B = "loop_graph_boundary";
@@ -181,6 +181,93 @@ describe("projectMessages 折叠", () => {
     const text = joined(out);
     expect(text).not.toContain("availableEdges");
     expect(text).not.toContain("chosen_edge_id");
+  });
+
+  it("自定义 frameFormatter：key:value 格式", () => {
+    const messages: MessageEntry[] = [
+      { role: "system", content: "SYS" },
+      { customType: B, content: "__node_boundary__:node2:2" },
+    ];
+    const frame1: ContextFrame = {
+      nodeId: "node1",
+      status: "ok",
+      summary: "已出题",
+      result: { question: "Q1", difficulty: "easy" },
+    };
+
+    const customFormatter = (frames: ContextFrame[]) =>
+      frames
+        .map((f) => {
+          const kv = Object.entries(f.result)
+            .map(([k, v]) => `  ${k}: ${v}`)
+            .join("\n");
+          return `[${f.nodeId}] ${f.status}\n${kv}`;
+        })
+        .join("\n\n");
+
+    const out = projectMessages({
+      messages,
+      frames: [frame1],
+      currentNode: agentNode("node2"),
+      nodeMarker: "__node_boundary__:node2:2",
+      frameFormatter: customFormatter,
+    });
+
+    const text = joined(out);
+    expect(text).toContain("[node1] ok");
+    expect(text).toContain("question: Q1");
+    expect(text).toContain("difficulty: easy");
+    // 不应包含 JSON 默认格式
+    expect(text).not.toContain('"nodeId"');
+    expect(text).not.toContain('"summary"');
+  });
+
+  it("frameFormatter 返回 null 时跳过 COMPLETED 段", () => {
+    const messages: MessageEntry[] = [
+      { role: "system", content: "SYS" },
+      { customType: B, content: "__node_boundary__:node2:2" },
+    ];
+    const frame1: ContextFrame = {
+      nodeId: "node1",
+      status: "ok",
+      summary: "s1",
+      result: {},
+    };
+
+    const out = projectMessages({
+      messages,
+      frames: [frame1],
+      currentNode: agentNode("node2"),
+      nodeMarker: "__node_boundary__:node2:2",
+      frameFormatter: () => null,
+    });
+
+    const text = joined(out);
+    expect(text).not.toContain("=== COMPLETED ===");
+    expect(text).not.toContain("s1");
+  });
+
+  it("不传 frameFormatter 时使用默认 JSON 格式（向后兼容）", () => {
+    const messages: MessageEntry[] = twoNodeTranscript();
+    const frame1: ContextFrame = {
+      nodeId: "node1",
+      status: "ok",
+      summary: "node1 已出题",
+      result: { question: "Q1" },
+    };
+
+    // 不传 frameFormatter
+    const out = projectMessages({
+      messages,
+      frames: [frame1],
+      currentNode: agentNode("node2"),
+      nodeMarker: "__node_boundary__:node2:2",
+    });
+
+    const text = joined(out);
+    expect(text).toContain("=== COMPLETED ===");
+    expect(text).toContain('"nodeId"');
+    expect(text).toContain('"node1 已出题"');
   });
 
   it("空 availableEdges 数组不渲染该段", () => {

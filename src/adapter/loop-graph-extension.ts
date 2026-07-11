@@ -64,6 +64,11 @@ export interface LoopGraphExtensionOptions {
   /** skill 目录的根路径。node.skill 的 SKILL.md 在此路径下按 `{name}/SKILL.md` 查找。
    *  默认 `process.cwd() + "/skills"`。 */
   skillBasePath?: string;
+  /** 自定义帧折叠后注入到 agent 上下文的 COMPLETED 段格式。
+   *  接收所有已完成帧（ContextFrame[]），返回完整文本。
+   *  返回 null 则跳过 COMPLETED 段（不折叠，agent 看不到历史帧）。
+   *  默认：保持当前 JSON 格式（向后兼容）。 */
+  frameFormatter?: (frames: import("../type.js").ContextFrame[]) => string | null;
 }
 
 export interface LoopGraphExtension {
@@ -132,6 +137,7 @@ export function createLoopGraphExtension(
       currentNode: rt.currentNode,
       nodeMarker: rt.nodeMarker,
       availableEdges,
+      frameFormatter: options.frameFormatter,
     };
     const projected = projectMessages(input);
     debugLog.projection(input, projected as any[]);

@@ -73,6 +73,10 @@ interface LoopGraphExtensionOptions {
   /** skill 目录的根路径。node.skill 的 SKILL.md 在此路径下按 {name}/SKILL.md 查找。
    *  默认 process.cwd() + "/skills"。参见 §skill 集成。 */
   skillBasePath?: string;
+  /** 自定义帧折叠后注入到 agent 上下文的格式。
+   *  接收 ContextFrame[]，返回完整文本或 null（跳过 COMPLETED 段）。
+   *  默认保持 JSON 格式。参见 §帧栈与投影。 */
+  frameFormatter?: (frames: ContextFrame[]) => string | null;
 }
 ```
 
@@ -607,15 +611,56 @@ interface ContextFrame {
 
 ### 投影是什么
 
-每次 LLM 调用前，`context` 钩子将当前消息切分为三段：
+每次 LLM 调用前，`context` 钩子将当前消息重组：已完成节点的原始 ReAct 被丢弃，由帧摘要（COMPLETED 段）顶替；当前节点的 live 消息保留。
+
+默认格式（向后兼容）：
 
 ```
-=== COMPLETED === ← 帧栈摘要（已完成节点的折叠结果）
-=== CURRENT ===   ← 当前节点信息（subGoal、工具、skill 名称）
+=== COMPLETED ===
+[{"nodeId":"...","status":"ok","summary":"...","result":{...}}]
+=== END ===
+=== CURRENT ===
+nodeId: ...
+subGoal: ...
+=== END ===
 （当前节点的 live ReAct 消息）
 ```
 
-已完成节点的原始 ReAct 不在发送给 LLM 的上下文中。
+### 自定义帧格式
+
+通过 `frameFormatter` 选项，开发者完全控制 COMPLETED 段的格式与内容：
+
+```typescript
+const loop = createLoopGraphExtension(pi, {
+  frameFormatter: (frames) => {
+    // 返回 null → 跳过 COMPLETED 段（完全不折叠）
+    // 返回 string → 作为 COMPLETED 段完整文本注入上下文
+
+    return frames
+      .map((f) => {
+        const kv = Object.entries(f.result)
+          .map(([k, v]) => `  ${k}: ${v}`)
+          .join("\n");
+        return `[${f.nodeId}] ${f.status}\n${kv}`;
+      })
+      .join("\n\n");
+  },
+});
+```
+
+注入效果：
+
+```
+[generate_question] ok
+  question: 二叉树的前序遍历是什么？
+  difficulty: easy
+
+[grade_answer] ok
+  is_correct: true
+  explanation: 回答正确
+```
+
+不传 `frameFormatter` 时保持默认 JSON 格式（向后兼容）。
 
 ### 什么时候推帧
 
