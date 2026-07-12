@@ -2,7 +2,12 @@
 
 ## 格式
 
-每次进入节点时，Runtime 向 pi 对话流追加一条 `customType: "loop_graph_node_scope"` 消息。正文是 CURRENT；结构化 `NodeScopeDescriptor` 位于 `details`，不序列化进模型可见正文。COMPLETED 由 context 投影根据 frames 在调用前合成：
+每次进入需要调用 agent 的节点时，Runtime 向 pi 对话流追加一条语义化 `customType: "loop_graph_node_scope"` 消息。
+
+- `content`：CURRENT 段（nodeId、subGoal、tools、skill、completeWith 等），是 agent 真正需要的当前节点上下文
+- `details`：结构化 `NodeScopeDescriptor`（protocol、graphRunId、instanceId、scopeId、graphId、nodeId、visit、depth），用于投影层可靠匹配，**不进入 LLM 可见正文**
+
+COMPLETED 由 context 投影根据 frames 在调用前合成：
 
 ```
 === COMPLETED ===
@@ -41,7 +46,7 @@ JSON 数组，`instance.frames` 的序列化。每条：
 |------|------|------|
 | `nodeId` | `node.id` | 字符串 |
 | `subGoal` | `node.subGoal` | 字符串 |
-| `input` | `input.data` | 缩进 key-value |
+| `input` | `input.data` | 缩进 key-value（纯代码节点不渲染） |
 | `tools` | `node.tools` | 逗号分隔，无则省略 |
 | `skill` | `node.skill` | 字符串，无则省略 |
 | `completeWith` | 固定 | `__graph_complete__({ status, result })` |
@@ -71,4 +76,9 @@ completeWith: __graph_complete__({ status, result })
 
 ## 与 compaction 的关系
 
-当前安全基线是 fail closed：当前 scope 被 compaction 删除后，投影不会回退原始 transcript，而是从 `AgentInstance.frames` 重建 COMPLETED，并从当前 Node 重建确定性 CURRENT。Phase 5 已监听 `session_compact`，在图节点活跃时同步重新发出相同 `scopeId` 的 NodeScope checkpoint；overflow retry 从新 checkpoint 继续。frames 始终是跨节点状态的唯一事实来源。
+当前安全基线是 fail closed：当前 scope 被 compaction 删除后，投影不会回退原始 transcript，而是从 `AgentInstance.frames` 重建 COMPLETED，并从当前 Node 重建确定性 CURRENT（fail-closed）。Runtime 已监听 `session_compact`：
+
+- **root-only 图**：推进 frame 投影基线，不重发 NodeScope，不遮挡原生 summary
+- **嵌套 call/compose**：`session_before_compact` 返回 `{ cancel: true }` 取消压缩（防止混合 summary 穿透调用边界）
+
+frames 始终是跨节点状态的唯一事实来源。

@@ -1,32 +1,26 @@
 # Loop Graph SDK 实现形态
 
-> 2026-07-11 | NodeScope v2 / 独立子会话重构阶段
+> 2026-07-12 | 全阶段完成
 >
-> 上次更新：NodeScope v2 Phase 8 compose 帧段与强制归约落地
+> 重构计划 Phase 0-12 全部落地，206 项测试全通过。以下为当前实现形态的完整快照。
 
-## 2026-07-11 重构状态
+## 重构完成状态（Phase 0-12）
 
 - `ContextFrame` 已开放为任意开发者字段；`nodeId/status/summary/result` 仅为可选兼容字段，默认 formatter 原样稳定序列化 frame，不再替开发者挑选字段。
 - END 边可通过 `MigrationResult.output` 显式声明图返回，使业务返回与模型工作记忆解耦；旧 `frame.status/result` 继续兼容。
 - pi 原生 `compactionSummary` 与 recent messages 是压缩历史的权威替代。SDK 不再在压缩后重发 NodeScope 并遮挡 summary。
-- Runtime 通过 `branchEntries + firstKeptEntryId + NodeScope` 计算完整落入压缩前缀的 frame 基线：完整 frames 仍供代码、路由与审计使用，LLM 只停止重复投影已由 summary 覆盖的前缀。若切点落在节点内部，该节点 frame 会保留，避免 recent tail 被裁后形成信息缺口；共享 `call/compose` 活跃期间仍禁止 compaction。
-
-- 图执行返回统一为 `GraphRunResult`；runtime-only 子 adapter 复用真实 `createLoopGraphExtension`，不再维护第二套弱化 Runtime，也不直接改写 `session.agent.state.messages`。
+- Runtime 通过 `branchEntries + firstKeptEntryId + NodeScope` 计算完整落入压缩前缀的 frame 基线；共享 `call/compose` 活跃期间仍禁止 compaction。
+- 图执行返回统一为 `GraphRunResult`；runtime-only 子 adapter 复用真实 `createLoopGraphExtension`。
 - `GraphRuntime` 使用结构化 `NodeScopeDescriptor`（graphRunId / instanceId / scopeId / graphId / nodeId / visit / depth），主路径已删除随机 `loop_graph_boundary` 哨兵。
-- projection 从尾部匹配当前 `scopeId`，输出 frames + 当前 NodeScope 后的 live ReAct；外层 transcript、旧节点 ReAct、scope 前 compaction summary 均不保留。
-- scope 缺失时 fail closed：只恢复 frames + 确定性 CURRENT，不回退 raw transcript。
-- 图节点活跃期间收到 pi `session_compact` 后，会推进 frame 投影基线并记录 `compactionGeneration` / `reason` / `willRetry`；不重发 NodeScope，不遮挡原生 summary 与 recent messages。
-- 子图普通结果只暴露最终 result，不再把 child frames 泄漏给父图。
-- Phase 7 已将 root/call 收敛到单一 `runGraphLoop`；call 使用同一 Runtime 的嵌套 CallFrame，仍创建独立 AgentInstance。
-- Phase 8 已接线 `compose`：同一 AgentInstance 上的 child frames 被 Runtime 限定为临时 FrameSegment，默认或自定义 fold 后强制截断；异常、fold throw、maxSteps 均回滚，父节点活动 Scope 在嵌套返回时恢复。
-- Phase 9 已接线持久 GraphCallScope：call/compose 使用配对 start/end，context 在有无活动图时都清除闭合区段；end 记录 boundary、invocationKind 和真实业务状态，异常路径固定恢复 CallFrame。
-- 共享 Session 的嵌套 call/compose 活跃期间会取消 compaction，避免 pi 基于原始 transcript 生成的混合 summary 穿透调用边界；root-only 图直接采用原生 compaction 基底。长任务 compaction 由 Phase 10 delegate host 承担。
-- 若嵌套调用期间仍异常收到 `session_compact`，Runtime fail-closed：当前共享图调用在安全检查点失败；由于 GraphCallScope 的 start/end 配对可能已被切断，当前 Session 在下次 `session_start` 前拒绝投影任何消息，避免 orphan recent transcript 泄漏。不会重发 start 伪造恢复。
-- runtime-only 注册仅剥离顶层 `invocation`，不修改原 Graph；`nodes`/`routing` 作为含函数的只读定义引用共享，不能也不应结构化深拷贝。
-- `delegate` 仍未接线独立 host，会明确拒绝，绝不按 call 静默执行。
+- projection 从尾部匹配当前 `scopeId`，输出 frames + 当前 NodeScope 后的 live ReAct；scope 缺失时 fail closed。
+- Phase 7-8：root/call 收敛到单一 `runGraphLoop`；`compose` 使用 `FrameSegmentScope` 强制归约。
+- Phase 9：GraphCallScope start/end 配对清洗，嵌套 call/compose 活跃期间取消 compaction。
+- **Phase 10**：delegate host 已接线。`DelegateGraphInvoker` + `IsolatedSessionGraphHost` 提供隔离执行载体；`GraphRegistry` 和 `runGraphLoop` 通过 `delegateInvoker.invoke()` 调用。默认 `createDelegateHost` 未配置时抛明确错误，不静默降级。
+- **Phase 11**：完整验证矩阵通过（206 项测试，含真实 LLM spike）。
+- **Phase 12**：兼容层保留——`GraphNode.boundary` 可选缺省 `call`；`ContextFrame`/`Edge.guard`/`Edge.migrate`/`frameFormatter` 签名不变；`executeGraph()` 保留为高级低层 API。
 - 验证：`npm test -- --run` 通过（13 文件、206 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
-> 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节和 NodeScope v2 文档为准。
+> 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节为准。
 
 ---
 
@@ -35,7 +29,7 @@
 ```
 src/
 ├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, …）
-├── runtime.ts              # GraphRuntime（调用栈 + 帧栈 + NodeScope）
+├── runtime.ts              # GraphRuntime（调用栈 callStack + 帧栈 frames + NodeScope）
 ├── validate.ts             # 图校验 + 工具校验（validateGraphTools）
 ├── router.ts               # 单边裁决
 ├── tools-resolve.ts        # ★ 工具解析单一真相源（resolveNodeTools：去重 + 排序）
@@ -45,14 +39,14 @@ src/
 ├── adapter/
 │   ├── loop-graph-extension.ts  # ★ 可实例化运行时工厂 createLoopGraphExtension()
 │   ├── extension.ts             # debug/demo extension 入口（可选，{ demoGraphs: true }）
-│   ├── projection.ts            # 纯函数：三段重组消息
-│   ├── projection.test.ts       # 投影测试
+│   ├── projection.ts            # 纯函数：scope 匹配 + frames 格式化
+│   ├── projection.test.ts       # 投影测试（19 条）
 │   ├── pi-node-context.ts       # Promise 桥接：runAgent + after_provider_response 错误回流
 │   ├── complete-tool.ts         # __graph_complete__ 工具定义
 │   ├── debug-log.ts             # 调试日志（不再假设 frame 必含兼容字段）
 │   ├── compaction-frame.test.ts # Compaction 边界 / frame 行为 / fail-closed 测试
 │   ├── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent + 工具校验
-│   ├── characterization.test.ts # NodeScope 行为冻结基准
+│   ├── characterization.test.ts # NodeScope 行为冻结基准（NodeScope visit/唯一性/时序/fail-closed）
 │   ├── graph-execution-host.ts       # DelegateGraphInvoker / IsolatedSessionGraphHost
 │   ├── graph-execution-host.test.ts  # Host 生命周期测试
 │   ├── graph-execution-host.spike.test.ts  # 独立 AgentSession 可行性验证
@@ -60,7 +54,7 @@ src/
 │   ├── isolated-graph-session.test.ts # 隔离 session 集成测试
 ├── graphs/
 │   ├── review-graph.ts     # echo 测试图
-│   ├── probe-graph.ts      # 哨兵可见性验证图
+│   ├── probe-graph.ts      # NodeScope 可见性验证图
 │   ├── chain-graph.ts      # 双节点链式验证图
 │   ├── subgraph-graph.ts   # 子图隔离验证图
 │   └── validate-graph.ts   # 完成度验证测试图
@@ -76,43 +70,102 @@ src/
 
 ## 二、核心机制
 
-### 2.1 哨兵消息
+### 2.1 NodeScope 作用域消息
 
-**目的**：在 pi 的 messages 数组中标记"当前节点开始"的切分点。
+**目的**：标记当前活动节点的开始位置，为 projection 提供可靠的语义化锚点。
 
 **实现**：
 
-- `GraphRuntime.nextMarker(nodeId)` 生成唯一标记：`__node_boundary__:{nodeId}:{递增计数}:{随机8字符}`
-- 随机后缀保证跨调用不重复
-- 进节点前通过 `pi.sendMessage({ customType: "loop_graph_boundary", content: marker, display: false })` 注入
-- 同一节点重复进入（循环边）也能区分
+- 每次进入需要调用 agent 的节点时，追加一条 `customType: "loop_graph_node_scope"` 消息
+- `content` 包含 CURRENT 段信息，是 agent 真正需要看到的上下文
+- `details` 包含结构化 `NodeScopeDescriptor`（protocol、graphRunId、instanceId、scopeId、graphId、nodeId、visit、depth），用于投影层可靠匹配，不发送给 LLM
+- 同一节点重复进入（循环边）使用不同的 scopeId 和递增 visit
+- 纯代码节点（不调用 agent）可以不写入 pi transcript，减少隐藏消息积累
 
-### 2.2 context 投影（三段重组）
+### 2.2 context 投影（作用域匹配）
 
-**目的**：每次 LLM 调用前动态重组消息，使 agent 只看到帧栈摘要 + 当前节点工作区，前序节点的 ReAct 被丢弃。
+**目的**：每次 LLM 调用前重组消息，使 agent 只看到帧栈摘要（COMPLETED）+ 当前节点工作区（CURRENT + live ReAct）。
 
-**哨兵切分**：
-
-```
-messages 中的布局：
-[sys, user, S1, 节点A的ReAct..., S2, 节点B的prompt, 节点B的工作...]
-
-投影找两个位置：
-  firstIdx = 第一个哨兵（S1）                  ← 图的 entry 边界
-  currentIdx = 当前节点的哨兵（S2 / nodeMarker）← 当前节点的起点
-```
-
-**三段产出**：
+**算法**：
 
 ```
-head = before firstIdx                          → [sys, user]（图之外的信息）
-active = after currentIdx                       → [prompt, 节点B的工作...]
-S1 ~ S2 之间的原始 ReAct 被丢弃，由帧段替换
+const scopeIdx = findLastMatchingScope(messages, activeScope);
+
+if (scopeIdx >= 0) {
+  return [
+    formatFrames(frames),           // COMPLETED 段
+    ...messages.slice(scopeIdx),   // 当前 NodeScope 后的所有消息
+  ];
+}
 ```
 
-投影输出结构不变，见原文档。
+**fail-closed 策略**：找不到 scope 时不回退完整 transcript，而是：
 
-### 2.3 完成度验证
+1. 输出 frames（COMPLETED 段）
+2. 从当前 Node 重建确定性 CURRENT
+3. 记录结构化诊断到 debug log
+4. 必要时终止当前节点并明确报错
+
+不再保留旧哨兵机制的「全部消息作为 head」降级路径。
+
+### 2.3 帧栈折叠
+
+`Edge.migrate` 将 `NodeCompletion` 折叠为 `ContextFrame` 推入 `AgentInstance.frames`。同一 Completion 走不同边可产生不同 frame（"边是完整决策"）。当前节点 ReAct 在迁移后不再进入后续节点上下文。
+
+### 2.4 compose 帧段归约
+
+对于 `boundary: "compose"` 的子图，Runtime 使用不透明的 `FrameSegmentScope` 管理临时帧段：
+
+```
+父 frames: [A, B]
+               └─ baseIndex = 2
+compose 执行: [A, B, C, D, E]    ← 子图帧在父栈上生长
+退出并 fold:  [A, B] + graph-node completion  ← 强制截断
+                         │
+                         └─ 再由父 Edge.migrate 生成一个父级 ContextFrame
+```
+
+- `beginFrameSegment` 记录基线
+- `closeFrameSegment` 调用 fold 后截断
+- `rollbackFrameSegment` 在异常时回滚
+- fold 接收冻结的帧段快照，不能修改 live frames
+
+### 2.5 call / compose / delegate 三种图调用边界
+
+| 边界             | AgentSession | AgentInstance | 可见内容                                     | 返回处理                                 |
+| ---------------- | ------------ | ------------- | -------------------------------------------- | ---------------------------------------- |
+| `call`（默认） | 复用         | 新建          | 仅 background；`frames=[]`、新 scratch     | 仅 final status/result                   |
+| `compose`      | 复用         | 复用          | 父 background、父已完成 frames、共享 scratch | 子图帧段强制折叠为 graph node completion |
+| `delegate`     | 新建         | 新建          | 仅 background；物理消息历史隔离              | 仅`GraphRunResult`                     |
+
+现有 `kind: "graph"` 缺省为 `call`，保持当前行为。`delegate` 通过 `DelegateGraphInvoker` 创建独立 `IsolatedSessionGraphHost` 执行；未配置 `createDelegateHost` 时抛明确错误，不静默降级。
+
+### 2.6 GraphCallScope（共享 session 调用审计）
+
+`call` 和 `compose` 在开始/结束时写入配对的消息：
+
+```
+// 图开始
+{ customType: "loop_graph_call_start", details: { protocol, graphRunId, boundary, ... } }
+
+// 图结束
+{ customType: "loop_graph_call_end", details: { protocol, graphRunId, status } }
+```
+
+context 处理拆为两步：
+
+1. `stripClosedGraphCalls(messages)` — 始终清除已闭合调用区段
+2. `projectActiveNodeScope(messages, runtime)` — 有活动图时执行
+
+### 2.7 compaction 协同
+
+- 监听 `session_compact` / `session_before_compact`，记录 `compactionGeneration`
+- **root-only 图**：推进 frame 投影基线，不重发 NodeScope，不遮挡原生 summary 与 recent messages
+- **嵌套 call/compose 共享 session 活跃期间**：`session_before_compact` 返回 `{ cancel: true }`，防止 pi 基于原始 transcript 生成的混合 summary 穿透调用边界
+- 若取消策略因竞态异常失效，Runtime fail-closed：终止当前共享调用，过滤已污染的 compactionSummary
+- SDK 不生成 LLM summary，不主动调用 `ctx.compact()`
+
+### 2.8 完成度验证
 
 节点可声明 `validateCompletion`，agent 调用 `__graph_complete__` 时检查 result：
 
@@ -124,7 +177,7 @@ agent → __graph_complete__({ status: "ok", result: { question: "...", answer: 
   ↓ 通过 → resolve Promise → 进入下一节点
 ```
 
-### 2.4 createAgentExecute 工厂
+### 2.9 createAgentExecute 工厂
 
 ```typescript
 const myNode: Node = {
@@ -138,7 +191,7 @@ const myNode: Node = {
 
 **注意**：`tools` 参数已废弃。工具集统一由 `Node.tools` 声明，经 `resolveNodeTools` 合并 `defaultTools` 并去重。
 
-### 2.5 Promise 桥接 + 错误回流（runAgent）
+### 2.10 Promise 桥接 + 错误回流（runAgent）
 
 **实现**（`pi-node-context.ts`）：
 
@@ -149,7 +202,7 @@ const myNode: Node = {
 5. **Provider 错误回流**：构造函数单一监听 `after_provider_response`，`status >= 400 && !== 429` 时立即 resolve 为 `failed`（不等待超时，不误杀限流）
 6. **死图防御**：`activeRunId === 0` 时 `onAgentEnd` 追加终止消息，不再静默丢弃
 
-### 2.6 可实例化运行时工厂（★ 核心）
+### 2.11 可实例化运行时工厂（★ 核心）
 
 每个 `createLoopGraphExtension(pi, options?)` 返回独立 `LoopGraphExtension`：
 
@@ -176,7 +229,7 @@ export function createLoopGraphExtension(pi, options?) {
 - `__graph_complete__` 用 `WeakSet` 去重，同 pi 多实例不重复注册
 - `LoopGraphExtensionOptions` 新增 `skillBasePath`、`defaultTools` 参数
 
-### 2.7 工具解析单一真相源
+### 2.12 工具解析单一真相源
 
 全仓库只有 `resolveNodeTools(defaultTools, nodeTools)` 产出最终工具列表。`setActiveTools` 调它，debug 日志也调它（通过 `pi.getActiveTools()` 读真值）。
 
@@ -187,12 +240,12 @@ export function createLoopGraphExtension(pi, options?) {
 - `__graph_complete__` 强制末位
 - 顺序稳定，相同输入总产出相同结果
 
-### 2.8 注册期 + 首次执行工具校验
+### 2.13 注册期 + 首次执行工具校验
 
 - **注册期**（`GraphRegistry.registerGraph`）：节点内 `tools` 数组重复名 → 立即抛错（`DUPLICATE_TOOL_IN_NODE`）
 - **首次执行**（`executeGraph`）：遍历 `defaultTools ∪ node.tools`，用 `pi.getAllTools()` 检查未注册工具 → 抛错（`TOOL_NOT_REGISTERED`），缓存 per-graph
 
-### 2.9 skill 原生集成
+### 2.14 skill 原生集成
 
 - `resources_discover` 事件注册 `skillBasePath`，pi 原生 skill 系统发现 SKILL.md
 - 进入节点时（哨兵之后），读取 `{skillBasePath}/{node.skill}/SKILL.md` 内容，通过 `sendMessage({ display: false })` 追加到消息流（不触发额外 turn）
@@ -200,7 +253,7 @@ export function createLoopGraphExtension(pi, options?) {
 - `skill:` 行在 projection CURRENT 段仅保留名称，完整内容由运行时追加
 - `type.ts` 注释已诚实化
 
-### 2.10 图异常终止信号回流
+### 2.15 图异常终止信号回流
 
 `executeGraph` catch 块捕获异常时，通过 `sendUserMessage` 向 agent 注入可见的终止信号：
 
@@ -208,7 +261,7 @@ export function createLoopGraphExtension(pi, options?) {
 [系统] 图 "xxx" 因错误意外终止：{reason}。当前节点已失效，请停止推理。
 ```
 
-### 2.11 mechanism 运行时
+### 2.16 mechanism 运行时
 
 Runtime 在节点进入后、`execute` 之前自动分派 onNodeEnter：
 
@@ -223,17 +276,17 @@ enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → e
 
 `MechanismContext` 提供 pi 全部能力 + 两个显式作用通道：
 
-| 成员 | 用途 |
-|------|------|
-| `ctx.pi` | 全部 pi 能力：注册 `tool_result`、`turn_start`、`before_provider_request` 等原生事件；改工具集；发消息 |
-| `ctx.instance` | 当前 AgentInstance（可写 `instance.scratch`） |
-| `ctx.node` | 当前节点 |
-| `ctx.input` | 代码侧一次性入参 |
+| 成员                           | 用途                                                                                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.pi`                     | 全部 pi 能力：注册`tool_result`、`turn_start`、`before_provider_request` 等原生事件；改工具集；发消息                             |
+| `ctx.instance`               | 当前 AgentInstance（可写`instance.scratch`）                                                                                          |
+| `ctx.node`                   | 当前节点                                                                                                                                |
+| `ctx.input`                  | 代码侧一次性入参                                                                                                                        |
 | `ctx.appendContext(content)` | 向 agent 消息流追加（`sendMessage({ customType: "loop_graph_mechanism", display: false })`），不触发额外 turn，落点在本节点 active 段 |
 
 onNodeEnter 是注册钩子的入口——机制在里面用 `ctx.pi.on()` 注册 pi 原生事件，这些事件在 agent 运行期间持续触发。pi 没有 off，回调需自限条件。
 
-### 2.12 agent-choice 路由
+### 2.17 agent-choice 路由
 
 agent-choice 路由允许 agent 在 completion 中声明 `chosen_edge_id`，router 据此选择边。
 
@@ -242,6 +295,7 @@ completion.result.chosen_edge_id = "to_discuss";  // agent 自主决策走哪条
 ```
 
 **设计要点**：
+
 - **不调 LLM**：router 只是从 `completion.result` 读字段，不做任何推理（编排不推理）
 - **CURRENT 段渲染**：projection 在 agent-choice 节点的 CURRENT 段追加 `availableEdges` 列表，含每条边的 `id`、`description`、`priority`、`target`
 - **description 必填**：agent-choice 路由下每条边必须有非空 `description`，`validateGraph` 注册期校验（`AGENT_CHOICE_EDGE_MISSING_DESCRIPTION`）
@@ -251,7 +305,7 @@ completion.result.chosen_edge_id = "to_discuss";  // agent 自主决策走哪条
 
 **校验注入机制**：
 
-`executeGraph` / `runSubgraphInExtension` 在调用 `execNodeInGraph` 前检测路由策略，若为 agent-choice 则通过 `wrapWithAgentChoiceValidator` 将节点包装：
+`runGraphLoop` 在调用 `execNodeInGraph` 前检测路由策略，若为 agent-choice 则通过 `wrapWithAgentChoiceValidator` 将节点包装：
 
 ```typescript
 // 伪代码
@@ -260,11 +314,13 @@ const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
 ```
 
 `createAgentChoiceValidator` 产出的校验器：
+
 1. 先跑节点自身的 `validateCompletion`（如有）
 2. 检查 `result.chosen_edge_id` 非空且匹配已知边 ID
 3. 失败时 reason 列出所有可选边：`  • to_archive (priority: 10) → archive_node\n    答对，归档结果`
 
 **Edge 扩展**：
+
 ```typescript
 export interface Edge {
   // ... 原有字段 ...
@@ -274,116 +330,188 @@ export interface Edge {
 ```
 
 **ProjectionInput 扩展**：
+
 ```typescript
 availableEdges?: Array<{ id: string; description: string; priority: number; target: string }>;
 ```
 
 `agentChoiceField` 允许自定义字段名（默认 `"chosen_edge_id"`）。
 
-### 2.13 隔离图执行载体契约（基础切片）
+### 2.18 隔离图执行载体（delegate host）
 
-已新增公开的图执行边界类型：
+已完整实现面向 command、tool 和 delegate graph-node 的隔离执行载体：
 
-- `GraphRunRequest`：只通过 `background` 携带显式调用输入，并标注 tool/command/subgraph 来源。
-- `GraphRunResult`：统一返回 graphId、业务终态、END 最终 result 和步数；不包含 frames/trace。
-- `GraphExecutionHost`：图执行载体抽象。
-- `IsolatedSessionGraphHost`：独立子 AgentSession 的生命周期外壳。
+| 类型/组件                       | 职责                                                          |
+| ------------------------------- | ------------------------------------------------------------- |
+| `GraphRunRequest`             | 统一调用协议：background + invocationKind + boundary          |
+| `GraphRunResult`              | 统一返回：graphId、status、result、steps；不包含 frames/trace |
+| `GraphExecutionHost`          | 图执行载体抽象接口                                            |
+| `IsolatedSessionGraphHost`    | 独立子 AgentSession 生命周期外壳                              |
+| `DelegateGraphInvoker`        | 入口无关的统一调用器，每次 invoke 创建一次性 host             |
+| `IsolatedGraphSessionFactory` | 创建 in-memory 子会话的工厂注入点                             |
 
-当前 `IsolatedSessionGraphHost` 已固化以下行为：同一 host 禁止并发 run；outer AbortSignal 转发到子会话；清理顺序固定为 abort → dispose；dispose 幂等；dispose 后拒绝再次运行。子 AgentSession 的实际创建与 runtime-only graph adapter 绑定通过 `IsolatedGraphSessionFactory` 注入，尚未切换 `GraphRegistry` 的 graph tool 路径。
+**接线方式**：
+
+1. `createLoopGraphExtension(pi, { createDelegateHost })` 传入 host 工厂
+2. 工厂内部构造 `DelegateGraphInvoker(pi, createHost)` 作为 `GraphInvoker`
+3. `GraphRegistry` 持有该 invoker，command/tool 入口统一通过它执行
+4. graph node `boundary: "delegate"` 在 `runGraphLoop` 中通过 `delegateInvoker.invoke()` 调用
+5. 未配置 `createDelegateHost` 时抛明确错误
+
+**生命周期保证**：同一 host 禁止并发 run；outer AbortSignal 转发到子会话；清理顺序固定为 abort → dispose；dispose 幂等；dispose 后拒绝再次运行。
 
 ---
 
-## 三、上下文隔离契约
+## 三、调用栈与上下文隔离契约
+
+### 统一 callStack
+
+从 Phase 7 开始，同一 Session 只保留一个 `GraphRuntime` 和 `PiNodeContext`，通过 `callStack` 管理多层调用：
+
+```typescript
+interface CallFrame {
+  graph: Graph;
+  instance: AgentInstance;
+  boundary: "root" | "compose" | "call";
+  callBackground: Record<string, unknown>;
+  localGoal: string;
+  localMechanisms: readonly Mechanism[];
+  parentNodeId?: string;
+  frameBase?: number; // compose only
+  currentNodeId: string | null;
+}
+```
+
+- `root` push 初始 CallFrame
+- `call` push 新 Instance（frames/scratch 隔离）
+- `compose` push 同一 Instance 的帧段作用域（frames 共享）
+- 退出时 pop，恢复父 CallFrame、NodeScope 状态和工具集
 
 ### 顶层图
 
-同前设计。`AgentInstance` 不继承图之外的完整上下文。`background` 只有 trigger 入参。
+`AgentInstance` 不继承图之外的完整上下文。`background` 只有 trigger 入参。
 
-### 子图（★ 修复）
+### call 边界
 
-子图执行时正确切换工厂级 `activeRuntime`/`activeNodeContext`：
+子图执行时复用同一 Session/Runtime，但创建新 AgentInstance：
 
 ```
-execNode 检测到 kind: "graph"
-  ↓
-runSubgraphInExtension 创建 childRuntime：
-  prevRt = activeRuntime; prevNc = activeNodeContext
-  activeRuntime = childRt; activeNodeContext = childNc
-  ↓ 执行子图主线
-  ↓ finally: activeRuntime = prevRt; activeNodeContext = prevNc
+push CallFrame（新 AgentInstance）
+  → child Entry / nodes 执行（独立 frames/scratch）
+  → 得到 child GraphRunResult
+pop CallFrame（恢复父 AgentInstance）
 ```
 
-这确保了子图内的 agent 节点调用 `__graph_complete__` 时，完成信号被正确的 `PiNodeContext`（子图的）捕获，而非父图的。
+这确保了子图内的 agent 节点调用 `__graph_complete__` 时，完成信号被正确的子 `PiNodeContext` 捕获，而非父图的。
+
+### compose 边界
+
+子图复用父 AgentInstance，frames 在父栈上生长：
+
+```
+记录 baseIndex
+push compose CallFrame（复用父 AgentInstance）
+  → child Entry / nodes 执行（frames 在父栈上追加）
+  → 得到 child GraphRunResult
+  → 截取只读 segment 快照
+  → 调用 fold（默认或自定义）
+  → 强制截断到 baseIndex
+pop compose CallFrame
+```
+
+### delegate 边界
+
+delegate 通过 `DelegateGraphInvoker` 在独立 `IsolatedSessionGraphHost` 中执行，创建新 AgentSession 和 AgentInstance：
+
+```
+DelegateGraphInvoker.invoke(graph, request)
+  → createHost({ pi, extensionContext, graph, request })
+    → IsolatedSessionGraphHost.run(graph, request)
+      → 子 AgentSession 中 runtime-only adapter 执行整张图
+      → GraphRunResult
+    → finally: host.dispose()
+```
+
+- 外层 host 不配置时抛明确错误，不静默降级
+- 配置 `createDelegateHost` 后，command、tool 和 graph-node `boundary: "delegate"` 均通过同一 `GraphInvoker` 调用
 
 ---
 
 ## 四、已验证清单
 
-| 验证项                                     | 方式                                                    | 结果 |
-| ------------------------------------------ | ------------------------------------------------------- | ---- |
-| 命令 handler 内 await agent turn           | `/probe`                                              | ✅   |
-| 哨兵消息进入 context 数组                  | 探针日志                                                | ✅   |
-| 哨兵跨调用唯一                             | debug log                                               | ✅   |
-| 双节点链式推进                             | `/chain`                                              | ✅   |
-| 帧栈折叠（前序 ReAct 被丢弃）              | debug log projection                                    | ✅   |
-| 子图 push/pop + 隔离                       | `/sub` + debug log                                    | ✅   |
-| 图校验                                     | `assertValidGraph` 编译期                             | ✅   |
-| 路由独立模块                               | `router.ts`                                           | ✅   |
-| 完成度验证                                 | `/validate-test`                                      | ✅   |
-| 日志层                                     | `loop-graph-debug.log`                                | ✅   |
-| 工厂实例隔离                               | `loop-graph-extension.test.ts`                        | ✅   |
-| 子图 agent 节点完成                        | `loop-graph-extension.test.ts`                        | ✅   |
-| parseArgs 命令入口                         | `registry.test.ts`                                    | ✅   |
-| tool execute 闭包绑定                      | `registry.test.ts`                                    | ✅   |
-| demo graphs 门控                           | `loop-graph-extension.test.ts`                        | ✅   |
-| defaultTools 合并                          | `loop-graph-extension.test.ts`                        | ✅   |
-| 多实例`__graph_complete__` 幂等          | `loop-graph-extension.test.ts`                        | ✅   |
-| **resolveNodeTools 去重 + 排序**     | `tools-resolve.test.ts`（14 条）                      | ✅   |
-| **注册期节点内工具重复检测**         | `validate.test.ts` + `loop-graph-extension.test.ts` | ✅   |
-| **首次执行未注册工具检测**           | `loop-graph-extension.test.ts`                        | ✅   |
-| **skill 追加不触发额外 turn**        | 代码审查 +`sendMessage`（无 triggerTurn）             | ✅   |
-| **after_provider_response 错误回流** | 代码审查（构造函数单一监听）                            | ✅   |
-| **图终止信号注入 agent**             | 代码审查（`executeGraph` catch）                      | ✅   |
-| **input 不进 agent 上下文**          | projection 删 input 渲染 + 显式 prompt                  | ✅   |
-| **mechanism 运行时分派 + scratch**   | `loop-graph-extension.test.ts`                        | ✅   |
-| **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                        | ✅   |
-| **自定义帧格式 frameFormatter** | `projection.test.ts`                        | ✅   |
-| **agent-choice 路由** | `router.test.ts` + `validate.test.ts` + `projection.test.ts` | ✅ |
-| **Phase 0 独立 AgentSession 可行性** | `graph-execution-host.spike.test.ts`（29 条，含真实 LLM） | ✅ |
-| **Phase 1 现有行为冻结** | `characterization.test.ts`（11 条） | ✅ |
-| **GraphExecutionHost 生命周期契约** | `graph-execution-host.test.ts`（8 条） | ✅ |
+| 验证项                                       | 方式                                                                                                                                                                                          | 结果 |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| 命令 handler 内 await agent turn             | `/probe`                                                                                                                                                                                    | ✅   |
+| 哨兵消息进入 context 数组                    | 探针日志                                                                                                                                                                                      | ✅   |
+| 哨兵跨调用唯一                               | debug log                                                                                                                                                                                     | ✅   |
+| 双节点链式推进                               | `/chain`                                                                                                                                                                                    | ✅   |
+| 帧栈折叠（前序 ReAct 被丢弃）                | debug log projection                                                                                                                                                                          | ✅   |
+| 子图 push/pop + 隔离                         | `/sub` + debug log                                                                                                                                                                          | ✅   |
+| 图校验                                       | `assertValidGraph` 编译期                                                                                                                                                                   | ✅   |
+| 路由独立模块                                 | `router.ts`                                                                                                                                                                                 | ✅   |
+| 完成度验证                                   | `/validate-test`                                                                                                                                                                            | ✅   |
+| 日志层                                       | `loop-graph-debug.log`                                                                                                                                                                      | ✅   |
+| 工厂实例隔离                                 | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| 子图 agent 节点完成                          | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| parseArgs 命令入口                           | `registry.test.ts`                                                                                                                                                                          | ✅   |
+| tool execute 闭包绑定                        | `registry.test.ts`                                                                                                                                                                          | ✅   |
+| demo graphs 门控                             | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| defaultTools 合并                            | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| 多实例`__graph_complete__` 幂等            | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| **resolveNodeTools 去重 + 排序**       | `tools-resolve.test.ts`（14 条）                                                                                                                                                            | ✅   |
+| **注册期节点内工具重复检测**           | `validate.test.ts` + `loop-graph-extension.test.ts`                                                                                                                                       | ✅   |
+| **首次执行未注册工具检测**             | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| **skill 追加不触发额外 turn**          | 代码审查 +`sendMessage`（无 triggerTurn）                                                                                                                                                   | ✅   |
+| **after_provider_response 错误回流**   | 代码审查（构造函数单一监听）                                                                                                                                                                  | ✅   |
+| **图终止信号注入 agent**               | 代码审查（`executeGraph` catch）                                                                                                                                                            | ✅   |
+| **input 不进 agent 上下文**            | projection 删 input 渲染 + 显式 prompt                                                                                                                                                        | ✅   |
+| **mechanism 运行时分派 + scratch**     | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| **mechanism appendContext 追加上下文** | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
+| **自定义帧格式 frameFormatter**        | `projection.test.ts`                                                                                                                                                                        | ✅   |
+| **agent-choice 路由**                  | `router.test.ts` + `validate.test.ts` + `projection.test.ts`                                                                                                                            | ✅   |
+| **Phase 0 独立 AgentSession 可行性**   | `graph-execution-host.spike.test.ts`（29 条，含真实 LLM）                                                                                                                                   | ✅   |
+| **Phase 1 现有行为冻结**               | `characterization.test.ts`（11 条）                                                                                                                                                         | ✅   |
+| **GraphExecutionHost 生命周期契约**    | `graph-execution-host.test.ts`（8 条）                                                                                                                                                      | ✅   |
+| **Phase 2 内部作用域协议**             | `NodeScopeDescriptor` 类型 + 9 条生命周期测试                                                                                                                                               | ✅   |
+| **Phase 3 NodeScope 替换哨兵**         | 主 Runtime 删除`nodeMarker`/`nextMarker()`/`loop_graph_boundary`；进入节点追加 `loop_graph_node_scope`                                                                                | ✅   |
+| **Phase 4 严格作用域投影**             | 投影从尾部匹配 scopeId；scope 缺失时 fail closed；19 条 projection/characterization 测试                                                                                                      | ✅   |
+| **Phase 5 compaction 协同**            | 监听`session_compact`/`session_before_compact`；root 图推进投影基线；嵌套调用取消压缩                                                                                                     | ✅   |
+| **Phase 6 固化调用协议与类型边界**     | `GraphInvocationBoundary`、`GraphRunRequest`、`GraphRunResult` 移入核心类型；boundary/fold 校验                                                                                         | ✅   |
+| **Phase 7 单一 runGraphLoop**          | root/call 收敛到同一执行循环；callStack push/pop；157 项全量测试通过                                                                                                                          | ✅   |
+| **Phase 8 compose 帧段归约**           | `FrameSegmentScope` 管理基线/回滚/关闭；默认与自定义 fold；compose→compose/call 嵌套回归                                                                                                   | ✅   |
+| **Phase 9 GraphCallScope 统一实现**    | call/compose 写入配对 start/end；`stripClosedGraphCalls` + `projectActiveNodeScope` 两层清洗；嵌套调用期间取消 compaction；异常路径保证 call_end 闭合                                     | ✅   |
+| **Phase 10 delegate host 接线**        | `DelegateGraphInvoker` + `IsolatedSessionGraphHost` + Registry 接线；graph node 的 `boundary: "delegate"` 通过 `delegateInvoker.invoke()` 执行；`createDelegateHost` 选项暴露给工厂 | ✅   |
+| **Phase 11 完整验证矩阵**              | 206 项全量测试通过（13 文件，含真实 LLM spike），覆盖 compaction+scope、compose 异常回滚、delegate 隔离、并发等                                                                               | ✅   |
+| **Phase 12 兼容性**                    | `GraphNode.boundary` 可选缺省 `call`；`ContextFrame`/`Edge.guard`/`Edge.migrate`/`frameFormatter` 签名不变；`executeGraph()` 保留为高级低层 API；支持回滚提交拆分               | ✅   |
 
 ---
 
 ## 五、已知缺口
 
-| 缺口                         | 说明                                                                                         |
-| ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `pi-node-context.callTool` | `throw Error` 占位                                                                         |
-| schema helper                | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验 |
-| 失败边处理                   | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                  |
-| 自定义 compaction 策略      | SDK 不生成 LLM summary、不主动调用 compact；root 使用 pi 原生策略，嵌套 call/compose 期间为保证边界安全而取消压缩 |
-| session 续跑                 | 帧栈未持久化到磁盘                                                                           |
-| graph tool 切换独立 host     | Host 类型与生命周期已实现；尚需 runtime-only 子 adapter、GraphRunResult 主循环返回与 Registry 接线 |
-| 三类图调用边界               | `call` 与 `compose` 已可执行；compose 强制 fold/截断临时帧段。`delegate` 等待 Phase 10 独立 host，当前明确拒绝 |
+| 缺口                   | 说明                                                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| schema helper          | `NodeCompletion.result` 等保持 `Record<string, unknown>`；下一阶段补 runtime schema 校验                      |
+| 失败边处理             | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                                       |
+| 自定义 compaction 策略 | SDK 不生成 LLM summary、不主动调用 compact；root 使用 pi 原生策略，嵌套 call/compose 期间为保证边界安全而取消压缩 |
+| session 续跑           | 帧栈未持久化到磁盘                                                                                                |
+| 发布说明写作           | 正式发布前需完成版本发布文档                                                                                      |
 
 ### 已关闭的缺口
 
-| 缺口                                            | 说明                                                                                                        | 关闭版本        |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------- |
-| 多 skill                                        | 当前单`node.skill?: string`；已通过 `resources_discover` + 运行时追加实现原生 skill 集成                | v0.1.0+stage3   |
-| defaultTools 流入 skill 节点                    | 证实为观测造假（debug log 未包含 defaultTools）。`resolveNodeTools` + `getActiveTools()` 真值日志已修复 | v0.1.0+stage1   |
-| `createAgentExecute(options).tools` 误导      | 已 deprecated，不消费                                                                                       | v0.1.0+stage1   |
-| `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                          | v0.1.0+stage1/2 |
-| 注册期无校验                                    | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查                                            | v0.1.0+stage2   |
-| `agent-choice` 路由未实现 | agent 通过 `completion.result.chosen_edge_id` 声明边选择；CURRENT 段渲染 `availableEdges`；`description` 注册期必填校验 | v0.1.0+stage5 |
-| COMPLETED 段硬编码 JSON 格式 | `frameFormatter` 选项让开发者完全自定义帧折叠后的上下文内容与格式 | v0.1.0+stage6 |
+| 缺口                                            | 说明                                                                                                                         | 关闭版本        |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| 多 skill                                        | 当前单`node.skill?: string`；已通过 `resources_discover` + 运行时追加实现原生 skill 集成                                 | v0.1.0+stage3   |
+| defaultTools 流入 skill 节点                    | 证实为观测造假（debug log 未包含 defaultTools）。`resolveNodeTools` + `getActiveTools()` 真值日志已修复                  | v0.1.0+stage1   |
+| `createAgentExecute(options).tools` 误导      | 已 deprecated，不消费                                                                                                        | v0.1.0+stage1   |
+| `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                                           | v0.1.0+stage1/2 |
+| 注册期无校验                                    | `validateGraphTools` 注册期 dup 检查 + 首次执行 existence 检查                                                             | v0.1.0+stage2   |
+| `agent-choice` 路由未实现                     | agent 通过`completion.result.chosen_edge_id` 声明边选择；CURRENT 段渲染 `availableEdges`；`description` 注册期必填校验 | v0.1.0+stage5   |
+| COMPLETED 段硬编码 JSON 格式                    | `frameFormatter` 选项让开发者完全自定义帧折叠后的上下文内容与格式                                                          | v0.1.0+stage6   |
 
 ---
 
 ## 六、后续
 
-- `pi-node-context.callTool` 实现（等待 pi API 确认）
 - schema helper 工具函数
 - Pi Review Agent `/review-turn` 验证
 - 正式发布前移除 debug log 文件输出

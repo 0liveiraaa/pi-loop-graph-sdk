@@ -9,7 +9,7 @@ Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
 **关键特性**：
 
 - **帧栈折叠**：已完成节点的 ReAct 过程被折叠为摘要帧，后续节点只看到摘要，不看到原始展开过程
-- **隔离栈**：当前 `kind: "graph"` 实现的是 `call` 边界——创建独立 AgentInstance，帧栈从零开始，父图帧不可见
+- **三种图调用边界**：`call`（创建新 AgentInstance，帧栈隔离）、`compose`（复用父 AgentInstance，帧段强制归约）、`delegate`（独立 AgentSession，物理隔离，通过 `DelegateGraphInvoker` 执行）
 - **不干预 ReAct**：框架只编排"什么时候跑什么节点"，不干涉节点内部的 LLM 推理循环
 - **全员函数扩展**：所有定制点都是函数（`guard`、`migrate`、`execute`、`validateCompletion`、`custom router`），无黑盒限制
 - **框架不引入全局隐式状态**：所有跨节点数据流经帧栈显式传递，不依赖闭包或模块变量
@@ -240,6 +240,8 @@ type Node =
       id: string;
       subGoal: string;
       graph: Graph;                                       // 引用的子图
+      boundary?: "compose" | "call" | "delegate";        // 图调用边界，缺省 call
+      fold?: ComposeFrameFolder;                          // compose 专属：帧段归约策略
     };
 ```
 
@@ -247,7 +249,9 @@ type Node =
 | ------------------------------- | ----------------------------- | ----------------------------------------- |
 | `kind: "code"` 有 skill/tools | `createAgentExecute()` 工厂 | 调 execute → 内部调 runAgent → LLM 推理 |
 | `kind: "code"` 纯逻辑         | 自定义函数                    | 调 execute → 直接返回 NodeCompletion     |
-| `kind: "graph"`               | 不提供                        | 创建子 Runtime 委托子图                   |
+| `kind: "graph"`               | 不提供                        | 按 boundary 委托子图执行                  |
+
+`boundary` 缺省为 `call`，已有业务图无需修改。`call/delegate + fold` 在校验期报错。未配置 `createDelegateHost` 时 delegate 会抛明确错误。
 
 ### Mechanism（横切机制）
 
@@ -451,16 +455,40 @@ execute: createAgentExecute({
 
 ### graph 节点（子图）
 
+`kind: "graph"` 节点引用另一张图作为子节点，运行时按 `boundary` 决定执行边界：
+
 ```typescript
-const subNode: Node = {
+// 缺省 boundary: "call" — 新 AgentInstance，帧栈隔离
+const subCall: Node = {
   kind: "graph",
-  id: "delegate",
-  subGoal: "委托子图执行子任务",
+  id: "sub_call",
+  subGoal: "委托子图处理（隔离栈）",
   graph: mySubGraph,
+};
+
+// 显式 boundary: "compose" — 复用父 AgentInstance，帧段归约
+const subCompose: Node = {
+  kind: "graph",
+  id: "sub_compose",
+  subGoal: "以图代点（共享帧栈）",
+  graph: mySubGraph,
+  boundary: "compose",
+  fold: ({ segment, finalResult }) => ({
+    status: finalResult.status,
+    result: { childResult: finalResult.result },
+  }),
 };
 ```
 
-子图采用隔离栈（新 AgentInstance，frames = []）。父图只看调用结果，不偷看子图内部历史。
+三种边界的区别：
+
+| 边界 | AgentInstance | frames | 返回 |
+|------|--------------|--------|------|
+| `call`（默认） | 新建 | 隔离，`frames=[]` | 仅 status/result |
+| `compose` | 复用父 Instance | 共享父 frames，子图帧段强制归约 | fold 后截断 |
+| `delegate` | 新建 + 新 Session | 物理隔离 | 仅 GraphRunResult |
+
+父图只看调用结果（`NodeCompletion`），不偷看子图内部历史。
 
 ---
 
@@ -563,7 +591,48 @@ routing: {
 
 ### agent-choice
 
-`{ kind: "agent-choice" }` 让 agent 在 `__graph_complete__` 时通过 `result.chosen_edge_id` 声明选择哪条边。单边匹配时直接返回；多边匹配时读取 `chosen_edge_id`，未匹配到合法边则降级为 `priority-first`。
+`{ kind: "agent-choice" }` 让 agent 在 `__graph_complete__` 时通过 `result.chosen_edge_id` 声明选择哪条边。单边匹配时直接返回；多边匹配时读取 `chosen_edge_id`，未声明或声明了不存在的边时由 `validateCompletion` 驳回机制列出所有可选边让 agent 重试（`priority-first` 仅为防御性兜底，正常路径不会执行到）。
+
+---
+
+## 图调用协议（GraphRunRequest / GraphRunResult）
+
+所有图调用（命令、工具、父图节点）统一为 `GraphRunRequest → GraphRunResult` 协议，由入口类型和执行边界正交组合：
+
+```typescript
+type GraphInvocationKind = "command" | "tool" | "graph-node" | "api";
+type GraphInvocationBoundary = "compose" | "call" | "delegate";
+
+interface GraphRunRequest {
+  background: Record<string, unknown>;
+  invocationKind: GraphInvocationKind;
+  boundary: GraphInvocationBoundary;
+  signal?: AbortSignal;
+}
+
+interface GraphRunResult {
+  graphId: string;
+  status: "ok" | "failed" | "cancelled";
+  result: Record<string, unknown>;
+  steps: number;
+}
+```
+
+`GraphRunResult` 不包含 frames、ReAct 或 trace——业务返回与审计历史分离。业务 `failed/cancelled` 正常返回；基础设施异常（host 创建失败、工具缺失等）直接 throw。
+
+## Compaction 协同
+
+### root-only 图
+
+SDK 监听 `session_compact` / `session_before_compact`，推进 frame 投影基线。pi 原生 `compactionSummary` 与 recent messages 是压缩历史的权威替代：压缩前已有 frames 不再重复投影，新 frames 从压缩基线继续生长。SDK 不重发 NodeScope，不遮挡 summary。
+
+### 嵌套 call/compose 共享 session
+
+嵌套 `call/compose` 活跃期间，SDK 在 `session_before_compact` 返回 `{ cancel: true }` 取消压缩。因为 pi compaction 基于原始 session entries（而非 SDK 投影后的消息），可能把父上下文和子图内部 transcript 混合进无法拆分的摘要。
+
+如果取消策略因竞态异常失效，SDK fail-closed：终止当前共享调用，过滤已污染的 compactionSummary，不会重发 `call_start` 假装恢复。
+
+需要独立 compaction 生命周期的长任务应使用 `delegate` 边界（通过 `DelegateGraphInvoker` 在独立子会话中执行）。
 
 ---
 
@@ -598,7 +667,7 @@ validateCompletion(result) {
 
 需要把图作为“替代一个点”的代码组织手段时，显式使用 `boundary: "compose"`。它复用父 `AgentInstance`：child 可见父已完成 frames、共享 scratch，并在同一帧栈上运行；但 child 的 Graph.goal / mechanisms 只在其 CallFrame 内有效。child 新增的全部 frames 是受 Runtime 管理的临时段，退出时**一定**由 `fold`（或默认 fold）归约，父图只留下 graph node 经 Edge.migrate 写入的一帧，内部 ReAct 不会泄漏。
 
-`fold` 收到的是独立、冻结的帧段快照和 child `GraphRunResult`；默认 fold 仅返回 child 的 `status/result`。业务 `failed`/`cancelled` 同样执行 fold；节点、fold 或运行基础设施错误会回滚临时段并继续抛出。`delegate` 仍等待独立 AgentSession host 接线，目前会明确报 unsupported-boundary 错误，不会静默降级。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用仍在校验阶段报错。
+`fold` 收到的是独立、冻结的帧段快照和 child `GraphRunResult`；默认 fold 仅返回 child 的 `status/result`。业务 `failed`/`cancelled` 同样执行 fold；节点、fold 或运行基础设施错误会回滚临时段并继续抛出。`delegate` 通过 `DelegateGraphInvoker` 在独立子会话中执行。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用仍在校验阶段报错。
 
 ```typescript
 const childGraph: Graph = {
@@ -649,6 +718,20 @@ interface ContextFrame {
 ### 投影是什么
 
 每次 LLM 调用前，`context` 钩子将当前消息重组：已完成节点的原始 ReAct 被丢弃，由帧摘要（COMPLETED 段）顶替；当前节点的 live 消息保留。
+
+### 作用域匹配
+
+projection 不再依赖随机哨兵切分消息数组。Runtime 进入节点时追加一条语义化 `loop_graph_node_scope` 消息（`customType`），其 `content` 含 CURRENT 信息、`details` 含结构化 `NodeScopeDescriptor`（scopeId、graphRunId、instanceId 等）。projection 从尾部匹配当前 scopeId：
+
+```typescript
+const scopeIdx = findLastMatchingScope(messages, activeScope);
+if (scopeIdx >= 0) {
+  return [formatFrames(frames), ...messages.slice(scopeIdx)];
+}
+// fail closed: 输出 frames + 确定性 CURRENT
+```
+
+找不到 scope 时**不回退**完整原始 transcript，只输出帧摘要 + 从当前节点重建的 CURRENT（fail-closed），并记录结构化诊断。
 
 默认格式（向后兼容）：
 
@@ -913,6 +996,9 @@ export const reviewGraph: Graph = {
 
 ## 限制
 
-| 项                | 当前策略     |
-| ----------------- | ------------ |
-| schema / 泛型类型 | session 续跑 |
+| 项 | 当前策略 |
+| --- | -------- |
+| schema 辅助工具 | `NodeCompletion.result` 保持 `Record<string, unknown>` |
+| session 续跑 | 帧栈未持久化到磁盘 |
+| delegate host | 独立 Session 执行载体；需业务 extension 提供 `createDelegateHost` 工厂 |
+| 失败边处理 | `selectEdge` 返回 null 时优雅结束 |

@@ -111,7 +111,7 @@ export type ComposeFrameFolder = (input: ComposeFoldInput) => ComposeFoldResult;
  *
  * scratch 的契约：
  *   1. 只有 Mechanism.apply 可写 scratch。execute 可读，不应写——
- *      写了就是绕过声明式机制。开发者注释:声明式机制准备被替代,转向高扩展,高度可自定义
+ *      scratch 是代码侧横切通道，不应绕过 Edge/frame 做跨节点业务状态迁移
  *   2. scratch 不进 agent 上下文。projection 永不渲染它，
  *      它与 input 同侧（代码侧横切状态）。
  *   3. scratch 随 AgentInstance 生命周期。子图新实例 = 新 scratch，

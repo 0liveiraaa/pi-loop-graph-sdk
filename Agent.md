@@ -53,8 +53,8 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 
 ## 三、不可妥协的原则
 
-1. **编排不推理**。框架不调用 LLM 做摘要、评估或决策。帧栈的 summary 是纯字符串。路由裁决是代码函数。
-2. **无隐式全局状态**。所有跨节点状态必须显式存在于帧栈中。没有隐藏在闭包、模块变量或副作用中的数据传递。**mechanism 有两个显式、受约束的作用通道**：(a) `AgentInstance.scratch`——代码侧横切工作状态，只有 `Mechanism.apply` 可写，不进 agent 上下文；(b) `MechanismContext.appendContext()`——向 agent 消息流追加上下文（append-only，落在当前 NodeScope 之后，随 ReAct 折叠，天然隔离，遵循原则 6）。两者都**不得用作跨节点业务状态迁移通道**（那仍归帧栈/边）。这是"约束怎么做、开放做什么"（原则 5）的体现：框架固化通道形态，业务自由决定追加什么。
+1. **编排不推理**。框架不调用 LLM 做摘要、评估或决策。
+2. **无隐式全局状态**。所有跨节点状态必须显式存在于帧栈中。没有隐藏在闭包、模块变量或副作用中的跨节点数据传递
 3. **图即真相**。所有跨阶段状态迁移必须表达为图的边和路由。不允许节点内部隐藏跨节点迁移逻辑。
 4. **边界必须显式**。组合、调用、委托不得由入口类型或运行时偶然行为隐式决定；组合帧段必须关闭并折叠，调用与委托只通过参数和结果越界。
 5. **约束架构骨架，开放业务实现**。框架通过类型固化核心契约（Node、Edge、Router 的接口），但不阻拦合理的定制化需求。所有扩展点都是纯函数。
@@ -66,21 +66,21 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 
 根据你的任务，去对应的位置：
 
-| 你要做什么                                       | 去这里                                                    |
-| ------------------------------------------------ | --------------------------------------------------------- |
-| 理解全部术语定义                                 | `docs/设计/CONTEXT.md`                                  |
-| 理解设计理念、关键决策及其演进                   | `docs/设计/loop-graph-sdk-design.md`                    |
-| 使用 SDK 定义图、节点、边、路由                  | `docs/形态/developer-guide.md`                          |
-| 了解当前代码实现状态和已验证清单                 | `docs/形态/implementation-status.md`                    |
-| 了解入口消息格式（COMPLETED / CURRENT 段）       | `docs/设计/entry-message-format.md`                     |
-| 了解多 agent 通讯设计（远期，ROS2 风格三层架构） | `docs/设计/communication-design.md`                     |
-| 查看待实施的能力计划和验证计划                   | `docs/计划/`                                            |
-| 查看 SDK 使用反馈、已知问题和处理建议            | `docs/审查/loop-graph-sdk-feedback.md`                  |
-| 了解 defaultTools 与 skill 节点的行为差异        | `docs/审查/default-tools-skill-gap.md`                  |
-| 了解反馈根因修复计划和状态                       | `docs/计划/2026-07-09_feedback-rootcause-fix-plan.md`  |
+| 你要做什么                                       | 去这里                                                                                |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| 理解全部术语定义                                 | `docs/设计/CONTEXT.md`                                                              |
+| 理解设计理念、关键决策及其演进                   | `docs/设计/loop-graph-sdk-design.md`                                                |
+| 使用 SDK 定义图、节点、边、路由                  | `docs/形态/developer-guide.md`                                                      |
+| 了解当前代码实现状态和已验证清单                 | `docs/形态/implementation-status.md`                                                |
+| 了解入口消息格式（COMPLETED / CURRENT 段）       | `docs/设计/entry-message-format.md`                                                 |
+| 了解多 agent 通讯设计（远期，ROS2 风格三层架构） | `docs/设计/communication-design.md`                                                 |
+| 查看待实施的能力计划和验证计划                   | `docs/计划/`                                                                        |
+| 查看 SDK 使用反馈、已知问题和处理建议            | `docs/审查/loop-graph-sdk-feedback.md`                                              |
+| 了解 defaultTools 与 skill 节点的行为差异        | `docs/审查/default-tools-skill-gap.md`                                              |
+| 了解反馈根因修复计划和状态                       | `docs/计划/2026-07-09_feedback-rootcause-fix-plan.md`                               |
 | 阅读/修改源代码（从类型定义开始）                | `src/type.ts` → `src/tools-resolve.ts` → `src/runtime.ts` → `src/adapter/` |
-| 工具解析单一真相源（去重 + 排序）                | `src/tools-resolve.ts`                                   |
-| 追溯历史设计/已废弃计划                          | `docs/归档/`                                            |
+| 工具解析单一真相源（去重 + 排序）                | `src/tools-resolve.ts`                                                              |
+| 追溯历史设计/已废弃计划                          | `docs/归档/`                                                                        |
 
 ### 文档生命周期
 
