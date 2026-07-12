@@ -2,7 +2,7 @@
 
 > 2026-07-13 | 全阶段完成
 >
-> 重构计划 Phase 0-12 全部落地；Mechanism Runtime Phase 0-8 全部落地。277 项测试全通过（14 文件，含真实 LLM spike）。以下为当前实现形态的完整快照。
+> 重构计划 Phase 0-12、Mechanism Runtime Phase 0-8、模型上下文定制 Phase 0-6 全部落地。282 项测试全通过（14 文件，含真实 LLM spike）。以下为当前实现形态的完整快照。
 
 ## 重构完成状态（Phase 0-12）
 
@@ -30,6 +30,7 @@
 - **Phase 22（Mechanism Runtime Phase 6 — 工具决策与受控 Exec）**：`beforeToolCall` 支持 allow/deny/patch，按 mechanism 顺序串行组合；每次 patch 使用工具 schema 重验，无 schema 或非法 schema 时禁止 patch；`__graph_complete__` 固定 ABI 不允许一般 patch；`afterToolResult` 只能替换模型可见 content/isError，不开放 details/toolCallId；`ctx.exec.run()` 自动绑定 scope signal、timeout、cwd 根目录与 stdout/stderr 截断；`ctx.decisions.list()` 返回决策 trace。
 - **Phase 23（Mechanism Runtime Phase 7 — 异步 Completion Gate）**：outputSchema/request/node validator 支持 async；Mechanism `validateCompletion` 支持 allow/reject/fail-node/fail-graph；agent-choice 在 mechanism gate 后执行；reject 触发下一 turn；重复 completion 去重；并发 agent_end 串行；validator/gate timeout；scope signal 取消；只对 ok completion 验收；可信输出保存在 `completion.verifiedResult.checks`，AI result 无法覆盖。
 - **Phase 24（Mechanism Runtime Phase 8 — 结构化 Context）**：`ctx.context.append()` 支持 string 与 text/image blocks；`appendContext` 作为兼容别名保留；SDK 固定 `loop_graph_mechanism`、display、scope details 和非 triggerTurn options；内容复制冻结并剥离额外控制字段；投影在正常、scope missing 与 compaction recovery 中按 scopeId 过滤，防止跨节点泄漏。
+- **Phase 25（模型上下文定制 Phase 6 — 可观测性与外围扩展）**：`logger/traceSink` 可注入且观测错误与控制流隔离；graph start/end/error、node enter/exit、compaction 产生冻结 lifecycle event；文件输出默认关闭，`debug:true` 才启用 JSONL；graph invocation/global `formatToolResult` 可定制模型可见文本但 details 保留稳定结果；`toolResolver` 同时接入注册/存在性校验和运行时激活，SDK 始终恢复 read/`__graph_complete__` 安全边界。
 - 事件 handler 的 failurePolicy 接线已通过 Phase 19（Event Broker）完成，不再等待。
 - 验证：`npm test -- --run` 通过（14 文件、**265 项**，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
@@ -57,7 +58,8 @@ src/
 │   ├── projection.test.ts       # 投影测试（19 条）
 │   ├── pi-node-context.ts       # Promise 桥接：runAgent + after_provider_response 错误回流
 │   ├── complete-tool.ts         # __graph_complete__ 工具定义
-│   ├── debug-log.ts             # 调试日志（不再假设 frame 必含兼容字段）
+│   ├── debug-log.ts             # 旧内部调试 facade；文件输出需 PI_LOOP_GRAPH_DEBUG=1
+│   ├── observability.ts         # logger/traceSink、生命周期事件与显式 JSONL sink
 │   ├── compaction-frame.test.ts # Compaction 边界 / frame 行为 / fail-closed 测试
 │   ├── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent + 工具校验 + Mechanism 生命周期/state/事件/~35 条
 │   ├── characterization.test.ts # NodeScope 行为冻结基准（NodeScope visit/唯一性/时序/fail-closed）
@@ -520,7 +522,7 @@ DelegateGraphInvoker.invoke(graph, request)
 | demo graphs 门控                             | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
 | defaultTools 合并                            | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
 | 多实例`__graph_complete__` 幂等            | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
-| **resolveNodeTools 去重 + 排序**       | `tools-resolve.test.ts`（14 条）                                                                                                                                                            | ✅   |
+| **resolveNodeTools 去重 + 排序/自定义 resolver** | `tools-resolve.test.ts`（15 条）                                                                                                                                                     | ✅   |
 | **注册期节点内工具重复检测**           | `validate.test.ts` + `loop-graph-extension.test.ts`                                                                                                                                       | ✅   |
 | **首次执行未注册工具检测**             | `loop-graph-extension.test.ts`                                                                                                                                                              | ✅   |
 | **skill 追加不触发额外 turn**          | 代码审查 +`sendMessage`（无 triggerTurn）                                                                                                                                                   | ✅   |
@@ -551,6 +553,7 @@ DelegateGraphInvoker.invoke(graph, request)
 | **Phase 22（Mechanism Runtime Phase 6 — Tool/Exec）** | allow/deny/patch + schema 重验；受限结果替换；completion ABI 保护；受控 exec；决策 trace | ✅   |
 | **Phase 23（Mechanism Runtime Phase 7 — Completion Gate）** | async validator；allow/reject/fail-node/fail-graph；可信 verifiedResult；timeout/cancel/dedupe/并发保护；ok-only gate | ✅   |
 | **Phase 24（Mechanism Runtime Phase 8 — Structured Context）** | context.append text/image；固定控制字段；scope metadata；missing/compaction recovery 不跨 scope 泄漏 | ✅   |
+| **Phase 25（可观测性与外围扩展）** | logger/traceSink；graph/node/compaction lifecycle；debug opt-in JSONL；graph tool formatter；tool resolver | ✅   |
 
 ---
 

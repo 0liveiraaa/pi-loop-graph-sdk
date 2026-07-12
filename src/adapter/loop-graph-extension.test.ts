@@ -3,7 +3,7 @@
 // ============================================================
 
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLoopGraphExtension } from "./loop-graph-extension.js";
@@ -2957,7 +2957,6 @@ describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
     };
 
     const result = await loop.executeGraph(graph, { source: "command", args: "" });
-
     expect(result.status).toBe("ok");
     expect(order).toEqual([
       "before:1", "turn-start:1", "tool-start:1", "tool-result:1", "turn-end:1",
@@ -3186,7 +3185,6 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
     };
 
     const result = await loop.executeGraph(graph, { source: "command", args: "" });
-
     expect(result.status).toBe("ok");
     expect(turn).toBe(2);
     expect(maxActiveValidations).toBe(1);
@@ -3303,5 +3301,88 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
     expect(call[1]).toEqual({});
     expect(call[0].content[0]).not.toHaveProperty("customType");
     expect(Object.isFrozen(call[0].content)).toBe(true);
+  });
+});
+
+describe("P2 可观测性与外围扩展", () => {
+  it("traceSink/logger 收到 graph、node、compaction 生命周期，观测异常不影响执行", async () => {
+    const pi = fakePi();
+    const events: any[] = [];
+    const logger = { debug: vi.fn(), error: vi.fn() };
+    const loop = createLoopGraphExtension(pi, {
+      traceSink(event) {
+        events.push(event);
+        if (event.type === "node_enter") throw new Error("sink unavailable");
+      },
+      logger,
+    });
+    const graph = minimalGraph("observable_lifecycle");
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "observe",
+      async execute() {
+        pi.emit("session_compact", { reason: "manual", willRetry: false });
+        return { nodeId: "start", status: "ok", result: {} };
+      },
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+    const broken = minimalGraph("observable_error");
+    broken.nodes.start = {
+      kind: "code", id: "start", subGoal: "error",
+      async execute() { throw new Error("observable boom"); },
+    };
+    const failed = await loop.executeGraph(broken, { source: "command", args: "" });
+
+    expect(result.status).toBe("ok");
+    expect(failed.status).toBe("failed");
+    expect(events.map((event) => event.type)).toEqual(expect.arrayContaining([
+      "graph_start", "node_enter", "compaction", "node_exit", "graph_end",
+      "graph_error",
+    ]));
+    expect(events.every((event) => Object.isFrozen(event))).toBe(true);
+    expect(logger.debug).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalled();
+  });
+
+  it("debug 文件输出默认关闭，仅 debug:true 时写入指定 JSONL", async () => {
+    const pi = fakePi();
+    const directory = mkdtempSync(join(tmpdir(), "loop-graph-trace-"));
+    const disabledPath = join(directory, "disabled.jsonl");
+    const enabledPath = join(directory, "enabled.jsonl");
+    try {
+      await createLoopGraphExtension(pi, { debugLogPath: disabledPath })
+        .executeGraph(minimalGraph("debug_off"), { source: "command", args: "" });
+      expect(existsSync(disabledPath)).toBe(false);
+
+      await createLoopGraphExtension(fakePi(), { debug: true, debugLogPath: enabledPath })
+        .executeGraph(minimalGraph("debug_on"), { source: "command", args: "" });
+      expect(readFileSync(enabledPath, "utf8")).toContain('"type":"graph_start"');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("toolResolver 同时作用于节点激活与工具存在性校验", async () => {
+    const pi = fakePi();
+    pi.getAllTools.mockReturnValue([
+      { name: "read" }, { name: "__graph_complete__" }, { name: "resolved_only" },
+    ]);
+    const resolver = vi.fn(() => ["resolved_only"]);
+    const loop = createLoopGraphExtension(pi, { toolResolver: resolver });
+    const graph = minimalGraph("custom_tool_resolver");
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "resolve", tools: ["unregistered_raw"],
+      async execute() { return { nodeId: "start", status: "ok", result: {} }; },
+    };
+
+    await expect(loop.executeGraph(graph, { source: "command", args: "" }))
+      .resolves.toMatchObject({ status: "ok" });
+    expect(pi.setActiveTools).toHaveBeenCalledWith([
+      "read", "resolved_only", "__graph_complete__",
+    ]);
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      graphId: graph.id,
+      nodeId: "start",
+    }));
   });
 });

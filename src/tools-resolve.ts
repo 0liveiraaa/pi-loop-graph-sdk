@@ -6,7 +6,23 @@
 //  debug 日志也调它。
 // ============================================================
 
-const FRAMEWORK_TOOLS = ["read", "__graph_complete__"];
+export const FRAMEWORK_TOOLS = ["read", "__graph_complete__"] as const;
+
+export interface ToolResolverInput {
+  readonly defaultTools: readonly string[];
+  readonly nodeTools: readonly string[];
+  readonly frameworkTools: typeof FRAMEWORK_TOOLS;
+  readonly graphId?: string;
+  readonly nodeId?: string;
+}
+
+/** 返回候选工具；SDK 随后统一去重并恢复 framework tools 的首尾不变量。 */
+export type ToolResolver = (input: ToolResolverInput) => readonly string[];
+
+export const defaultToolResolver: ToolResolver = ({ defaultTools, nodeTools }) => [
+  ...defaultTools,
+  ...nodeTools,
+];
 
 /**
  * 计算节点的最终工具列表。
@@ -17,10 +33,21 @@ const FRAMEWORK_TOOLS = ["read", "__graph_complete__"];
  *   __graph_complete__ 始终在最后。
  */
 export function resolveNodeTools(
-  defaultTools: string[],
-  nodeTools: string[],
+  defaultTools: readonly string[],
+  nodeTools: readonly string[],
+  resolver: ToolResolver = defaultToolResolver,
+  identity: Pick<ToolResolverInput, "graphId" | "nodeId"> = {},
 ): string[] {
-  const merged = [...FRAMEWORK_TOOLS, ...defaultTools, ...nodeTools];
+  const resolved = resolver(Object.freeze({
+    defaultTools: Object.freeze([...defaultTools]),
+    nodeTools: Object.freeze([...nodeTools]),
+    frameworkTools: FRAMEWORK_TOOLS,
+    ...identity,
+  }));
+  if (!Array.isArray(resolved) || resolved.some((name) => typeof name !== "string" || name.length === 0)) {
+    throw new TypeError("toolResolver 必须返回非空工具名数组");
+  }
+  const merged = ["read", ...resolved, "__graph_complete__"];
   const seen = new Set<string>();
   const result: string[] = [];
   for (const t of merged) {

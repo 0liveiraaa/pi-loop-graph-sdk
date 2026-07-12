@@ -217,6 +217,7 @@ export function validateGraphTools(
   graph: Graph,
   defaultTools: string[],
   registeredNames?: Set<string>,
+  resolveTools?: (nodeId: string, nodeTools: readonly string[]) => readonly string[],
 ): GraphValidationIssue[] {
   const issues: GraphValidationIssue[] = [];
 
@@ -240,12 +241,9 @@ export function validateGraphTools(
 
     // 工具存在性检查
     if (registeredNames) {
-      const allTools = new Set([
-        "read",
-        "__graph_complete__",
-        ...defaultTools,
-        ...nodeTools,
-      ]);
+      const allTools = new Set(resolveTools
+        ? resolveTools(nodeId, nodeTools)
+        : ["read", "__graph_complete__", ...defaultTools, ...nodeTools]);
       for (const t of allTools) {
         if (t === "read" || t === "__graph_complete__") continue;
         if (!registeredNames.has(t)) {

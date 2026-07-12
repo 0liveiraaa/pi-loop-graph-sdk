@@ -27,6 +27,8 @@ export function safePreview(value: unknown, maxLength = 500): string {
 }
 
 function log(entry: Record<string, unknown>): void {
+  // 文件调试是显式 opt-in；正常 SDK 使用不产生工作区文件。
+  if (process.env.PI_LOOP_GRAPH_DEBUG !== "1") return;
   const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
   if (!fileOpened) {
     fs.writeFileSync(LOG_PATH, "", "utf-8");

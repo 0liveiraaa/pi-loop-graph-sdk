@@ -14,6 +14,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateGraphTools } from "./validate.js";
 import type { Entry, Graph, GraphRunResult } from "./type.js";
 import type { GraphInvoker } from "./adapter/graph-execution-host.js";
+import { resolveNodeTools, type ToolResolver } from "./tools-resolve.js";
+
+export type GraphToolResultFormatter = (result: Readonly<GraphRunResult>) => string;
 
 export type ExecuteGraph = (
   pi: ExtensionAPI,
@@ -24,6 +27,10 @@ export type ExecuteGraph = (
 export interface GraphRegistryOptions {
   /** graph tool 返回给模型的最大 UTF-8 字节数。默认 16 KiB。 */
   toolResultMaxBytes?: number;
+  /** 全局 graph tool 文本 formatter；GraphInvocation.formatToolResult 优先。 */
+  formatToolResult?: GraphToolResultFormatter;
+  /** 注册校验与运行时共用的工具解析策略。 */
+  toolResolver?: ToolResolver;
 }
 
 /**
@@ -50,7 +57,17 @@ export class GraphRegistry {
     }
 
     // 注册期校验：节点内工具重复
-    const toolIssues = validateGraphTools(graph, defaultTools);
+    const toolIssues = validateGraphTools(
+      graph,
+      defaultTools,
+      undefined,
+      (nodeId, nodeTools) => resolveNodeTools(
+        defaultTools,
+        nodeTools,
+        this.options.toolResolver,
+        { graphId: graph.id, nodeId },
+      ),
+    );
     if (toolIssues.length > 0) {
       throw new Error(
         `图 "${graph.id}" 工具校验失败:\n` +
@@ -87,6 +104,7 @@ export class GraphRegistry {
     // 注册 pi 工具（供 LLM tool-call）
     const invoker = this.invoker;
     const maxBytes = this.options.toolResultMaxBytes;
+    const formatter = inv.formatToolResult ?? this.options.formatToolResult;
     this.pi.registerTool({
       name: inv.name,
       label: inv.name,
@@ -100,7 +118,12 @@ export class GraphRegistry {
           signal: signal ?? ctx?.signal,
         }, ctx);
         return {
-          content: [{ type: "text", text: encodeGraphToolResult(result, maxBytes) }],
+          content: [{
+            type: "text",
+            text: formatter
+              ? limitGraphToolResultText(formatter(Object.freeze({ ...result })), maxBytes)
+              : encodeGraphToolResult(result, maxBytes),
+          }],
           details: result,
         };
       },
@@ -134,6 +157,31 @@ export class GraphRegistry {
   has(graphId: string): boolean {
     return this.graphs.has(graphId);
   }
+}
+
+export function limitGraphToolResultText(
+  text: string,
+  maxBytes = 16 * 1024,
+): string {
+  if (typeof text !== "string") throw new TypeError("formatToolResult 必须返回 string");
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  const suffix = "…";
+  const suffixBytes = Buffer.byteLength(suffix, "utf8");
+  if (maxBytes <= suffixBytes) return "";
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = text.slice(0, mid);
+    if (Buffer.byteLength(candidate, "utf8") + suffixBytes <= maxBytes) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return `${best}…`;
 }
 
 /** 对模型可见的结果始终是有效 JSON；过大时只保留有界 preview。 */

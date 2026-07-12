@@ -247,6 +247,8 @@ interface LoopGraphLimits {
 
 ### Phase 6：可观测性与外围扩展（P2）
 
+状态：已完成（2026-07-13）。
+
 - 注入 `logger`/`traceSink`，默认关闭文件输出或仅在 debug 模式开启；
 - 生命周期事件：graph start/end/error、node enter/exit、compaction；
 - graph tool `formatToolResult`；

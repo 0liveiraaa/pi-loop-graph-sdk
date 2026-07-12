@@ -123,4 +123,29 @@ describe("GraphRegistry", () => {
       undefined,
     );
   });
+
+  it("graph tool 支持 formatToolResult，且 invocation formatter 优先于全局配置", async () => {
+    const pi = fakePi();
+    const graph = minimalGraph("formatted_tool");
+    graph.invocation!.formatToolResult = (result) => `LOCAL:${result.status}:${result.steps}`;
+    const graphResult = {
+      graphId: graph.id,
+      status: "ok" as const,
+      result: { hidden: "details-only" },
+      steps: 3,
+    };
+    const registry = new GraphRegistry(pi, {
+      invoke: vi.fn().mockResolvedValue(graphResult),
+    }, {
+      formatToolResult: () => "GLOBAL",
+      toolResultMaxBytes: 64,
+    });
+
+    registry.registerGraph(graph);
+    const tool = pi.registerTool.mock.calls[0][0];
+    const output = await tool.execute("call", {});
+
+    expect(output.content).toEqual([{ type: "text", text: "LOCAL:ok:3" }]);
+    expect(output.details).toBe(graphResult);
+  });
 });

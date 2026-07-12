@@ -38,11 +38,20 @@ export type {
 } from "./adapter/skill-content.js";
 
 // ── 图注册表（新 API）──
-export { GraphRegistry } from "./registry.js";
-export type { ExecuteGraph } from "./registry.js";
+export { GraphRegistry, encodeGraphToolResult, limitGraphToolResultText } from "./registry.js";
+export type { ExecuteGraph, GraphToolResultFormatter } from "./registry.js";
 
 // ── 工具解析 ──
-export { resolveNodeTools } from "./tools-resolve.js";
+export { resolveNodeTools, defaultToolResolver, FRAMEWORK_TOOLS } from "./tools-resolve.js";
+export type { ToolResolver, ToolResolverInput } from "./tools-resolve.js";
+
+// ── 可观测性 ──
+export { createJsonlTraceSink } from "./adapter/observability.js";
+export type {
+  LoopGraphLifecycleEvent,
+  LoopGraphLogger,
+  LoopGraphTraceSink,
+} from "./adapter/observability.js";
 
 // ── execute 工厂 ──
 export { createAgentExecute } from "./agent-execute.js";

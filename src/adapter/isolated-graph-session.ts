@@ -20,6 +20,8 @@ import {
   type ContextRendererRegistry,
 } from "./loop-graph-extension.js";
 import type { ModelMessageFormatter } from "./model-messages.js";
+import type { ToolResolver } from "../tools-resolve.js";
+import type { LoopGraphLogger, LoopGraphTraceSink } from "./observability.js";
 import type {
   SkillContentProvider,
   SkillContentRenderer,
@@ -50,6 +52,11 @@ export interface IsolatedGraphSessionFactoryOptions {
   skillRenderer?: SkillContentRenderer;
   skillFailure?: SkillFailurePolicies;
   contextRenderers?: ContextRendererRegistry;
+  toolResolver?: ToolResolver;
+  traceSink?: LoopGraphTraceSink;
+  logger?: LoopGraphLogger;
+  debug?: boolean;
+  debugLogPath?: string;
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   /** 省略时遵循 pi 默认 compaction；可由 host 显式覆盖。 */
   compaction?: CompactionSettings;
@@ -101,6 +108,11 @@ export function createIsolatedGraphSessionFactory(
             skillRenderer: options.skillRenderer,
             skillFailure: options.skillFailure,
             contextRenderers: options.contextRenderers,
+            toolResolver: options.toolResolver,
+            traceSink: options.traceSink,
+            logger: options.logger,
+            debug: options.debug,
+            debugLogPath: options.debugLogPath,
           });
         },
       ],

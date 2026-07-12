@@ -2,18 +2,18 @@
 
 ## 概要
 
-Loop Graph SDK 是一个基于 pi-extension 的 agent 编排框架。
+Loop Graph SDK 是一个基于 pi 的 agent 编排框架。
 
-**核心模型**：一个回路图（Graph）由节点（Node）、边（Edge）和路由策略（Router）组成。Agent 实例在图中流动——进入节点工作、结束后通过边迁移到下一节点、重复直到终点（END）。
+**核心模型**：一个图（Graph）由节点（Node）、边（Edge）和路由策略（Router）组成。Agent 在图中流动——进入一个节点执行任务、完成后通过边迁移到下一个节点、重复直到终点（END）。
 
 **关键特性**：
 
-- **帧栈折叠**：已完成节点的 ReAct 过程被折叠为摘要帧，后续节点只看到摘要，不看到原始展开过程
-- **三种图调用边界**：`call`（创建新 AgentInstance，帧栈隔离）、`compose`（复用父 AgentInstance，帧段强制归约）、`delegate`（独立 AgentSession，物理隔离，通过 `DelegateGraphInvoker` 执行）
-- **不干预 ReAct**：框架只编排"什么时候跑什么节点"，不干涉节点内部的 LLM 推理循环
+- **历史自动摘要**：已完成节点内部的 LLM 推理过程被自动压缩为简短摘要，后续节点只看到结果摘要，不看到原始展开过程
+- **三种子图调用方式**：`call`（创建独立工作区，历史隔离）、`compose`（共享当前工作区，结束后压缩为单条记录）、`delegate`（创建完全独立的会话，物理隔离）
+- **不干预 LLM 推理**：框架只编排"什么时候执行什么节点"，不干涉节点内部的 LLM 推理循环
 - **全员函数扩展**：所有定制点都是函数（`guard`、`migrate`、`execute`、`validateCompletion`、`custom router`），无黑盒限制
-- **框架不引入全局隐式状态**：所有跨节点数据流经帧栈显式传递，不依赖闭包或模块变量
-- **框架不修改 system prompt**：所有上下文操作在消息流追加侧进行，不破坏 pi 原生 prompt 管理
+- **无隐式全局状态**：所有跨节点数据通过上下文记录显式传递，不依赖闭包或模块变量
+- **不修改 system prompt**：所有附加信息以追加消息的方式进入对话流，不影响 pi 原生的提示管理
 
 ---
 
@@ -33,9 +33,9 @@ return {
 };
 ```
 
-`nodeId/status/summary/result` 仍可用于旧图，但不再是必填字段。END 边推荐使用 `output` 声明对外返回，不要让模型记忆结构承担函数返回协议。
+`nodeId/status/summary/result` 仍可用于旧图，但不再是必填字段。END 边推荐使用 `output` 声明对外返回，不要让工作记忆兼做函数返回通道。
 
-发生 pi compaction 后，原生 summary 和 recent messages 会继续进入当前节点上下文；压缩前已有 frames 不再重复投影，新 frames 从压缩基线继续生长。开发者无需在 frame 中记录 compaction 或 scope 元数据。
+当 LLM 上下文因长度限制被 pi 自动压缩时，已压缩的旧帧不再重复出现在后续节点的上下文中，新帧从压缩后的位置继续累积。开发者无需在帧中记录任何压缩元数据。
 
 ---
 
@@ -97,7 +97,7 @@ interface LoopGraphExtensionOptions {
   skillBasePath?: string;
   /** 自定义帧折叠后注入到 agent 上下文的格式。
    *  接收 ContextFrame[]，返回完整文本或 null（跳过 COMPLETED 段）。
-   *  默认保持 JSON 格式。参见 §帧栈与投影。 */
+   *  默认保持 JSON 格式。参见 §历史与上下文。 */
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   /** 自定义节点进入时 SDK 给模型追加的 CURRENT/skill/完成说明。 */
   contextRenderer?: NodeContextRenderer;
@@ -129,7 +129,7 @@ interface LoopGraphExtensionOptions {
 
 ### 自定义当前节点上下文
 
-`contextRenderer` 控制 SDK 在节点进入时主动追加给模型的内容。它不会拿到完整对话，也不能替换 NodeScope、子图清洗或 compaction 逻辑：
+`contextRenderer` 控制节点进入时 SDK 主动追加给 LLM 的内容。它不访问完整对话历史，也不影响子图消息清洗或上下文压缩的内部逻辑：
 
 ```typescript
 const loop = createLoopGraphExtension(pi, {
@@ -144,17 +144,17 @@ const loop = createLoopGraphExtension(pi, {
 });
 ```
 
-这样模型不再默认看到 nodeId、工具名、skill 名、edge target/priority 或 `=== CURRENT ===` 标签。renderer 可以读取：
+这样 LLM 不再默认看到 nodeId、工具名、skill 名、边信息或 `=== CURRENT ===` 标签。renderer 可以读取：
 
-- 当前 graph、node 和 NodeInput；
-- node-enter 时的可见 frame 快照；
-- agent-choice 可选边；
-- 已加载的单个 skill 正文；
-- 固定 completion 协议名称和状态。
+- 当前图、当前节点和一次性入参；
+- 节点进入时的历史摘要快照；
+- agent-choice 的可选边；
+- 已加载的 skill 正文；
+- 固定的完成协议名称和状态。
 
-renderer 是同步函数，每次节点进入只执行一次。输入中的 graph/node/input/frames 是 SDK 创建的只读快照，不是 Runtime 的真实可变对象；renderer 无法通过修改输入改变图或帧栈。返回值分为 `anchor` 和可选 `additional`，SDK 会复制并冻结文本块；scope 丢失或 compaction 恢复时复用同一结果，不重新调用 renderer。返回 `null` 或 `anchor: null` 表示不展示锚点正文，但 SDK 仍保留正文为空的内部 NodeScope 锚点并继续 fail-closed。
+renderer 是同步函数，每个节点每次进入只调用一次。传入的 graph/node/input/history 是只读快照——修改它们不影响实际运行。返回值分为主要内容和附加内容，SDK 会复制并冻结文本。当 LLM 上下文被压缩后重新展开时，复用的是第一次生成的结果，不会重新调用 renderer。返回 `null` 或 `anchor: null` 表示不展示节点指引正文，但 SDK 内部仍需保留必要的会话标记以正确恢复上下文。
 
-历史 frame 的主展示仍使用 `frameFormatter`。这是因为同一节点运行期间 compaction 可能改变哪些 frames 还应显示；把完整 frames 写死在冻结 renderer 结果中会重复展示已压缩历史。需要完全自定义时同时配置：
+历史摘要仍由 `frameFormatter` 控制。如果同时自定义两者：
 
 ```typescript
 createLoopGraphExtension(pi, {
@@ -163,7 +163,7 @@ createLoopGraphExtension(pi, {
 });
 ```
 
-未提供 `contextRenderer` 时，`defaultNodeContextRenderer` 保持原有 CURRENT 和 `[skill: name]` 格式。
+未提供 `contextRenderer` 时，使用默认格式：`=== CURRENT ===` + `[skill: 名称]`。
 
 ### Graph、Node 与调用级覆盖
 
@@ -205,11 +205,11 @@ await loop.executeGraph(
 > SDK 兼容 renderer
 ```
 
-调用级 renderer 会沿同一 Session 的 `call/compose` 子图传播。`delegate` 创建独立 AgentSession，不隐式继承调用函数；需要在 `createIsolatedGraphSessionFactory()` / delegate host factory 的配置中声明其 renderer registry。任何 renderer 抛错都会让图 fail-closed，不会回退默认 CURRENT 或原始 transcript。
+调用级 renderer 沿同一会话的 `call`/`compose` 子图传播。`delegate` 创建独立 AgentSession，不隐式继承调用配置；需要在创建隔离 session 的工厂中声明其 renderer。任何 renderer 抛错都会让图终止，不回退到默认格式或原始对话内容。
 
-所有 limit 必须是有限正整数，非法值会在 `createLoopGraphExtension()` 时直接报错。默认值保持历史行为。`rootMaxSteps` 只控制公开低层 `executeGraph()` 的顶层循环；`childMaxSteps` 控制同一 Runtime 内的 `call/compose` 子图。delegate 图在独立 host 中运行，使用该 host 创建时传入的 limits。
+所有限制值必须是有限正整数，非法值会在 `createLoopGraphExtension()` 时报错。`rootMaxSteps` 控制顶层图的最大步骤数；`childMaxSteps` 控制 `call`/`compose` 子图的最大步骤数。delegate 图在独立宿主中运行，使用该宿主创建时传入的限制值。
 
-同一个 `LoopGraphExtension` instance 不支持并发调用低层 `executeGraph()`。第二个 root run 会在修改活动 Runtime 前 fail-fast；需要并发时应为每个任务创建独立 AgentSession/delegate host。仅在同一个 pi Session 上再创建一个 extension instance 不构成事件隔离，不能作为并发方案。图内部的嵌套 `call/compose` 使用同一个 Runtime callStack，不属于并发 root run。
+同一个 `LoopGraphExtension` 实例不支持同时多次调用 `executeGraph()`。第二个调用会立即报错；需要并发时应为每个任务创建独立的 delegate host。同一个 pi Session 上创建另一个 extension 实例不代表事件隔离，不能作为并发方案。图内部的嵌套 `call`/`compose` 不属于并发。
 
 `defaultTools` 在注册期通过 `resolveNodeTools` 与每个节点的 `tools` 合并并去重：
 
@@ -218,6 +218,18 @@ await loop.executeGraph(
 ```
 
 这样业务包不需要在每个节点重复声明全局可用工具。
+
+需要按 graph/node、运行环境或权限策略决定候选工具时，可配置 `toolResolver`：
+
+```typescript
+const loop = createLoopGraphExtension(pi, {
+  toolResolver({ defaultTools, nodeTools, graphId, nodeId }) {
+    return policy.resolve({ defaultTools, nodeTools, graphId, nodeId });
+  },
+});
+```
+
+resolver 的返回会统一去重；`read` 与 `__graph_complete__` 仍由 SDK 强制放在首尾。相同 resolver 同时用于首次工具存在性校验和实际 `setActiveTools()`，避免“校验一套、运行另一套”。
 
 ---
 
@@ -421,57 +433,55 @@ interface Mechanism<TState = Record<string, unknown>> {
 执行顺序：
 
 ```text
-enterNode
-→ AgentInstance.mechanisms
-→ 当前 CallFrame.localMechanisms
-→ Node.mechanisms
-→ execute
-  → beforeAgentRun
-  → [onTurnStart → beforeToolCall → tool → afterToolResult/onToolResult → onTurnEnd] × N
-  → validateCompletion × N（reject 时继续下一 turn）
-→ onNodeExit（Router/Edge 之前）
-→ scope abort + cleanup
+节点进入
+→ 全局机制（Graph.mechanisms）
+→ 子图局部机制（仅 compose 时生效，退出后撤销）
+→ 节点局部机制（Node.mechanisms）
+→ 节点主体执行
+  → beforeAgentRun（每次 runAgent 前）
+  → [onTurnStart → beforeToolCall → 工具执行 → afterToolResult/onToolResult → onTurnEnd] × N
+  → validateCompletion × N（驳回时继续下一轮 LLM 推理）
+→ onNodeExit（边选择之前）
+→ 节点会话关闭（abort 信号 + 逆序清理 + 取消事件订阅）
 ```
 
 规则：
 
-- 全局机制写在 `Graph.mechanisms`，跨节点持续生效。
-- compose 子图的 Graph mechanisms 作为当前 CallFrame 的局部机制，退出子图后撤销。
-- 局部机制写在 `Node.mechanisms`，只在当前节点叠加。
-- `onNodeEnter` 串行 await；抛错记日志后继续，不中止节点。
-- 每次 `runAgent()` 分配独立 `agentRunId`；同一节点连续调用时，正式 turn/tool Hook 不会把上一轮事件归到下一轮。
-- `beforeToolCall` 的 patch 按机制顺序组合并重新执行工具 schema 校验；没有可靠 schema 时拒绝 patch。`__graph_complete__` 不允许走一般 patch。
-- `afterToolResult` 只能替换模型可见 `content/isError`，不能改 `details/toolCallId/toolName`。
-- `validateCompletion` 只在 AI 上报 `status: "ok"` 时执行；可 allow、reject、fail-node 或 fail-graph。可信结果位于顶层 `completion.verifiedResult.checks`，不会与 AI 的 `completion.result` 合并。
-- 完整顺序为 outputSchema → runAgent validator → Node validator → Mechanism gate → agent-choice。
-- `onNodeExit` 在节点产出 completion 后、Router/Edge 处理前串行执行，收到无别名只读快照。
-- node visit 任意阶段抛错时调用 `onNodeError`；它只观察原始错误，不能替换主错误。
-- 没有声明任何生命周期 Hook 的 mechanism 被跳过。
-- cleanup 逆注册顺序执行；一个 cleanup 抛错不会阻止其他 cleanup，也不会覆盖节点原始错误。
+- 全局机制写在 `Graph.mechanisms`，所有节点都生效。
+- compose 子图的 `Graph.mechanisms` 只在该子图执行期间生效，退出后自动撤销。
+- 局部机制写在 `Node.mechanisms`，只叠加到当前节点。
+- `onNodeEnter` 串行执行；抛错记录日志后继续，不中止节点。
+- 每次 `runAgent()` 分配独立 ID；同一节点连续调用时，事件不会串到上一轮。
+- `beforeToolCall` 的 patch 按机制顺序组合并重新校验工具参数；无可靠 schema 时拒绝 patch。`__graph_complete__` 不走一般 patch。
+- `afterToolResult` 只能替换 LLM 可见的 `content/isError`，不能改元数据。
+- `validateCompletion` 只在状态为 `ok` 时执行；可 allow、reject、fail-node 或 fail-graph。
+- `onNodeExit` 在节点完成后、边选择前串行执行，收到只读快照。
+- 节点会话任意阶段抛错时调用 `onNodeError`；它只观察原始错误，不能替换。
+- 未声明任何 Hook 的 mechanism 被跳过。
+- cleanup 按注册逆序执行；一个 cleanup 抛错不阻止其他 cleanup，也不覆盖原始错误。
 
 失败策略：
 
 | `failurePolicy` | Hook 抛错后的行为 |
 | --- | --- |
-| `continue` | 记日志并继续，默认值，保持兼容 |
-| `fail-node` | Runtime 生成可信 failed completion，跳过/终止节点主体并交给 Router |
-| `fail-graph` | 终止当前图调用，但仍执行 `onNodeError` 和全部 cleanup |
+| `continue` | 记录日志并继续（默认值） |
+| `fail-node` | 框架生成可信的失败完成信号，跳过节点主体并交给路由 |
+| `fail-graph` | 终止当前图，但仍执行 `onNodeError` 和全部 cleanup |
 
-同一阶段多个机制发生控制性失败时，全部 Hook 仍按顺序执行，最终优先级为 `fail-graph > fail-node > continue`。Runtime 使用自己的当前 nodeId 生成失败 completion，不接受 mechanism 伪造节点身份。`onNodeError` 自身抛错只作为次级诊断，已有主错误始终保留。
+同一阶段多个机制发生控制性失败时，全部 Hook 仍按顺序执行，最终优先级为 `fail-graph > fail-node > continue`。`onNodeError` 自身抛错只作为次级诊断。
 
 两层能力面：
 
-| 通道 | 作用 | Runtime 保证 |
+| 通道 | 作用 | 框架保证 |
 | --- | --- | --- |
-| `ctx.scope` | signal、active 检查、cleanup | 与当前 node visit 同生共死 |
-| `ctx.events` | scoped 事件订阅（onToolResult/onTurnStart/onTurnEnd） | 底层单一 pi listener；scope 关闭时自动 dispose；handler 失败进入 failurePolicy |
-| `ctx.state` | 类型化私有 state，由 `createState()` 懒初始化 | 双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离；call 创建新 state，compose 复用；不入模型上下文 |
-| `ctx.exec.run()` | 执行节点级外部命令 | 自动绑定 scope signal；限制 timeout、cwd 根目录和 stdout/stderr 字节数 |
-| `ctx.decisions.list()` | 读取工具决策记录 | 返回当前 scope 内复制的只读 trace |
-| `ctx.appendContext(content)` | 向当前 NodeScope 追加上下文 | 失效后返回 `false`，不会污染后继节点 |
-| `ctx.context.append(content)` | 追加 string 或 text/image blocks | 固定消息类型、display、scope details 与非 triggerTurn 选项；内容复制冻结 |
-| `ctx.instance.scratch` | 代码侧共享横切状态 | 随 AgentInstance 生命周期；当前仍是共享命名空间 |
-| `ctx.pi` | 完整 pi ExtensionAPI | 仅保证原生 API 可用；副作用不自动获得 scope/cleanup 保证 |
+| `ctx.scope` | 取消信号、活跃检查、清理注册 | 与当前节点会话同生共死 |
+| `ctx.events` | 事件订阅（onToolResult/onTurnStart/onTurnEnd） | 每类事件只注册一次底层监听器；节点会话关闭时自动取消订阅；handler 失败进入 failurePolicy |
+| `ctx.state` | 类型化私有状态，由 `createState()` 懒初始化 | 按工作区 + 机制对象身份隔离；call 创建新状态，compose 复用；不入 LLM 上下文 |
+| `ctx.exec.run()` | 执行外部命令 | 自动绑定 scope signal；限制 timeout 和输出大小 |
+| `ctx.decisions.list()` | 读取工具决策记录 | 返回当前会话内的只读 trace |
+| `ctx.context.append(content)` | 向 LLM 追加文本或图片内容 | 固定消息类型；节点会话失效后返回 false，不会污染后续节点 |
+| `ctx.instance.scratch` | 共享横切状态（兼容） | 随工作区生命周期 |
+| `ctx.pi` | 完整 pi 能力 | 仅保证 API 可用；副作用不自动获得清理保证 |
 
 安全生命周期示例：
 
@@ -574,7 +584,7 @@ ctx.context.append([
 ]);
 ```
 
-Mechanism 只能提供内容。消息的 `customType/details/display/triggerTurn` 由 SDK 固定，无法借此伪造 NodeScope 或触发额外 turn。`ctx.pi` 仍完整保留，使用裸 pi 时由机制作者自行承担相应生命周期和冲突责任。
+Mechanism 只能提供内容。消息的 `customType/details/display/triggerTurn` 由 SDK 固定，无法借此伪造节点会话标记或触发额外 LLM 轮次。`ctx.pi` 仍完整保留，使用裸 pi 时由机制作者自行承担相应生命周期和冲突责任。
 
 `ctx.pi` 继续提供完全定制能力，例如直接注册原生事件：
 
@@ -749,15 +759,15 @@ const subCompose: Node = {
 
 ### 机制
 
-`node.skill` 是一个单值引用。节点进入时 SDK 先异步调用 `skillProvider` 获取正文，再调用同步 `skillRenderer` 生成模型消息，最后与 NodeScope 一起追加到消息流。严格作用域投影将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。NodeScope 缺失时投影 fail closed，不会回退外层完整 transcript。
+`node.skill` 是一个单值引用。节点进入时 SDK 先异步调用 `skillProvider` 获取正文，再调用同步 `skillRenderer` 生成 LLM 可见的消息，最后与节点指引一起追加到对话流。节点完成后该消息不再进入后续节点上下文。
 
-底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
+底层使用 `sendMessage({ display: false })`（不触发额外 LLM 轮次），遵守"追加不注入"原则。
 
-图节点运行期间如果 pi 发生自动、手动或 overflow compaction，SDK 将 pi 原生 `compactionSummary` 与 recent messages 视为压缩历史的权威替代，并推进 frame 投影基线。若当前 NodeScope 已被压缩，投影会在 summary 后恢复 CURRENT；不会重发 checkpoint 后再遮挡压缩结果。
+如果在节点运行期间发生上下文压缩，SDK 将 pi 的压缩摘要和最近消息视为压缩历史的权威替代，从压缩位置继续累积新帧。不会重新发送节点指引来遮挡压缩结果。
 
-这一规则只适用于 root-only 图。共享 Session 的嵌套 `call/compose` 活跃时，SDK 会在 `session_before_compact` 取消本次压缩：pi 的 compaction summary 基于原始 session entries，可能同时包含父上下文和子图内部 transcript，事后补发调用锚点无法安全拆开。需要独立 compaction 生命周期或可能运行很久的子任务，应使用 `delegate` 边界。
+这一规则只适用于独立图。嵌套 `call`/`compose` 活跃时，SDK 会在压缩前尝试取消：pi 的上下文压缩基于原始对话条目，可能同时包含父上下文和子图内部对话，事后补发调用标记无法安全拆开。需要独立压缩生命周期或可能运行很久的子任务，应使用 `delegate` 边界。
 
-如果取消策略因竞态或其他 extension 异常失效、嵌套调用仍收到 `session_compact`，SDK 会把它视为隔离违规：终止当前共享调用，并在该 session 后续模型投影中移除 compactionSummary。该路径优先保证不泄漏，代价是丢失压缩摘要；不会重发 `call_start` 来宣称边界已经恢复。
+如果取消策略因竞态或其他 extension 异常失效，SDK 会终止当前共享调用并清除已被污染的压缩摘要，优先保证信息不泄漏。不会重新发送调用来宣称边界已经恢复。
 
 ### 默认文件位置与自定义来源
 
@@ -797,9 +807,9 @@ provider 和 renderer 接收只读快照，不能修改 Runtime。自定义 `ski
 
 如果一条图中不同节点需要不同的 skill，这是完全支持的——每个节点声明各自的 `node.skill` 即可。
 
-### 投影中的 skill 行
+### Skill 在上下文中的展示
 
-使用默认 provider/renderer 时，CURRENT 保留 `skill: {名称}`，正文使用 `[skill: name]` 包装。使用自定义 skill renderer 时，展示完全由业务 renderer 决定。projection 仍是纯函数，不接触 IO。
+使用默认 provider/renderer 时，节点指引段显示为 `skill: {名称}`，skill 正文以 `[skill: name]` 格式包裹。使用自定义 skill renderer 时，展示完全由业务 renderer 决定。
 
 ---
 
@@ -892,19 +902,19 @@ interface GraphRunResult {
 
 `GraphRunResult` 不包含 frames、ReAct 或 trace——业务返回与审计历史分离。业务 `failed/cancelled` 正常返回；基础设施异常（host 创建失败、工具缺失等）直接 throw。
 
-## Compaction 协同
+## 上下文压缩协作
 
-### root-only 图
+### 独立图
 
-SDK 监听 `session_compact` / `session_before_compact`，推进 frame 投影基线。pi 原生 `compactionSummary` 与 recent messages 是压缩历史的权威替代：压缩前已有 frames 不再重复投影，新 frames 从压缩基线继续生长。SDK 不重发 NodeScope，不遮挡 summary。
+LLM 上下文长度超限时，pi 自动压缩历史。压缩后，pi 的压缩摘要和最近消息是压缩历史的权威替代：压缩前的历史帧不再重复出现，新帧从压缩后的位置继续累积。SDK 不重发节点指引，不遮挡 pi 的压缩摘要。
 
-### 嵌套 call/compose 共享 session
+### 嵌套子图
 
-嵌套 `call/compose` 活跃期间，SDK 在 `session_before_compact` 返回 `{ cancel: true }` 取消压缩。因为 pi compaction 基于原始 session entries（而非 SDK 投影后的消息），可能把父上下文和子图内部 transcript 混合进无法拆分的摘要。
+嵌套 `call`/`compose` 活跃期间，SDK 阻止 pi 压缩。因为 pi 的压缩基于原始对话条目，可能将父上下文和子图内部对话混入无法拆分的摘要。
 
-如果取消策略因竞态异常失效，SDK fail-closed：终止当前共享调用，过滤已污染的 compactionSummary，不会重发 `call_start` 假装恢复。
+如果阻止失败，SDK 会终止当前共享调用并清除已被污染的压缩摘要，优先保证信息不泄漏。
 
-需要独立 compaction 生命周期的长任务应使用 `delegate` 边界（通过 `DelegateGraphInvoker` 在独立子会话中执行）。
+需要独立压缩生命周期的长任务应使用 `delegate` 边界。
 
 ---
 
@@ -973,13 +983,13 @@ createLoopGraphExtension(pi, {
 
 ---
 
-## 子图（call 与 compose）
+## 子图（call / compose / delegate）
 
-`kind: "graph"` 缺省使用 `call`：复用当前 AgentSession/Runtime，但创建新的 `AgentInstance`，因此 `frames`、`scratch` 和 global mechanisms 都与父图隔离；调用点的 `NodeInput.data` 成为 child background。root 图和 call 子图共用 call stack，child NodeScope 的 `depth` 会增加，返回后工具集、父 CallFrame 和父节点作用域都会恢复。
+`kind: "graph"` 节点可以引用另一张图作为子图执行。通过 `boundary` 指定调用方式：
 
-需要把图作为“替代一个点”的代码组织手段时，显式使用 `boundary: "compose"`。它复用父 `AgentInstance`：child 可见父已完成 frames、共享 scratch，并在同一帧栈上运行；但 child 的 Graph.goal / mechanisms 只在其 CallFrame 内有效。child 新增的全部 frames 是受 Runtime 管理的临时段，退出时**一定**由 `fold`（或默认 fold）归约，父图只留下 graph node 经 Edge.migrate 写入的一帧，内部 ReAct 不会泄漏。
-
-`fold` 收到的是独立、冻结的帧段快照和 child `GraphRunResult`；默认 fold 仅返回 child 的 `status/result`。业务 `failed`/`cancelled` 同样执行 fold；节点、fold 或运行基础设施错误会回滚临时段并继续抛出。`delegate` 通过 `DelegateGraphInvoker` 在独立子会话中执行。`call/delegate + fold`、缺少 delegate host 和嵌套 Graph 循环引用仍在校验阶段报错。
+- **`call`（默认）**：复用当前 AgentSession，但创建独立工作区。子图看不到父图的执行历史和共享状态；子图结果归约为一个节点完成信号。
+- **`compose`**：共享父图的工作区。子图可以读取父图的已完成历史，子图新增的历史在退出时由 `fold` 函数压缩为一条记录。适合"以图代点"的代码组织。
+- **`delegate`**：创建完全独立的 AgentSession。物理隔离，适合长任务或需要独立上下文压缩的场景。需要配置 `createDelegateHost`。
 
 ```typescript
 const childGraph: Graph = {
@@ -990,7 +1000,7 @@ const childGraph: Graph = {
   routing: { ... },
 };
 
-// 父图中引用：
+// 父图中引用（compose 方式）：
 const graphNode: Node = {
   kind: "graph",
   id: "invoke_child",
@@ -999,24 +1009,26 @@ const graphNode: Node = {
   boundary: "compose",
   fold: ({ segment, finalResult }) => ({
     status: finalResult.status,
-    result: { child: finalResult.result, completedNodes: segment.map((frame) => frame.nodeId) },
+    result: { child: finalResult.result, completedNodes: segment.map((f) => f.nodeId) },
   }),
 };
 ```
 
 **边界保证**：
 
-- `call`：父 frames/scratch 对 child 不可见；child 最终 result 归约为父 graph node completion。
-- `compose`：child 可读父 frames 并共享 scratch；child 内部 frames 在退出时被截断，只有开发者在 fold 中显式传出的数据才会跨组合边界。
-- 两种边界都由父图的 Edge 决定如何把 graph node completion 折叠进父图帧栈。
+| 方式 | 工作区 | 历史可见性 | 返回结果 |
+|------|--------|-----------|----------|
+| `call`（默认） | 新建 | 仅参数 | 仅 status/result |
+| `compose` | 共享 | 父已完成历史 | fold 后截断 |
+| `delegate` | 新建 + 新会话 | 仅参数 | 仅 GraphRunResult |
 
 ---
 
-## 帧栈与投影
+## 历史与上下文
 
-### 帧栈是什么
+### 节点执行历史
 
-`AgentInstance.frames` 是一个数组，按时间顺序存储已折叠的节点执行历史。每个 `ContextFrame`：
+每个工作区维护一个有序数组 `frames`，按时间顺序存储已完成的节点执行摘要。每条摘要是一个 `ContextFrame`：
 
 ```typescript
 interface ContextFrame {
@@ -1027,40 +1039,18 @@ interface ContextFrame {
 }
 ```
 
-### 投影是什么
+### LLM 看到的上下文
 
-每次 LLM 调用前，`context` 钩子将当前消息重组：已完成节点的原始 ReAct 被丢弃，由帧摘要（COMPLETED 段）顶替；当前节点的 live 消息保留。
+每次 LLM 推理前，当前对话被重组为两部分：
 
-### 作用域匹配
+1. **历史摘要**：所有已完成节点的原始 LLM 推理过程被移除，只保留 `frames` 中的摘要
+2. **当前节点工作区**：当前节点的指引信息和实时推理消息
 
-projection 不再依赖随机哨兵切分消息数组。Runtime 进入节点时追加一条语义化 `loop_graph_node_scope` 消息（`customType`），其 `content` 含 CURRENT 信息、`details` 含结构化 `NodeScopeDescriptor`（scopeId、graphRunId、instanceId 等）。projection 从尾部匹配当前 scopeId：
+这样 LLM 既能看到过去的执行结果摘要，又能看到当前正在进行的任务，不会被旧的推理过程分散注意力。
 
-```typescript
-const scopeIdx = findLastMatchingScope(messages, activeScope);
-if (scopeIdx >= 0) {
-  return [formatFrames(frames), ...messages.slice(scopeIdx)];
-}
-// fail closed: 输出 frames + 确定性 CURRENT
-```
+### 自定义历史摘要格式
 
-找不到 scope 时**不回退**完整原始 transcript，只输出帧摘要 + 从当前节点重建的 CURRENT（fail-closed），并记录结构化诊断。
-
-默认格式（向后兼容）：
-
-```
-=== COMPLETED ===
-[{"nodeId":"...","status":"ok","summary":"...","result":{...}}]
-=== END ===
-=== CURRENT ===
-nodeId: ...
-subGoal: ...
-=== END ===
-（当前节点的 live ReAct 消息）
-```
-
-### 自定义帧格式
-
-通过 `frameFormatter` 选项，开发者完全控制 COMPLETED 段的格式与内容：
+通过 `frameFormatter` 选项，你可以完全控制历史摘要的格式与内容：
 
 ```typescript
 const loop = createLoopGraphExtension(pi, {
@@ -1162,6 +1152,7 @@ interface GraphInvocation {
   description: string;
   inputSchema: Record<string, unknown>;  // 工具入参 schema（agent tool-call 用）
   parseArgs?(args: string): Record<string, unknown>; // 命令调用：把裸文本解析为结构化入参
+  formatToolResult?(result: Readonly<GraphRunResult>): string; // graph tool 的模型可见文本
 }
 ```
 
@@ -1173,11 +1164,39 @@ interface GraphInvocation {
 
 如果 `parseArgs` 未定义，命令 handler 默认传入 `{ args: rawString }`。
 
+`formatToolResult` 只改变 graph 作为工具调用时返回给模型的文本，工具结果 `details` 仍保留完整 `GraphRunResult`。还可通过 Extension 级 `formatToolResult` 设置全局默认值；单个 invocation 的 formatter 优先。所有自定义文本仍受 `toolResultMaxBytes` 限制。
+
 ---
 
 ## 调试
 
-运行后项目根目录生成 `loop-graph-debug.log`（JSONL 格式）：
+默认不写任何日志文件。推荐注入结构化 `traceSink` 或 logger：
+
+```typescript
+const loop = createLoopGraphExtension(pi, {
+  traceSink(event) {
+    telemetry.record(event);
+  },
+  logger: console,
+});
+```
+
+生命周期事件包括：
+
+- `graph_start/graph_end/graph_error`
+- `node_enter/node_exit`
+- `compaction`
+
+事件是冻结快照；sink/logger 抛错或异步拒绝不会改变图执行结果。
+
+需要本地 JSONL 调试时显式开启：
+
+```typescript
+createLoopGraphExtension(pi, {
+  debug: true,
+  debugLogPath: "loop-graph-debug.log",
+});
+```
 
 ```bash
 tail -f loop-graph-debug.log  # 实时观察
@@ -1187,8 +1206,8 @@ tail -f loop-graph-debug.log  # 实时观察
 
 | 事件               | 查看内容                         |
 | ------------------ | -------------------------------- |
-| `enter_node`     | 节点 ID、输入数据、当前帧栈      |
-| `projection`     | 消息总数、scopeId 是否命中、帧数 |
+| `enter_node`     | 节点 ID、入参数据、当前历史摘要  |
+| `context`        | 消息总数、当前节点是否命中、帧数 |
 | `agent_complete` | 完成状态、result 字段列表        |
 | `exit_node`      | 推入的帧摘要、累计帧数           |
 | `agent_retry`    | 验证不通过的原因                 |
@@ -1311,8 +1330,8 @@ export const reviewGraph: Graph = {
 | 项 | 当前策略 |
 | --- | -------- |
 | schema 辅助工具 | `NodeCompletion.result` 保持 `Record<string, unknown>` |
-| session 续跑 | 帧栈未持久化到磁盘 |
-| 同 instance root 并发 | `executeGraph()` fail-fast；并发任务使用独立 delegate host |
+| session 续跑 | 历史记录未持久化到磁盘 |
+| 同一实例顶层并发 | `executeGraph()` 立即报错；并发任务应使用独立 delegate host |
 | 单节点 skill 数量 | `node.skill?: string`，一次只关联一个 skill 引用 |
-| delegate host | 独立 Session 执行载体；需业务 extension 提供 `createDelegateHost` 工厂 |
-| 失败边处理 | `selectEdge` 返回 null 时优雅结束 |
+| delegate host | 隔离子会话执行载体；需业务 extension 提供 `createDelegateHost` 工厂 |
+| 无匹配边 | 节点结束后图优雅终止 |

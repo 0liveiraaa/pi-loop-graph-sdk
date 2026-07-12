@@ -56,7 +56,7 @@ import {
 } from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
-import { resolveNodeTools } from "../tools-resolve.js";
+import { resolveNodeTools, type ToolResolver } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
 import {
   defaultModelMessageFormatter,
@@ -91,6 +91,13 @@ import {
   type MechanismFailureRecord,
   type MechanismRuntimeOptions,
 } from "./mechanism-runtime.js";
+import {
+  createJsonlTraceSink,
+  emitLifecycleEvent,
+  type LoopGraphLogger,
+  type LoopGraphTraceSink,
+} from "./observability.js";
+import type { GraphToolResultFormatter } from "../registry.js";
 
 const NODE_SCOPE_TYPE = "loop_graph_node_scope";
 const completeToolRegistered = new WeakSet<object>();
@@ -123,6 +130,17 @@ export interface LoopGraphExtensionOptions {
   delegateCompaction?: CompactionSettings;
   /** graph tool 返回给模型的最大 UTF-8 字节数。 */
   toolResultMaxBytes?: number;
+  /** graph tool 的全局模型可见文本 formatter；图 invocation 自身配置优先。 */
+  formatToolResult?: GraphToolResultFormatter;
+  /** 自定义节点工具解析策略；framework tools 仍由 SDK 固定保留。 */
+  toolResolver?: ToolResolver;
+  /** 生命周期结构化事件 sink。观测异常不会影响图执行。 */
+  traceSink?: LoopGraphTraceSink;
+  /** 可选 logger；graph_error 使用 error，其余生命周期使用 debug。 */
+  logger?: LoopGraphLogger;
+  /** 显式开启默认 JSONL lifecycle trace。默认 false，不写文件。 */
+  debug?: boolean;
+  debugLogPath?: string;
   /** 图循环与单次 agent run 的运行限制。省略时保持兼容默认值。 */
   limits?: LoopGraphLimits;
   /** 自定义 SDK 在 node-enter 时追加给模型的 CURRENT/skill/instruction 载荷。
@@ -196,6 +214,11 @@ export function createLoopGraphExtension(
   options: LoopGraphExtensionOptions = {},
 ): LoopGraphExtension {
   const limits = resolveLoopGraphLimits(options.limits);
+  const traceSink = options.traceSink ?? (
+    options.debug ? createJsonlTraceSink(options.debugLogPath) : undefined
+  );
+  const emit = (event: import("./observability.js").LoopGraphLifecycleEvent) =>
+    emitLifecycleEvent(event, traceSink, options.logger);
   const modelMessageFormatter: ModelMessageFormatter = {
     validationRetry: options.modelMessageFormatter?.validationRetry
       ?? defaultModelMessageFormatter.validationRetry,
@@ -253,6 +276,8 @@ export function createLoopGraphExtension(
       };
   const registry = new GraphRegistry(pi, delegateInvoker, {
     toolResultMaxBytes: options.toolResultMaxBytes,
+    formatToolResult: options.formatToolResult,
+    toolResolver: options.toolResolver,
   });
 
   // ── 注册 __graph_complete__ 工具 ──
@@ -357,6 +382,15 @@ export function createLoopGraphExtension(
     const generation = rt.recordCompaction(pendingCompactionFrameBase ?? undefined);
     pendingCompactionFrameBase = null;
     debugLog.scopeCheckpoint(scope.scopeId, generation, event?.reason, event?.willRetry);
+    emit(Object.freeze({
+      type: "compaction",
+      timestamp: Date.now(),
+      graphId: graph.id,
+      nodeId,
+      scopeId: scope.scopeId,
+      generation,
+      reason: snapshotRendererValue(event?.reason),
+    }));
   });
 
   // 捕获 __graph_complete__ 调用
@@ -457,7 +491,17 @@ export function createLoopGraphExtension(
     if (!toolValidated.has(graph.id)) {
       const allTools = piInner.getAllTools();
       const registeredNames = new Set(allTools.map((t) => t.name));
-      const issues = validateGraphTools(graph, defaultTools, registeredNames);
+      const issues = validateGraphTools(
+        graph,
+        defaultTools,
+        registeredNames,
+        (nodeId, nodeTools) => resolveNodeTools(
+          defaultTools,
+          nodeTools,
+          options.toolResolver,
+          { graphId: graph.id, nodeId },
+        ),
+      );
       if (issues.length > 0) {
         throw new Error(
           `图 "${graph.id}" 工具存在性校验失败:\n` +
@@ -588,6 +632,13 @@ export function createLoopGraphExtension(
     try {
       instance = runtime.pushGraph(graph, background, boundary, sharedInstance, parentNodeId);
       graphPushed = true;
+      emit(Object.freeze({
+        type: "graph_start",
+        timestamp: Date.now(),
+        graphId: graph.id,
+        boundary,
+        invocationKind: effectiveInvocationKind,
+      }));
 
       if (boundary === "call" || boundary === "compose") {
         pi.sendMessage({
@@ -607,6 +658,18 @@ export function createLoopGraphExtension(
         callStarted = true;
       }
 
+      const finish = (result: GraphRunResult): GraphRunResult => {
+        debugLog.graphEnd(graph.id, result.steps, result.status, debugLog.preview(result.result, 200), instance!.frames);
+        emit(Object.freeze({
+          type: "graph_end",
+          timestamp: Date.now(),
+          graphId: graph.id,
+          status: result.status,
+          steps: result.steps,
+        }));
+        return result;
+      };
+
       const entry = graph.entries.find((candidate) => {
         try { return candidate.guard(background); } catch { return false; }
       });
@@ -620,19 +683,13 @@ export function createLoopGraphExtension(
         if (boundary === "call") {
           throw new Error(`子图 ${graph.id} 无匹配入口`);
         }
-        debugLog.graphEnd(graph.id, lastResult.steps, lastResult.status, debugLog.preview(lastResult.result, 200), instance.frames);
-        return lastResult;
+        return finish(lastResult);
       }
 
       let nodeId = entry.startNodeId;
       let input: NodeInput = {
         data: entry.mapInput ? entry.mapInput(background) : background,
         source: { kind: "entry", entryId: entry.id },
-      };
-
-      const finish = (result: GraphRunResult): GraphRunResult => {
-        debugLog.graphEnd(graph.id, result.steps, result.status, debugLog.preview(result.result, 200), instance!.frames);
-        return result;
       };
 
       for (let step = 0; step < maxSteps; step++) {
@@ -675,6 +732,14 @@ export function createLoopGraphExtension(
             input,
             runtime.topInstance?.frames ?? [],
           );
+          emit(Object.freeze({
+            type: "node_enter",
+            timestamp: Date.now(),
+            graphId: graph.id,
+            nodeId,
+            scopeId: scope.scopeId,
+            depth: runtime.callStack.length,
+          }));
           nodeContext.setCurrentNodeId(nodeId);
 
           mechanismInvocations = new MechanismInvocationGroup(
@@ -832,6 +897,15 @@ export function createLoopGraphExtension(
             };
             runtime.exitNode(frame);
             debugLog.exitNode(runtime.callStack.length, nodeId, completion, frame, instance.frames);
+            emit(Object.freeze({
+              type: "node_exit",
+              timestamp: Date.now(),
+              graphId: graph.id,
+              nodeId,
+              scopeId: scope.scopeId,
+              status: completion.status,
+              depth: runtime.callStack.length,
+            }));
             lastResult = {
               graphId: graph.id,
               status: completion.status,
@@ -850,6 +924,15 @@ export function createLoopGraphExtension(
             migration.frame,
             instance.frames,
           );
+          emit(Object.freeze({
+            type: "node_exit",
+            timestamp: Date.now(),
+            graphId: graph.id,
+            nodeId,
+            scopeId: scope.scopeId,
+            status: completion.status,
+            depth: runtime.callStack.length,
+          }));
 
           if (edge.to === END) {
             lastResult = {
@@ -896,6 +979,14 @@ export function createLoopGraphExtension(
         steps: maxSteps,
       };
       return finish(lastResult);
+    } catch (error) {
+      emit(Object.freeze({
+        type: "graph_error",
+        timestamp: Date.now(),
+        graphId: graph.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
     } finally {
       try {
         if (callStarted) {
@@ -922,7 +1013,12 @@ export function createLoopGraphExtension(
 
   function setNodeToolsForInstance(piInner: ExtensionAPI, node: Node): void {
     const nodeTools = node.kind === "code" ? (node.tools ?? []) : [];
-    piInner.setActiveTools(resolveNodeTools(defaultTools, nodeTools));
+    piInner.setActiveTools(resolveNodeTools(
+      defaultTools,
+      nodeTools,
+      options.toolResolver,
+      { graphId: activeRuntime?.topGraph?.id, nodeId: node.id },
+    ));
   }
 
   /**

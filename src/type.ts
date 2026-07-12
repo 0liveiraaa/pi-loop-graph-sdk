@@ -619,6 +619,8 @@ export interface GraphInvocation {
   inputSchema: Record<string, unknown>; // 工具入参 schema，agent 调用时 LLM 依此构造
   /** 命令调用：把裸文本 args 解析成 inputSchema 的形状。默认 { args } */
   parseArgs?(args: string): Record<string, unknown>;
+  /** 自定义 graph tool 返回给模型的文本；details 始终保留原始 GraphRunResult。 */
+  formatToolResult?(result: Readonly<GraphRunResult>): string;
 }
 
 

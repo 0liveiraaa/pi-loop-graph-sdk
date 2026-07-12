@@ -149,4 +149,21 @@ describe("resolveNodeTools", () => {
       "read", "d1", "d2", "d3", "n1", "n2", "__graph_complete__",
     ]);
   });
+
+  it("支持自定义 resolver，同时强制保留 framework tools 首尾边界", () => {
+    const seen: any[] = [];
+    const result = resolveNodeTools(
+      ["global"],
+      ["node"],
+      (input) => {
+        seen.push(input);
+        return ["node", "custom", "read", "__graph_complete__", "custom"];
+      },
+      { graphId: "g", nodeId: "n" },
+    );
+
+    expect(result).toEqual(["read", "node", "custom", "__graph_complete__"]);
+    expect(seen[0]).toMatchObject({ graphId: "g", nodeId: "n" });
+    expect(Object.isFrozen(seen[0].defaultTools)).toBe(true);
+  });
 });
