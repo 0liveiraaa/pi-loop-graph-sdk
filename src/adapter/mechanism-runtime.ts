@@ -1,16 +1,32 @@
 import type {
   ExtensionAPI,
+  ToolCallEvent,
+  ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
+import Schema from "typebox/schema";
 import type {
+  AgentRunRequest,
   AgentInstance,
+  CompletionDecision,
   Mechanism,
+  MechanismAgentRunContext,
+  MechanismContext,
+  MechanismDecisionLog,
+  MechanismDecisionTraceEntry,
+  MechanismCompletionContext,
+  MechanismExec,
   MechanismEvents,
   MechanismEventSubscription,
   MechanismFailurePolicy,
   MechanismScope,
+  MechanismToolCallEvent,
   MechanismToolResultEvent,
+  MechanismToolStartEvent,
   MechanismTurnEndEvent,
   MechanismTurnStartEvent,
+  ToolCallDecision,
+  ToolResultDecision,
 } from "../type.js";
 import type { NodeScopeDescriptor } from "../runtime.js";
 
@@ -24,6 +40,14 @@ export type MechanismFailurePhase =
   | "onNodeEnter"
   | "onNodeExit"
   | "onNodeError"
+  | "beforeAgentRun"
+  | "onTurnStart"
+  | "onTurnEnd"
+  | "onToolStart"
+  | "onToolResult"
+  | "beforeToolCall"
+  | "afterToolResult"
+  | "validateCompletion"
   | "tool_result"
   | "turn_start"
   | "turn_end";
@@ -42,6 +66,33 @@ export interface MechanismStateResolution {
   initializationFailed: boolean;
   initializationError?: unknown;
 }
+
+export interface MechanismHookInvocation {
+  mechanism: Mechanism<any>;
+  context: MechanismContext<any>;
+  initializationFailure?: unknown;
+}
+
+export interface MechanismRunStartResult {
+  blocked: boolean;
+  reason?: string;
+}
+
+export interface MechanismRuntimeOptions {
+  execRoot?: string;
+  execTimeoutMs?: number;
+  execMaxOutputBytes?: number;
+  allowExecOutsideRoot?: boolean;
+  eventMaxBytes?: number;
+  completionValidationTimeoutMs?: number;
+}
+
+export type MechanismCompletionGateResult =
+  | {
+      action: "allow";
+      verifiedResult?: Readonly<{ checks: readonly import("../type.js").MechanismVerifiedResultEntry[] }>;
+    }
+  | { action: "reject" | "fail-node" | "fail-graph"; reason: string };
 
 interface MechanismStateRecord extends MechanismStateResolution {}
 
@@ -207,20 +258,201 @@ export class MechanismEventBroker {
     ["turn_end", []],
   ]);
   private readonly pendingFailures: MechanismFailureRecord[] = [];
+  private readonly decisionTraces = new Map<string, MechanismDecisionTraceEntry[]>();
+  private activeRun: {
+    agentRunId: number;
+    invocations: readonly MechanismHookInvocation[];
+  } | null = null;
+  private readonly pi: ExtensionAPI;
+  private readonly options: Required<MechanismRuntimeOptions>;
 
   constructor(
     pi: ExtensionAPI,
     private readonly reportFailure: (failure: MechanismFailureRecord) => void,
+    options: MechanismRuntimeOptions = {},
   ) {
+    this.pi = pi;
+    this.options = {
+      execRoot: path.resolve(options.execRoot ?? process.cwd()),
+      execTimeoutMs: options.execTimeoutMs ?? 30_000,
+      execMaxOutputBytes: options.execMaxOutputBytes ?? 64 * 1024,
+      allowExecOutsideRoot: options.allowExecOutsideRoot ?? false,
+      eventMaxBytes: options.eventMaxBytes ?? 64 * 1024,
+      completionValidationTimeoutMs: options.completionValidationTimeoutMs ?? 60_000,
+    };
+    for (const [name, value] of Object.entries({
+      execTimeoutMs: this.options.execTimeoutMs,
+      execMaxOutputBytes: this.options.execMaxOutputBytes,
+      eventMaxBytes: this.options.eventMaxBytes,
+      completionValidationTimeoutMs: this.options.completionValidationTimeoutMs,
+    })) {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`MechanismRuntimeOptions.${name} 必须是正整数`);
+      }
+    }
+    pi.on("tool_call", async (event) => this.handleToolCall(event));
+    pi.on("tool_execution_start", async (event) => {
+      const run = this.activeRun;
+      if (!run) return;
+      const snapshot = Object.freeze({
+        ...snapshotEvent(event),
+        agentRunId: run.agentRunId,
+      }) as MechanismToolStartEvent;
+      await this.invokeObservationHook("onToolStart", "onToolStart", snapshot);
+    });
     pi.on("tool_result", async (event) => {
-      await this.dispatch("tool_result", snapshotEvent(event) as MechanismToolResultEvent);
+      return this.handleToolResult(event);
     });
     pi.on("turn_start", async (event) => {
-      await this.dispatch("turn_start", snapshotEvent(event) as MechanismTurnStartEvent);
+      const agentRunId = this.activeRun?.agentRunId ?? null;
+      const snapshot = Object.freeze({ ...snapshotEvent(event), agentRunId }) as MechanismTurnStartEvent;
+      await this.dispatch("turn_start", snapshot);
+      if (agentRunId !== null) await this.invokeObservationHook("onTurnStart", "onTurnStart", snapshot);
     });
     pi.on("turn_end", async (event) => {
-      await this.dispatch("turn_end", snapshotEvent(event) as MechanismTurnEndEvent);
+      const agentRunId = this.activeRun?.agentRunId ?? null;
+      const snapshot = Object.freeze({ ...snapshotEvent(event), agentRunId }) as MechanismTurnEndEvent;
+      await this.dispatch("turn_end", snapshot);
+      if (agentRunId !== null) await this.invokeObservationHook("onTurnEnd", "onTurnEnd", snapshot);
     });
+  }
+
+  createExec(scope: MechanismScope): MechanismExec {
+    return Object.freeze({
+      run: async (
+        command: string,
+        args: readonly string[] = [],
+        runOptions: import("../type.js").MechanismExecRunOptions = {},
+      ) => {
+        if (!scope.isActive()) throw new Error("mechanism scope 已失效，不能执行命令");
+        const timeout = runOptions.timeoutMs ?? this.options.execTimeoutMs;
+        const maxOutputBytes = runOptions.maxOutputBytes ?? this.options.execMaxOutputBytes;
+        if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("exec timeoutMs 必须是正数");
+        if (!Number.isInteger(maxOutputBytes) || maxOutputBytes <= 0) {
+          throw new Error("exec maxOutputBytes 必须是正整数");
+        }
+        const cwd = path.resolve(runOptions.cwd ?? this.options.execRoot);
+        if (!this.options.allowExecOutsideRoot && !isWithinPath(this.options.execRoot, cwd)) {
+          throw new Error(`exec cwd 超出受控根目录: ${cwd}`);
+        }
+        const result = await this.pi.exec(command, [...args], {
+          cwd,
+          timeout,
+          signal: scope.signal,
+        });
+        const stdout = truncateUtf8(result.stdout, maxOutputBytes);
+        const stderr = truncateUtf8(result.stderr, maxOutputBytes);
+        return Object.freeze({
+          stdout: stdout.value,
+          stderr: stderr.value,
+          code: result.code,
+          killed: result.killed,
+          stdoutTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated,
+        });
+      },
+    });
+  }
+
+  createDecisionLog(scope: MechanismScope): MechanismDecisionLog {
+    if (!this.decisionTraces.has(scope.scopeId)) this.decisionTraces.set(scope.scopeId, []);
+    scope.onCleanup(() => { this.decisionTraces.delete(scope.scopeId); });
+    return Object.freeze({
+      list: () => Object.freeze([...(this.decisionTraces.get(scope.scopeId) ?? [])]),
+    });
+  }
+
+  async beginAgentRun(
+    agentRunId: number,
+    request: AgentRunRequest,
+    invocations: readonly MechanismHookInvocation[],
+  ): Promise<MechanismRunStartResult> {
+    if (this.activeRun) throw new Error("同一 Session 不支持重叠的 runAgent mechanism 生命周期");
+    this.activeRun = { agentRunId, invocations };
+    const requestView = snapshotEvent({
+      prompt: request.prompt,
+      ...(request.skill === undefined ? {} : { skill: request.skill }),
+      ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
+    });
+    for (const invocation of invocations) {
+      if (invocation.initializationFailure || !invocation.mechanism.beforeAgentRun) continue;
+      try {
+        const context: MechanismAgentRunContext = Object.freeze({
+          ...invocation.context,
+          agentRunId,
+          request: requestView,
+        });
+        await invocation.mechanism.beforeAgentRun(context);
+      } catch (error) {
+        const failure = this.recordHookFailure(invocation, "beforeAgentRun", error);
+        if (failure.policy !== "continue") return { blocked: true, reason: failure.reason };
+      }
+    }
+    return { blocked: false };
+  }
+
+  endAgentRun(agentRunId: number): void {
+    if (this.activeRun?.agentRunId === agentRunId) this.activeRun = null;
+  }
+
+  async validateCompletion(
+    agentRunId: number,
+    completion: import("../type.js").NodeCompletion,
+  ): Promise<MechanismCompletionGateResult> {
+    const run = this.activeRun;
+    if (!run || run.agentRunId !== agentRunId || completion.status !== "ok") {
+      return { action: "allow" };
+    }
+    const checks: import("../type.js").MechanismVerifiedResultEntry[] = [];
+    const completionView = Object.freeze({
+      nodeId: completion.nodeId,
+      status: completion.status,
+      result: snapshotEvent(completion.result),
+    });
+    for (const invocation of run.invocations) {
+      const hook = invocation.mechanism.validateCompletion;
+      if (invocation.initializationFailure || !hook) continue;
+      let decision: CompletionDecision;
+      try {
+        const context: MechanismCompletionContext = Object.freeze({
+          ...invocation.context,
+          agentRunId,
+          completion: completionView,
+        });
+        decision = await withTimeoutAndSignal(
+          Promise.resolve(hook(context)),
+          this.options.completionValidationTimeoutMs,
+          invocation.context.scope.signal,
+          `mechanism "${invocation.mechanism.name}" completion 验收超时`,
+        );
+      } catch (error) {
+        const failure = this.recordHookFailure(invocation, "validateCompletion", error);
+        if (failure.policy === "continue") continue;
+        return {
+          action: failure.policy === "fail-graph" ? "fail-graph" : "fail-node",
+          reason: failure.reason,
+        };
+      }
+      if (decision.action === "allow") {
+        if (decision.verifiedResult) {
+          checks.push(Object.freeze({
+            mechanismName: invocation.mechanism.name,
+            result: snapshotEvent(decision.verifiedResult),
+          }));
+        }
+        continue;
+      }
+      if (decision.action === "reject") {
+        return { action: "reject", reason: decision.reason };
+      }
+      const failure = this.recordCompletionDecisionFailure(invocation, decision);
+      return { action: decision.action, reason: failure.reason };
+    }
+    if (checks.length === 0) return { action: "allow" };
+    return {
+      action: "allow",
+      verifiedResult: Object.freeze({ checks: Object.freeze(checks) }),
+    };
   }
 
   createEvents(
@@ -246,6 +478,211 @@ export class MechanismEventBroker {
       this.pendingFailures.splice(index, 1);
     }
     return consumed;
+  }
+
+  private async handleToolCall(event: ToolCallEvent): Promise<{ block?: boolean; reason?: string } | void> {
+    const run = this.activeRun;
+    if (!run) return;
+    let currentInput = snapshotEvent(event.input) as Readonly<Record<string, unknown>>;
+    for (const invocation of run.invocations) {
+      const hook = invocation.mechanism.beforeToolCall;
+      if (invocation.initializationFailure || !hook) continue;
+      const eventView = Object.freeze({
+        type: "tool_call",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: currentInput,
+        agentRunId: run.agentRunId,
+      }) as MechanismToolCallEvent;
+      let decision: ToolCallDecision | void;
+      try {
+        decision = await hook(Object.freeze({
+          ...invocation.context,
+          agentRunId: run.agentRunId,
+          event: eventView,
+        }));
+      } catch (error) {
+        const failure = this.recordHookFailure(invocation, "beforeToolCall", error);
+        if (failure.policy !== "continue") return { block: true, reason: failure.reason };
+        continue;
+      }
+      if (!decision || decision.action === "allow") {
+        this.recordDecision(invocation, event, run.agentRunId, "tool-allow");
+        continue;
+      }
+      if (decision.action === "deny") {
+        const reason = decision.reason.trim() || `mechanism ${invocation.mechanism.name} 阻止了工具调用`;
+        this.recordDecision(invocation, event, run.agentRunId, "tool-deny", reason);
+        return { block: true, reason };
+      }
+      if (event.toolName === "__graph_complete__") {
+        const reason = "__graph_complete__ 使用固定 ABI，不允许一般 mechanism patch";
+        this.recordDecision(invocation, event, run.agentRunId, "tool-deny", reason);
+        return { block: true, reason };
+      }
+      const patched = snapshotEvent(decision.input) as Readonly<Record<string, unknown>>;
+      const validationError = this.validateToolInput(event.toolName, patched);
+      if (validationError) {
+        const reason = `工具参数 patch 被拒绝: ${validationError}`;
+        this.recordDecision(invocation, event, run.agentRunId, "tool-deny", reason);
+        return { block: true, reason };
+      }
+      currentInput = patched;
+      this.recordDecision(invocation, event, run.agentRunId, "tool-patch");
+    }
+    if (currentInput !== event.input) {
+      const mutableInput = event.input as Record<string, unknown>;
+      for (const key of Object.keys(mutableInput)) delete mutableInput[key];
+      Object.assign(mutableInput, currentInput);
+    }
+  }
+
+  private async handleToolResult(event: ToolResultEvent): Promise<{ content?: any[]; isError?: boolean } | void> {
+    const run = this.activeRun;
+    let content = event.content;
+    let isError = event.isError;
+    if (run) {
+      for (const invocation of run.invocations) {
+        const hook = invocation.mechanism.afterToolResult;
+        if (invocation.initializationFailure || !hook) continue;
+        const view = this.createToolResultView(event, run.agentRunId, content, isError);
+        let decision: ToolResultDecision | void;
+        try {
+          decision = await hook(Object.freeze({
+            ...invocation.context,
+            agentRunId: run.agentRunId,
+            event: view,
+          }));
+        } catch (error) {
+          const failure = this.recordHookFailure(invocation, "afterToolResult", error);
+          if (failure.policy !== "continue") {
+            content = [{ type: "text", text: failure.reason }];
+            isError = true;
+          }
+          continue;
+        }
+        if (!decision || decision.action === "keep") {
+          this.recordDecision(invocation, event, run.agentRunId, "tool-result-keep");
+          continue;
+        }
+        if (decision.content) content = [...decision.content];
+        if (decision.isError !== undefined) isError = decision.isError;
+        this.recordDecision(invocation, event, run.agentRunId, "tool-result-replace");
+      }
+    }
+    const agentRunId = run?.agentRunId ?? null;
+    const finalView = this.createToolResultView(event, agentRunId, content, isError);
+    await this.dispatch("tool_result", finalView);
+    if (run) await this.invokeObservationHook("onToolResult", "onToolResult", finalView);
+    if (content !== event.content || isError !== event.isError) return { content, isError };
+  }
+
+  private createToolResultView(
+    event: ToolResultEvent,
+    agentRunId: number | null,
+    content: ToolResultEvent["content"],
+    isError: boolean,
+  ): MechanismToolResultEvent {
+    const budgeted = snapshotWithBudget({ ...event, content, isError }, this.options.eventMaxBytes);
+    return Object.freeze({
+      ...(budgeted.value as object),
+      agentRunId,
+      truncated: budgeted.truncated,
+    }) as MechanismToolResultEvent;
+  }
+
+  private async invokeObservationHook(
+    hookName: "onTurnStart" | "onTurnEnd" | "onToolStart" | "onToolResult",
+    phase: MechanismFailurePhase,
+    event: unknown,
+  ): Promise<void> {
+    const run = this.activeRun;
+    if (!run) return;
+    for (const invocation of run.invocations) {
+      const hook = invocation.mechanism[hookName] as ((ctx: any) => void | Promise<void>) | undefined;
+      if (invocation.initializationFailure || !hook) continue;
+      try {
+        await hook(Object.freeze({
+          ...invocation.context,
+          agentRunId: run.agentRunId,
+          event,
+        }));
+      } catch (error) {
+        this.recordHookFailure(invocation, phase, error);
+      }
+    }
+  }
+
+  private validateToolInput(toolName: string, input: Readonly<Record<string, unknown>>): string | null {
+    const tool = this.pi.getAllTools().find((candidate) => candidate.name === toolName);
+    if (!tool?.parameters) return `工具 ${toolName} 没有可用 schema`;
+    try {
+      const validator = Schema.Compile(tool.parameters as any);
+      const [isValid, errors] = validator.Errors(input);
+      if (isValid) return null;
+      return errors.slice(0, 3).map((item) => `${item.instancePath || "$"} ${item.message}`).join("; ");
+    } catch (error) {
+      return `工具 ${toolName} schema 无法安全编译: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private recordHookFailure(
+    invocation: MechanismHookInvocation,
+    phase: MechanismFailurePhase,
+    error: unknown,
+  ): MechanismFailureRecord {
+    const message = error instanceof Error ? error.message : String(error);
+    const failure: MechanismFailureRecord = {
+      mechanismName: invocation.mechanism.name,
+      phase,
+      policy: invocation.mechanism.failurePolicy ?? "continue",
+      error,
+      reason: `mechanism "${invocation.mechanism.name}" ${phase} 失败: ${message}`,
+      scopeId: invocation.context.scope.scopeId,
+    };
+    this.reportFailure(failure);
+    if (failure.policy !== "continue" && invocation.context.scope.isActive()) {
+      this.pendingFailures.push(failure);
+    }
+    return failure;
+  }
+
+  private recordCompletionDecisionFailure(
+    invocation: MechanismHookInvocation,
+    decision: Extract<CompletionDecision, { action: "fail-node" | "fail-graph" }>,
+  ): MechanismFailureRecord {
+    const policy = decision.action;
+    const failure: MechanismFailureRecord = {
+      mechanismName: invocation.mechanism.name,
+      phase: "validateCompletion",
+      policy,
+      error: new Error(decision.reason),
+      reason: `mechanism "${invocation.mechanism.name}" completion gate ${decision.action}: ${decision.reason}`,
+      scopeId: invocation.context.scope.scopeId,
+    };
+    this.reportFailure(failure);
+    if (invocation.context.scope.isActive()) this.pendingFailures.push(failure);
+    return failure;
+  }
+
+  private recordDecision(
+    invocation: MechanismHookInvocation,
+    event: Pick<ToolCallEvent, "toolName" | "toolCallId">,
+    agentRunId: number,
+    decision: MechanismDecisionTraceEntry["decision"],
+    reason?: string,
+  ): void {
+    const list = this.decisionTraces.get(invocation.context.scope.scopeId);
+    if (!list) return;
+    list.push(Object.freeze({
+      timestamp: Date.now(),
+      agentRunId,
+      mechanismName: invocation.mechanism.name,
+      toolName: event.toolName,
+      toolCallId: event.toolCallId,
+      decision,
+      ...(reason === undefined ? {} : { reason }),
+    }));
   }
 
   private subscribe<K extends SupportedEventName>(
@@ -343,4 +780,64 @@ function snapshotValue(value: unknown, seen: WeakMap<object, unknown>): unknown 
     copy[key] = snapshotValue((value as Record<string, unknown>)[key], seen);
   }
   return Object.freeze(copy);
+}
+
+function isWithinPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return { value, truncated: false };
+  return { value: bytes.subarray(0, maxBytes).toString("utf8"), truncated: true };
+}
+
+function snapshotWithBudget(value: unknown, maxBytes: number): { value: unknown; truncated: boolean } {
+  let remaining = maxBytes;
+  let truncated = false;
+  const visit = (item: unknown, seen: WeakMap<object, unknown>): unknown => {
+    if (typeof item === "string") {
+      const result = truncateUtf8(item, Math.max(0, remaining));
+      remaining -= Buffer.byteLength(result.value, "utf8");
+      if (result.truncated) truncated = true;
+      return result.value;
+    }
+    if (item === null || typeof item !== "object") return item;
+    const cached = seen.get(item);
+    if (cached) return cached;
+    if (Array.isArray(item)) {
+      const copy: unknown[] = [];
+      seen.set(item, copy);
+      for (const child of item) copy.push(visit(child, seen));
+      return Object.freeze(copy);
+    }
+    const copy: Record<string, unknown> = {};
+    seen.set(item, copy);
+    for (const key of Object.keys(item)) copy[key] = visit((item as Record<string, unknown>)[key], seen);
+    return Object.freeze(copy);
+  };
+  return { value: visit(value, new WeakMap()), truncated };
+}
+
+async function withTimeoutAndSignal<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  signal: AbortSignal,
+  timeoutMessage: string,
+): Promise<T> {
+  if (signal.aborted) throw new Error("mechanism scope 已取消");
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    abortHandler = () => reject(new Error("mechanism scope 已取消"));
+    signal.addEventListener("abort", abortHandler, { once: true });
+  });
+  try {
+    return await Promise.race([promise, guard]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (abortHandler) signal.removeEventListener("abort", abortHandler);
+  }
 }

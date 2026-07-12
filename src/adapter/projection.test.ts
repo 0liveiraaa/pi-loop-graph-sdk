@@ -179,6 +179,61 @@ describe("projectMessages — NodeScope v2", () => {
   });
 });
 
+describe("projectMessages — Phase 8 scoped mechanism content", () => {
+  it("scope anchor 缺失时只恢复当前 scope 的结构化 mechanism 消息", () => {
+    const activeScope = scope("node2", "scope-current");
+    const out = projectMessages({
+      messages: [
+        {
+          role: "custom", customType: "loop_graph_mechanism",
+          content: [{ type: "text", text: "stale" }],
+          details: { protocol: 1, scopeId: "scope-old" },
+        },
+        {
+          role: "custom", customType: "loop_graph_mechanism",
+          content: [{ type: "text", text: "current" }],
+          details: { protocol: 1, scopeId: "scope-current" },
+        },
+        { role: "assistant", content: "unowned live react" },
+      ],
+      frames: [],
+      currentNode: agentNode("node2"),
+      activeScope,
+    });
+
+    expect(text(out)).toContain("current");
+    expect(text(out)).not.toContain("stale");
+    expect(text(out)).not.toContain("unowned live react");
+  });
+
+  it("compaction recovery 会过滤其他 scope 的 mechanism 消息", () => {
+    const activeScope = scope("node2", "scope-current");
+    const out = projectMessages({
+      messages: [
+        { role: "compactionSummary", summary: "summary" },
+        {
+          role: "custom", customType: "loop_graph_mechanism", content: "stale",
+          details: { protocol: 1, scopeId: "scope-old" },
+        },
+        {
+          role: "custom", customType: "loop_graph_mechanism", content: "current",
+          details: { protocol: 1, scopeId: "scope-current" },
+        },
+        { role: "assistant", content: "recent live" },
+      ],
+      frames: [],
+      currentNode: agentNode("node2"),
+      activeScope,
+      compactionActive: true,
+    });
+
+    expect(out.some((message) => message.role === "compactionSummary" && message.summary === "summary")).toBe(true);
+    expect(text(out)).toContain("current");
+    expect(text(out)).toContain("recent live");
+    expect(text(out)).not.toContain("stale");
+  });
+});
+
 // ── stripClosedGraphCalls 单元测试 ──
 
 describe("stripClosedGraphCalls", () => {

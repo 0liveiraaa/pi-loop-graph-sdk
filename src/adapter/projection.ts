@@ -76,9 +76,29 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
       ? input.renderedContext
       : [buildNodeInfo(currentNode, input.availableEdges)];
     result.push(...recovered);
-    if (summaryIdx >= 0) result.push(...messages.slice(summaryIdx + 1));
+    if (summaryIdx >= 0) {
+      result.push(...messages.slice(summaryIdx + 1).filter((message) =>
+        message.customType !== "loop_graph_mechanism" ||
+        (activeScope != null && isScopedMechanismMessage(message, activeScope))
+      ));
+    } else if (activeScope) {
+      // scope anchor 丢失时只恢复带 SDK 固定 scope 元数据的 mechanism 消息。
+      // prompt/live ReAct 没有可证明归属，继续 fail closed。
+      result.push(...messages.filter((message) =>
+        isScopedMechanismMessage(message, activeScope)
+      ));
+    }
   }
   return result;
+}
+
+function isScopedMechanismMessage(
+  message: MessageEntry,
+  activeScope: NodeScopeDescriptor,
+): boolean {
+  if (message.customType !== "loop_graph_mechanism") return false;
+  const details = message.details as { protocol?: unknown; scopeId?: unknown } | undefined;
+  return details?.protocol === 1 && details.scopeId === activeScope.scopeId;
 }
 
 // ── GraphCallScope 清洗（Phase 9）─────────────────────────

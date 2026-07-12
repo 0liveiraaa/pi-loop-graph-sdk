@@ -1,6 +1,6 @@
 # 作用域化 Mechanism 与 Agent Hook Runtime 实施计划
 
-> 状态：partial — Phase 0–4 已完成，Phase 5–9 待实施  
+> 状态：complete（P1）— Phase 0–8 已完成，Phase 9 为按需可选扩展
 > 日期：2026-07-12（初始版），2026-07-13（更新 Phase 2–4 完成状态）  
 > 范围：单 Agent Loop Graph SDK 的 Mechanism 生命周期、节点 Agent Hook、安全能力与兼容迁移  
 > 不包含：多 Agent 通讯协议、任意 Runtime 控制面修改、一次性补齐所有 pi 事件
@@ -12,7 +12,11 @@
 - Phase 2：已完成（2026-07-13）——Extension 级 MechanismEventBroker、ctx.events（onToolResult/onTurnStart/onTurnEnd）、手动/自动 dispose、事件复制冻结、按 mechanism 顺序串行分发、循环不增底层监听器、call/compose 作用域隔离。
 - Phase 3：已完成（2026-07-13）——onNodeExit、onNodeError、continue/fail-node/fail-graph 三种策略；多机制失败优先级 fail-graph > fail-node > continue；fail-node 由 Runtime 生成可信 completion 走 Router；fail-graph 仍触发 onNodeError 和 cleanup；事件 handler 错误已接入 failurePolicy，在安全检查点消费。
 - Phase 4：已完成（2026-07-13）——Mechanism<TState> 泛型、createState()、ctx.state、双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离、call 创建新 state、compose 复用 state、delegate 新 instance 创建新 state、state 不写入 scratch 不进入模型上下文、createState 失败进入 failurePolicy。
-- Phase 5–9：待实施。
+- Phase 5：已完成（2026-07-13）——每次 `runAgent()` 独立 `agentRunId`；新增 `beforeAgentRun/onTurnStart/onTurnEnd/onToolStart/onToolResult`；正式 Hook 只接收复制冻结快照；工具结果事件带输出预算与 `truncated` 标记；晚到事件不进入已结束的正式 run lifecycle。
+- Phase 6：已完成（2026-07-13）——`beforeToolCall` allow/deny/patch 串行管线；patch 后按 pi 工具 schema 重验、无 schema 时 fail closed、`__graph_complete__` 禁止一般 patch；`afterToolResult` 只允许替换模型可见 content/isError；`ctx.exec.run()` 绑定 scope signal、timeout、cwd 根目录与输出截断；`ctx.decisions.list()` 提供作用域内决策 trace。
+- Phase 7：已完成（2026-07-13）——completion 校验链升级为异步；接入 Mechanism `validateCompletion` allow/reject/fail-node/fail-graph；reject 复用 agent retry；真实验收期间加超时、scope 取消、重复 completion 去重和并发串行保护；可信结果写入 Runtime 顶层 `completion.verifiedResult.checks`，不与 AI `result` 合并；failed/cancelled 默认绕过 gate；agent-choice 保持在 mechanism gate 之后。
+- Phase 8：已完成（2026-07-13）——新增 `ctx.context.append()` 文本/图片内容块；保留 `appendContext` 兼容别名；SDK 固定 customType/display/details/options，内容复制冻结且不能触发额外 turn；消息带受控 scopeId，正常投影、scope missing recovery 与 compaction recovery 均只恢复当前 scope 内容；完整 `ctx.pi` 保持默认可用。
+- Phase 9：待真实机制库需求出现后再决策，不属于当前 P1 完成条件。
 
 ## 一、结论
 

@@ -364,7 +364,7 @@ type Node =
 
 ### Mechanism（横切机制）
 
-Mechanism 是节点执行前运行的代码侧横切能力。每个 mechanism 在每次 node visit 中获得独立 scope；节点正常结束或抛错时，Runtime 都会关闭 scope、触发 abort，并按 LIFO 执行 cleanup。
+Mechanism 是围绕一次节点工作过程运行的代码侧横切能力。它既能观察 Agent、turn 和工具生命周期，也能通过有限决定拦截工具、脱敏结果，并运行受节点作用域约束的外部命令。每个 mechanism 在每次 node visit 中获得独立 scope；节点正常结束或抛错时，Runtime 都会关闭 scope、触发 abort，并按 LIFO 执行 cleanup。
 
 ```typescript
 interface MechanismScope {
@@ -375,7 +375,6 @@ interface MechanismScope {
   onCleanup(cleanup: () => void | Promise<void>): void;
 }
 
-```typescript
 interface MechanismContext<TState = Record<string, unknown>> {
   pi: ExtensionAPI;                              // 完整但非托管的 pi 能力
   instance: AgentInstance;                       // 当前实例（scratch 可写）
@@ -383,8 +382,11 @@ interface MechanismContext<TState = Record<string, unknown>> {
   input: NodeInput;                              // 代码侧入参
   scope: MechanismScope;                         // 当前 node visit 的托管生命周期
   events: MechanismEvents;                       // scoped 事件订阅，scope 关闭时自动取消
+  exec: MechanismExec;                           // 受控命令执行，绑定 signal/timeout/cwd/输出预算
+  decisions: MechanismDecisionLog;               // 当前 scope 的工具决策 trace
   state: TState;                                 // 类型化私有 state，跨 visit 保留
-  appendContext(content: string): boolean;        // 活跃时追加；失效后返回 false
+  context: MechanismContextAppender;              // 推荐：文本/图片内容块的受控追加
+  appendContext(content: MechanismContextContent): boolean; // 兼容别名
 }
 
 interface MechanismEvents {
@@ -403,10 +405,17 @@ interface Mechanism<TState = Record<string, unknown>> {
   failurePolicy?: "continue" | "fail-node" | "fail-graph";
   createState?(): TState;                        // 当前 AgentInstance 中按机制对象身份懒初始化一次
   onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  beforeAgentRun?(ctx: MechanismAgentRunContext<TState>): void | Promise<void>;
+  onTurnStart?(ctx: MechanismTurnStartContext<TState>): void | Promise<void>;
+  onTurnEnd?(ctx: MechanismTurnEndContext<TState>): void | Promise<void>;
+  onToolStart?(ctx: MechanismToolStartContext<TState>): void | Promise<void>;
+  onToolResult?(ctx: MechanismToolResultContext<TState>): void | Promise<void>;
+  beforeToolCall?(ctx: MechanismToolCallContext<TState>): ToolCallDecision | void | Promise<ToolCallDecision | void>;
+  afterToolResult?(ctx: MechanismToolResultContext<TState>): ToolResultDecision | void | Promise<ToolResultDecision | void>;
+  validateCompletion?(ctx: MechanismCompletionContext<TState>): CompletionDecision | Promise<CompletionDecision>;
   onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
   onNodeError?(ctx: MechanismErrorContext<TState>): void | Promise<void>;
 }
-```
 ```
 
 执行顺序：
@@ -417,6 +426,9 @@ enterNode
 → 当前 CallFrame.localMechanisms
 → Node.mechanisms
 → execute
+  → beforeAgentRun
+  → [onTurnStart → beforeToolCall → tool → afterToolResult/onToolResult → onTurnEnd] × N
+  → validateCompletion × N（reject 时继续下一 turn）
 → onNodeExit（Router/Edge 之前）
 → scope abort + cleanup
 ```
@@ -427,6 +439,11 @@ enterNode
 - compose 子图的 Graph mechanisms 作为当前 CallFrame 的局部机制，退出子图后撤销。
 - 局部机制写在 `Node.mechanisms`，只在当前节点叠加。
 - `onNodeEnter` 串行 await；抛错记日志后继续，不中止节点。
+- 每次 `runAgent()` 分配独立 `agentRunId`；同一节点连续调用时，正式 turn/tool Hook 不会把上一轮事件归到下一轮。
+- `beforeToolCall` 的 patch 按机制顺序组合并重新执行工具 schema 校验；没有可靠 schema 时拒绝 patch。`__graph_complete__` 不允许走一般 patch。
+- `afterToolResult` 只能替换模型可见 `content/isError`，不能改 `details/toolCallId/toolName`。
+- `validateCompletion` 只在 AI 上报 `status: "ok"` 时执行；可 allow、reject、fail-node 或 fail-graph。可信结果位于顶层 `completion.verifiedResult.checks`，不会与 AI 的 `completion.result` 合并。
+- 完整顺序为 outputSchema → runAgent validator → Node validator → Mechanism gate → agent-choice。
 - `onNodeExit` 在节点产出 completion 后、Router/Edge 处理前串行执行，收到无别名只读快照。
 - node visit 任意阶段抛错时调用 `onNodeError`；它只观察原始错误，不能替换主错误。
 - 没有声明任何生命周期 Hook 的 mechanism 被跳过。
@@ -449,7 +466,10 @@ enterNode
 | `ctx.scope` | signal、active 检查、cleanup | 与当前 node visit 同生共死 |
 | `ctx.events` | scoped 事件订阅（onToolResult/onTurnStart/onTurnEnd） | 底层单一 pi listener；scope 关闭时自动 dispose；handler 失败进入 failurePolicy |
 | `ctx.state` | 类型化私有 state，由 `createState()` 懒初始化 | 双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离；call 创建新 state，compose 复用；不入模型上下文 |
+| `ctx.exec.run()` | 执行节点级外部命令 | 自动绑定 scope signal；限制 timeout、cwd 根目录和 stdout/stderr 字节数 |
+| `ctx.decisions.list()` | 读取工具决策记录 | 返回当前 scope 内复制的只读 trace |
 | `ctx.appendContext(content)` | 向当前 NodeScope 追加上下文 | 失效后返回 `false`，不会污染后继节点 |
+| `ctx.context.append(content)` | 追加 string 或 text/image blocks | 固定消息类型、display、scope details 与非 triggerTurn 选项；内容复制冻结 |
 | `ctx.instance.scratch` | 代码侧共享横切状态 | 随 AgentInstance 生命周期；当前仍是共享命名空间 |
 | `ctx.pi` | 完整 pi ExtensionAPI | 仅保证原生 API 可用；副作用不自动获得 scope/cleanup 保证 |
 
@@ -467,7 +487,7 @@ const timingMechanism: Mechanism = {
       once: true,
     });
 
-    ctx.appendContext("计时与监控已启动");
+    ctx.context.append("计时与监控已启动");
   },
 };
 ```
@@ -481,7 +501,7 @@ const retryTracker: Mechanism<{ retries: number }> = {
   onNodeExit(ctx) {
     if (ctx.completion.status === "failed") {
       ctx.state.retries += 1;
-      ctx.appendContext(`已重试 ${ctx.state.retries} 次`);
+      ctx.context.append(`已重试 ${ctx.state.retries} 次`);
     }
   },
 };
@@ -494,12 +514,67 @@ const toolObserver: Mechanism = {
   name: "tool-observer",
   onNodeEnter(ctx) {
     ctx.events.onToolResult((event) => {
-      ctx.appendContext(`工具 ${event.toolName} 完成`);
+      ctx.context.append(`工具 ${event.toolName} 完成`);
     });
     // scope 关闭时自动 dispose 全部订阅，无需手动清理
   },
 };
 ```
+
+工具门禁与结果脱敏示例：
+
+```typescript
+const safeRead: Mechanism = {
+  name: "safe-read",
+  beforeToolCall(ctx) {
+    if (ctx.event.toolName !== "read") return { action: "allow" };
+    if (!String(ctx.event.input.path).startsWith("docs/")) {
+      return { action: "deny", reason: "只允许读取 docs 目录" };
+    }
+    return { action: "allow" };
+  },
+  afterToolResult(ctx) {
+    if (ctx.event.toolName === "read" && containsSecret(ctx.event.content)) {
+      return { action: "replace", content: [{ type: "text", text: "[内容已脱敏]" }] };
+    }
+    return { action: "keep" };
+  },
+};
+```
+
+`ctx.exec.run("npm", ["test"], { timeoutMs: 60_000 })` 会自动使用当前 scope 的取消信号。默认 cwd 受 `mechanismRuntime.execRoot` 限制，输出超过预算时返回截断文本及 `stdoutTruncated/stderrTruncated` 标记。
+
+可信自动验收示例：
+
+```typescript
+const testGate: Mechanism = {
+  name: "test-gate",
+  failurePolicy: "fail-graph", // 验收基础设施异常或超时时不要静默放行
+  async validateCompletion(ctx) {
+    const test = await ctx.exec.run("npm", ["test"], { timeoutMs: 60_000 });
+    if (test.code !== 0) {
+      return { action: "reject", reason: "真实单元测试未通过" };
+    }
+    return {
+      action: "allow",
+      verifiedResult: { exitCode: test.code, output: test.stdout },
+    };
+  },
+};
+```
+
+AI 即使在 `result` 中写入 `{ testsPassed: 999 }` 或伪造 `verifiedResult`，也不会覆盖 Runtime 顶层生成的 `completion.verifiedResult.checks`。
+
+结构化上下文示例：
+
+```typescript
+ctx.context.append([
+  { type: "text", text: "请参考下面的截图" },
+  { type: "image", data: base64Data, mimeType: "image/png" },
+]);
+```
+
+Mechanism 只能提供内容。消息的 `customType/details/display/triggerTurn` 由 SDK 固定，无法借此伪造 NodeScope 或触发额外 turn。`ctx.pi` 仍完整保留，使用裸 pi 时由机制作者自行承担相应生命周期和冲突责任。
 
 `ctx.pi` 继续提供完全定制能力，例如直接注册原生事件：
 

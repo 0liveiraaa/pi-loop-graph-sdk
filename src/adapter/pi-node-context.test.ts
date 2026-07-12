@@ -30,14 +30,15 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
         properties: { value: { type: "number" }, nodeOk: { type: "boolean" } },
         required: ["value", "nodeOk"],
       },
-      validateCompletion(result) {
+      async validateCompletion(result) {
+        await Promise.resolve();
         order.push("request");
         return result.value === 1 ? { isValid: true } : { isValid: false, reason: "request invalid" };
       },
     });
 
     ctx.recordCompletion({ status: "ok", result: {} });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     expect(order).toEqual([]);
     expect(pi.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ content: expect.stringContaining("输出不符合 outputSchema") }),
@@ -45,7 +46,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     );
 
     ctx.recordCompletion({ status: "ok", result: { value: 1, nodeOk: true } });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok" });
     expect(order).toEqual(["request", "node"]);
   });
@@ -56,7 +57,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     ctx.setCurrentNodeId("bad-schema");
     await expect(ctx.runAgent({ prompt: "bad", outputSchema: 42 }))
       .rejects.toThrow();
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     expect(pi.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ customType: "loop_graph_dead" }),
       {},
@@ -75,14 +76,14 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     ctx.setCurrentNodeId("custom-message");
     const run = ctx.runAgent({ prompt: "x", validateCompletion: () => ({ isValid: false, reason: "bad" }) });
     ctx.recordCompletion({ status: "ok", result: {} });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     expect(pi.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ content: "RETRY:bad" }),
       { triggerTurn: true },
     );
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ result: { reason: "INCOMPLETE:custom-message" } });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     expect(pi.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ content: "DEAD:custom-message" }),
       {},
@@ -101,7 +102,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     });
 
     ctx.recordCompletion({ status: "ok", result: {} });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -113,7 +114,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     );
 
     ctx.recordCompletion({ status: "ok", result: { valid: true } });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok", result: { valid: true } });
   });
 
@@ -122,7 +123,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     const ctx = new PiNodeContext(pi, 1000);
     ctx.setCurrentNodeId("draft");
     const run = ctx.runAgent({ prompt: "draft" });
-    ctx.onAgentEnd();
+    await ctx.onAgentEnd();
     await expect(run).resolves.toEqual({
       nodeId: "draft",
       status: "failed",
@@ -130,10 +131,27 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     });
   });
 
-  it("无活动 run 的 agent_end 追加固定 dead-run 消息", () => {
+  it("同一 run 内重复 completion 会去重", async () => {
     const pi = fakePi();
     const ctx = new PiNodeContext(pi, 1000);
-    ctx.onAgentEnd();
+    ctx.setCurrentNodeId("dedupe");
+    const run = ctx.runAgent({ prompt: "dedupe" });
+    ctx.recordCompletion({ status: "ok", result: { value: 1 } });
+    ctx.recordCompletion({ status: "ok", result: { value: 1 } });
+
+    await ctx.onAgentEnd();
+
+    await expect(run).resolves.toEqual({
+      nodeId: "dedupe",
+      status: "ok",
+      result: { value: 1 },
+    });
+  });
+
+  it("无活动 run 的 agent_end 追加固定 dead-run 消息", async () => {
+    const pi = fakePi();
+    const ctx = new PiNodeContext(pi, 1000);
+    await ctx.onAgentEnd();
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         customType: "loop_graph_dead",

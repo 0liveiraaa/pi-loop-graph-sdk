@@ -25,6 +25,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
+  AgentRunRequest,
   AgentInstance,
   Edge,
   Graph,
@@ -88,6 +89,7 @@ import {
   MechanismInvocationGroup,
   MechanismStateStore,
   type MechanismFailureRecord,
+  type MechanismRuntimeOptions,
 } from "./mechanism-runtime.js";
 
 const NODE_SCOPE_TYPE = "loop_graph_node_scope";
@@ -138,6 +140,8 @@ export interface LoopGraphExtensionOptions {
   skillFailure?: SkillFailurePolicies;
   /** 按 graphId/nodeId 声明 renderer。Node 覆盖 Graph。 */
   contextRenderers?: ContextRendererRegistry;
+  /** Mechanism 安全事件与 ctx.exec 的预算、目录及超时策略。 */
+  mechanismRuntime?: MechanismRuntimeOptions;
 }
 
 export interface ContextRendererRegistry {
@@ -167,6 +171,8 @@ export interface LoopGraphLimits {
   childMaxSteps?: number;
   /** 单次 NodeContext.runAgent 超时毫秒数。默认 300000（5 分钟）。 */
   agentRunTimeoutMs?: number;
+  /** 单次 completion validator / gate 超时毫秒数。默认 60000。 */
+  completionValidationTimeoutMs?: number;
 }
 
 export interface LoopGraphExtension {
@@ -380,8 +386,8 @@ export function createLoopGraphExtension(
   });
 
   // agent 结束 → resolve Promise
-  pi.on("agent_end", () => {
-    activeNodeContext?.onAgentEnd();
+  pi.on("agent_end", async () => {
+    await activeNodeContext?.onAgentEnd();
   });
 
   const mechanismEventBroker = new MechanismEventBroker(pi, (failure) => {
@@ -389,6 +395,11 @@ export function createLoopGraphExtension(
       `mechanism:${failure.mechanismName}:${failure.phase}`,
       `${failure.reason} (policy=${failure.policy})`,
     );
+  }, {
+    ...options.mechanismRuntime,
+    completionValidationTimeoutMs:
+      options.mechanismRuntime?.completionValidationTimeoutMs
+      ?? limits.completionValidationTimeoutMs,
   });
   const mechanismStateStore = new MechanismStateStore();
 
@@ -461,6 +472,7 @@ export function createLoopGraphExtension(
       piInner,
       limits.agentRunTimeoutMs,
       modelMessageFormatter,
+      limits.completionValidationTimeoutMs,
     );
     rootRunActive = true;
 
@@ -679,6 +691,13 @@ export function createLoopGraphExtension(
             mechanismEventBroker,
             mechanismStateStore,
           );
+          nodeContext.setMechanismLifecycle({
+            beforeAgentRun: (agentRunId, request) =>
+              mechanismEventBroker.beginAgentRun(agentRunId, request, activeMechanisms),
+            validateCompletion: (agentRunId, completion) =>
+              mechanismEventBroker.validateCompletion(agentRunId, completion),
+            afterAgentRun: (agentRunId) => mechanismEventBroker.endAgentRun(agentRunId),
+          });
           const enterFailures = await invokeMechanismEnterHooks(activeMechanisms);
           const earlyEventFailures = mechanismEventBroker.consumeControlFailures(scope.scopeId);
           const preExecFailures = [...enterFailures, ...earlyEventFailures];
@@ -689,7 +708,10 @@ export function createLoopGraphExtension(
           runtime.assertNoCompactionBoundaryViolation();
           const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
           nodeContext.setNodeCompletionValidator(
-            effectiveNode.kind === "code" ? effectiveNode.validateCompletion : undefined,
+            node.kind === "code" ? node.validateCompletion : undefined,
+          );
+          nodeContext.setPostMechanismCompletionValidator(
+            getAgentChoiceValidator(graph, nodeId, node),
           );
           let completion = enterControl?.policy === "fail-node"
             ? createMechanismFailedCompletion(nodeId, enterControl, preExecFailures)
@@ -848,6 +870,7 @@ export function createLoopGraphExtension(
           await invokeMechanismErrorHooks(activeMechanisms, error);
           throw error;
         } finally {
+          nodeContext.setMechanismLifecycle(null);
           if (mechanismScopeId) {
             mechanismEventBroker.consumeControlFailures(mechanismScopeId);
           }
@@ -1111,10 +1134,34 @@ function snapshotRendererValue(value: unknown, seen = new WeakMap<object, unknow
   return Object.freeze(clone);
 }
 
+function snapshotMechanismContextContent(
+  content: import("../type.js").MechanismContextContent,
+): import("../type.js").MechanismContextContent {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) throw new TypeError("mechanism context content 必须是字符串或内容块数组");
+  return Object.freeze(content.map((block) => {
+    if (block?.type === "text" && typeof block.text === "string") {
+      return Object.freeze({ type: "text" as const, text: block.text });
+    }
+    if (
+      block?.type === "image" && typeof block.data === "string" &&
+      typeof block.mimeType === "string"
+    ) {
+      return Object.freeze({
+        type: "image" as const,
+        data: block.data,
+        mimeType: block.mimeType,
+      });
+    }
+    throw new TypeError("mechanism context 只支持 text/image 内容块");
+  }));
+}
+
 interface ResolvedLoopGraphLimits {
   rootMaxSteps: number;
   childMaxSteps: number;
   agentRunTimeoutMs: number;
+  completionValidationTimeoutMs: number;
 }
 
 function resolveLoopGraphLimits(limits: LoopGraphLimits | undefined): ResolvedLoopGraphLimits {
@@ -1122,6 +1169,7 @@ function resolveLoopGraphLimits(limits: LoopGraphLimits | undefined): ResolvedLo
     rootMaxSteps: limits?.rootMaxSteps ?? 100,
     childMaxSteps: limits?.childMaxSteps ?? 50,
     agentRunTimeoutMs: limits?.agentRunTimeoutMs ?? 5 * 60 * 1000,
+    completionValidationTimeoutMs: limits?.completionValidationTimeoutMs ?? 60_000,
   };
 
   for (const [name, value] of Object.entries(resolved)) {
@@ -1148,16 +1196,14 @@ function resolveLoopGraphLimits(limits: LoopGraphLimits | undefined): ResolvedLo
 function createAgentChoiceValidator(
   edges: Edge[],
   agentChoiceField: string | undefined,
-  existingValidator?: (
-    result: Record<string, unknown>,
-  ) => { isValid: true } | { isValid: false; reason: string },
-): (result: Record<string, unknown>) => { isValid: true } | { isValid: false; reason: string } {
+  existingValidator?: NonNullable<AgentRunRequest["validateCompletion"]>,
+): NonNullable<AgentRunRequest["validateCompletion"]> {
   const field = agentChoiceField ?? "chosen_edge_id";
 
-  return (result: Record<string, unknown>) => {
+  return async (result: Record<string, unknown>) => {
     // 先跑原始校验
     if (existingValidator) {
-      const vr = existingValidator(result);
+      const vr = await existingValidator(result);
       if (!vr.isValid) return vr;
     }
 
@@ -1279,6 +1325,17 @@ interface ActiveMechanismInvocation {
   initializationFailure?: MechanismFailureRecord;
 }
 
+function getAgentChoiceValidator(
+  graph: Graph,
+  nodeId: string,
+  node: Node,
+): AgentRunRequest["validateCompletion"] {
+  if (node.kind !== "code") return undefined;
+  const routing = graph.routing[nodeId];
+  if (!routing || routing.router.kind !== "agent-choice") return undefined;
+  return createAgentChoiceValidator(routing.edges, routing.agentChoiceField);
+}
+
 type MechanismHookFailure = MechanismFailureRecord;
 
 function prepareMechanismInvocations(
@@ -1298,16 +1355,23 @@ function prepareMechanismInvocations(
   ];
   const active: ActiveMechanismInvocation[] = [];
   for (const m of mechanisms) {
-    if (!m.onNodeEnter && !m.onNodeExit && !m.onNodeError) continue;
+    if (
+      !m.onNodeEnter && !m.onNodeExit && !m.onNodeError &&
+      !m.beforeAgentRun && !m.onTurnStart && !m.onTurnEnd &&
+      !m.onToolStart && !m.onToolResult && !m.beforeToolCall &&
+      !m.afterToolResult && !m.validateCompletion
+    ) continue;
     const scope = invocationGroup.createScope(m.name);
     const stateResolution = stateStore.resolve(instance, m);
-    const appendContext = (content: string): boolean => {
+    const appendContext = (content: import("../type.js").MechanismContextContent): boolean => {
       if (!scope.isActive()) return false;
+      const safeContent = snapshotMechanismContextContent(content);
       pi.sendMessage({
         customType: "loop_graph_mechanism",
-        content,
+        content: safeContent as any,
         display: false,
-      });
+        details: Object.freeze({ protocol: 1, scopeId: scope.scopeId }),
+      }, {});
       return true;
     };
     const ctx: MechanismContext = {
@@ -1321,7 +1385,10 @@ function prepareMechanismInvocations(
         m.failurePolicy ?? "continue",
         scope,
       ),
+      exec: eventBroker.createExec(scope),
+      decisions: eventBroker.createDecisionLog(scope),
       state: stateResolution.state as Record<string, unknown>,
+      context: Object.freeze({ append: appendContext }),
       appendContext,
     };
     active.push({
@@ -1501,6 +1568,11 @@ function createMechanismCompletionView(
     nodeId: completion.nodeId,
     status: completion.status,
     result: snapshotRendererValue(completion.result) as Readonly<Record<string, unknown>>,
+    ...(completion.verifiedResult === undefined
+      ? {}
+      : {
+          verifiedResult: snapshotRendererValue(completion.verifiedResult) as NonNullable<NodeCompletion["verifiedResult"]>,
+        }),
   });
 }
 

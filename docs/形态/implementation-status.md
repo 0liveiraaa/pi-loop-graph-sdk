@@ -2,7 +2,7 @@
 
 > 2026-07-13 | 全阶段完成
 >
-> 重构计划 Phase 0-12 全部落地；Mechanism Runtime Phase 0-4 全部落地。265 项测试全通过（14 文件，含真实 LLM spike）。以下为当前实现形态的完整快照。
+> 重构计划 Phase 0-12 全部落地；Mechanism Runtime Phase 0-8 全部落地。277 项测试全通过（14 文件，含真实 LLM spike）。以下为当前实现形态的完整快照。
 
 ## 重构完成状态（Phase 0-12）
 
@@ -26,6 +26,10 @@
 - **Phase 18（Mechanism Runtime Phase 3 核心）**：新增 `onNodeExit/onNodeError` 和 `continue/fail-node/fail-graph`。exit hook 在 Router/Edge 前读取冻结 completion；error hook 覆盖 enter/execute/exit/router/migrate 异常且不替换主错误。多个 Hook 失败按 `fail-graph > fail-node > continue` 归并；fail-node 由 Runtime 生成可信 failed completion 并继续走 Router。
 - **Phase 19（Mechanism Runtime Phase 2 — Event Broker）**：Extension 级 `MechanismEventBroker`；tool_result、turn_start、turn_end 各注册单一底层 pi listener；`ctx.events` 提供 `onToolResult/onTurnStart/onTurnEnd` 返回幂等 `dispose()`；NodeScope 关闭时自动 dispose 全部订阅；事件快照被复制并冻结；handler 按 mechanism 组合顺序串行执行；循环访问不增加底层 listener 数量；call/compose 只向当前 scope 分发，返回后恢复父订阅；handler 失败已接入 `failurePolicy`，在 Runtime 安全检查点消费，不直接从 pi callback 随机抛出。
 - **Phase 20（Mechanism Runtime Phase 4 — 机制私有 State）**：`Mechanism<TState>` 泛型；`createState(): TState`；`ctx.state`；双层 `WeakMap` 以 `AgentInstance + mechanism 对象身份` 为键；同一实例同一 mechanism 跨 visit 复用 state；同名但不同对象隔离；call 创建新 state；compose 复用 state；runtime-only delegate 新 AgentInstance 创建新 state；state 不写入 `instance.scratch`，不进入模型上下文；`createState` 每实例每定义只执行一次；`createState` 失败进入 `failurePolicy` 并跳过依赖该 state 的 Hook；`instance.scratch` 继续保留为兼容共享命名空间。
+- **Phase 21（Mechanism Runtime Phase 5 — Agent/Turn/Tool 观察 Hook）**：`PiNodeContext.runAgent()` 与 Mechanism broker 建立 run lifecycle；每次调用获得独立 `agentRunId`；新增 `beforeAgentRun/onTurnStart/onTurnEnd/onToolStart/onToolResult`；同节点多次 run 不串线；正式 Hook 读取冻结快照；工具结果按字节预算截断并标记 `truncated`。
+- **Phase 22（Mechanism Runtime Phase 6 — 工具决策与受控 Exec）**：`beforeToolCall` 支持 allow/deny/patch，按 mechanism 顺序串行组合；每次 patch 使用工具 schema 重验，无 schema 或非法 schema 时禁止 patch；`__graph_complete__` 固定 ABI 不允许一般 patch；`afterToolResult` 只能替换模型可见 content/isError，不开放 details/toolCallId；`ctx.exec.run()` 自动绑定 scope signal、timeout、cwd 根目录与 stdout/stderr 截断；`ctx.decisions.list()` 返回决策 trace。
+- **Phase 23（Mechanism Runtime Phase 7 — 异步 Completion Gate）**：outputSchema/request/node validator 支持 async；Mechanism `validateCompletion` 支持 allow/reject/fail-node/fail-graph；agent-choice 在 mechanism gate 后执行；reject 触发下一 turn；重复 completion 去重；并发 agent_end 串行；validator/gate timeout；scope signal 取消；只对 ok completion 验收；可信输出保存在 `completion.verifiedResult.checks`，AI result 无法覆盖。
+- **Phase 24（Mechanism Runtime Phase 8 — 结构化 Context）**：`ctx.context.append()` 支持 string 与 text/image blocks；`appendContext` 作为兼容别名保留；SDK 固定 `loop_graph_mechanism`、display、scope details 和非 triggerTurn options；内容复制冻结并剥离额外控制字段；投影在正常、scope missing 与 compaction recovery 中按 scopeId 过滤，防止跨节点泄漏。
 - 事件 handler 的 failurePolicy 接线已通过 Phase 19（Event Broker）完成，不再等待。
 - 验证：`npm test -- --run` 通过（14 文件、**265 项**，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
@@ -281,6 +285,8 @@ enterNode
 → CallFrame.localMechanisms.onNodeEnter
 → Node.mechanisms.onNodeEnter
 → execute
+  → beforeAgentRun
+  → turn/tool hooks × N
 → scope abort + LIFO cleanup
 ```
 
@@ -303,7 +309,10 @@ enterNode
 | `ctx.scope`                  | 当前 visit 的 `scopeId/visit/signal/isActive/onCleanup`                                                                                |
 | `ctx.events`                 | scoped 事件订阅：`onToolResult/onTurnStart/onTurnEnd`，返回幂等 `dispose()`；scope 关闭时自动取消                                     |
 | `ctx.state`                  | 类型化私有 state，由 `createState()` 懒初始化，跨 visit 保留；双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离                  |
+| `ctx.exec`                   | 受控外部命令：绑定 scope signal、timeout、cwd 根目录与输出预算                                                                          |
+| `ctx.decisions`              | 当前 scope 的工具 allow/deny/patch/result 决策 trace 只读快照                                                                          |
 | `ctx.appendContext(content)` | 仅在当前 scope 活跃时追加；失效后返回 false，不触发额外 turn                                                                            |
+| `ctx.context.append(content)` | 推荐的结构化追加 API；支持 string/text/image blocks，固定控制字段并绑定当前 scope                                                      |
 
 Mechanism 定义支持泛型和私有状态：
 
@@ -313,6 +322,14 @@ export interface Mechanism<TState = Record<string, unknown>> {
   failurePolicy?: MechanismFailurePolicy;
   createState?(): TState;                       // 当前 AgentInstance 中按 mechanism 对象身份懒初始化一次
   onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  beforeAgentRun?(ctx: MechanismAgentRunContext<TState>): void | Promise<void>;
+  onTurnStart?(ctx: MechanismTurnStartContext<TState>): void | Promise<void>;
+  onTurnEnd?(ctx: MechanismTurnEndContext<TState>): void | Promise<void>;
+  onToolStart?(ctx: MechanismToolStartContext<TState>): void | Promise<void>;
+  onToolResult?(ctx: MechanismToolResultContext<TState>): void | Promise<void>;
+  beforeToolCall?(ctx: MechanismToolCallContext<TState>): ToolCallDecision | void | Promise<ToolCallDecision | void>;
+  afterToolResult?(ctx: MechanismToolResultContext<TState>): ToolResultDecision | void | Promise<ToolResultDecision | void>;
+  validateCompletion?(ctx: MechanismCompletionContext<TState>): CompletionDecision | Promise<CompletionDecision>;
   onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
   onNodeError?(ctx: MechanismErrorContext<TState>): void | Promise<void>;
 }
@@ -530,6 +547,10 @@ DelegateGraphInvoker.invoke(graph, request)
 | **Phase 12 兼容性**                    | `GraphNode.boundary` 可选缺省 `call`；`ContextFrame`/`Edge.guard`/`Edge.migrate`/`frameFormatter` 签名不变；`executeGraph()` 保留为高级低层 API；支持回滚提交拆分               | ✅   |
 | **Phase 19（Mechanism Runtime Phase 2 — Event Broker）** | `MechanismEventBroker`；tool_result/turn_start/turn_end 单底层 listener；`ctx.events.onToolResult/onTurnStart/onTurnEnd` 返回幂等 `dispose()`；scope close 自动取消订阅；事件复制冻结；循环不增 listener；call/compose 作用域隔离；handler 错误接入 failurePolicy | ✅   |
 | **Phase 20（Mechanism Runtime Phase 4 — 机制私有 State）** | `Mechanism<TState>` 泛型；`createState()`；`ctx.state`；双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离；call 新 state / compose 复用 / delegate 新 instance 新 state；state 不写入 scratch 不进模型上下文；`createState` 失败进入 failurePolicy | ✅   |
+| **Phase 21（Mechanism Runtime Phase 5 — Agent/Turn/Tool Hook）** | 独立 agentRunId；beforeAgentRun/turn/tool 观察 Hook；冻结快照；工具输出预算；多次 runAgent 不串线 | ✅   |
+| **Phase 22（Mechanism Runtime Phase 6 — Tool/Exec）** | allow/deny/patch + schema 重验；受限结果替换；completion ABI 保护；受控 exec；决策 trace | ✅   |
+| **Phase 23（Mechanism Runtime Phase 7 — Completion Gate）** | async validator；allow/reject/fail-node/fail-graph；可信 verifiedResult；timeout/cancel/dedupe/并发保护；ok-only gate | ✅   |
+| **Phase 24（Mechanism Runtime Phase 8 — Structured Context）** | context.append text/image；固定控制字段；scope metadata；missing/compaction recovery 不跨 scope 泄漏 | ✅   |
 
 ---
 

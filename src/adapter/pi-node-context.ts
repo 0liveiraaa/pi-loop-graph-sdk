@@ -22,6 +22,21 @@ import {
   type ModelMessageFormatter,
 } from "./model-messages.js";
 
+export interface AgentRunMechanismLifecycle {
+  beforeAgentRun(
+    agentRunId: number,
+    request: AgentRunRequest,
+  ): Promise<{ blocked: boolean; reason?: string }>;
+  validateCompletion(
+    agentRunId: number,
+    completion: NodeCompletion,
+  ): Promise<
+    | { action: "allow"; verifiedResult?: NodeCompletion["verifiedResult"] }
+    | { action: "reject" | "fail-node" | "fail-graph"; reason: string }
+  >;
+  afterAgentRun(agentRunId: number): void;
+}
+
 export class PiNodeContext implements NodeContext {
   readonly signal: AbortSignal;
 
@@ -30,6 +45,7 @@ export class PiNodeContext implements NodeContext {
 
   /** __graph_complete__ 捕获的 completion 列表（同节点内可能调多次） */
   private pendingCompletions: NodeCompletion[] = [];
+  private readonly completionFingerprints = new Set<string>();
 
   /** 活跃 run 的 resolve */
   private activeResolve: ((c: NodeCompletion) => void) | null = null;
@@ -37,16 +53,23 @@ export class PiNodeContext implements NodeContext {
   private nextRunId = 1;
   private readonly agentRunTimeoutMs: number;
   private readonly messageFormatter: ModelMessageFormatter;
+  private readonly completionValidationTimeoutMs: number;
   private nodeValidateFn: AgentRunRequest["validateCompletion"] = undefined;
+  private postMechanismValidateFn: AgentRunRequest["validateCompletion"] = undefined;
+  private mechanismLifecycle: AgentRunMechanismLifecycle | null = null;
+  private validationInFlight: Promise<void> | null = null;
+  private agentEndQueued = false;
 
   constructor(
     pi: ExtensionAPI,
     agentRunTimeoutMs = 5 * 60 * 1000,
     messageFormatter: ModelMessageFormatter = defaultModelMessageFormatter,
+    completionValidationTimeoutMs = 60_000,
   ) {
     this.pi = pi;
     this.agentRunTimeoutMs = agentRunTimeoutMs;
     this.messageFormatter = messageFormatter;
+    this.completionValidationTimeoutMs = completionValidationTimeoutMs;
     this.signal = new AbortController().signal;
 
     // ── Provider 错误回流通道（单一监听器，生命周期跟实例走）──
@@ -81,9 +104,32 @@ export class PiNodeContext implements NodeContext {
       request.validateCompletion,
       this.nodeValidateFn,
     );
+    this.pendingCompletions = [];
+    this.completionFingerprints.clear();
     const runId = this.nextRunId++;
     this.activeRunId = runId;
     this.validateFn = validateFn;
+
+    try {
+      const start = this.mechanismLifecycle
+        ? await this.mechanismLifecycle.beforeAgentRun(runId, request)
+        : undefined;
+      if (start?.blocked) {
+        this.activeRunId = 0;
+        this.validateFn = undefined;
+        this.mechanismLifecycle?.afterAgentRun(runId);
+        return {
+          nodeId: this.currentNodeId ?? "unknown",
+          status: "failed",
+          result: { reason: start.reason ?? "mechanism 阻止了 agent run" },
+        };
+      }
+    } catch (error) {
+      this.activeRunId = 0;
+      this.validateFn = undefined;
+      this.mechanismLifecycle?.afterAgentRun(runId);
+      throw error;
+    }
 
     const promise = new Promise<NodeCompletion>((res) => {
       const timeout = setTimeout(() => {
@@ -129,6 +175,8 @@ export class PiNodeContext implements NodeContext {
           reason: error instanceof Error ? error.message : String(error),
         },
       };
+    } finally {
+      this.mechanismLifecycle?.afterAgentRun(runId);
     }
   }
 
@@ -166,6 +214,9 @@ export class PiNodeContext implements NodeContext {
     status: "ok" | "failed" | "cancelled";
     result: Record<string, unknown>;
   }): void {
+    const fingerprint = createCompletionFingerprint(params);
+    if (this.completionFingerprints.has(fingerprint)) return;
+    this.completionFingerprints.add(fingerprint);
     this.pendingCompletions.push({
       nodeId: this.currentNodeId ?? "unknown",
       status: params.status,
@@ -173,7 +224,30 @@ export class PiNodeContext implements NodeContext {
     });
   }
 
-  onAgentEnd(): void {
+  onAgentEnd(): Promise<void> {
+    if (this.validationInFlight) {
+      this.agentEndQueued = true;
+      return this.validationInFlight;
+    }
+    const work = this.processAgentEnd();
+    this.validationInFlight = work;
+    return work.finally(() => {
+      if (this.validationInFlight === work) {
+        this.validationInFlight = null;
+        if (
+          this.agentEndQueued && this.activeRunId !== 0 &&
+          this.pendingCompletions.length > 0
+        ) {
+          this.agentEndQueued = false;
+          queueMicrotask(() => { void this.onAgentEnd(); });
+        } else {
+          this.agentEndQueued = false;
+        }
+      }
+    });
+  }
+
+  private async processAgentEnd(): Promise<void> {
     if (this.activeRunId === 0) {
       // 图已终止，agent 仍在跑 → 追加消息告知
       this.pi.sendMessage(
@@ -190,38 +264,69 @@ export class PiNodeContext implements NodeContext {
     if (!resolve) return;
 
     if (this.pendingCompletions.length > 0) {
+      const currentCompletions = this.pendingCompletions;
+      this.pendingCompletions = [];
+      this.completionFingerprints.clear();
       // 取最后一次调用作为主 completion
-      const last = this.pendingCompletions[this.pendingCompletions.length - 1];
+      const last = currentCompletions[currentCompletions.length - 1];
 
       // 如果调了多次，把全部记录附在 result 里
       const completion: NodeCompletion = {
         ...last,
         result: {
           ...last.result,
-          ...(this.pendingCompletions.length > 1
-            ? { allCompletions: this.pendingCompletions }
+          ...(currentCompletions.length > 1
+            ? { allCompletions: currentCompletions }
             : {}),
         },
       };
 
       // 验证（如果节点声明了 validateCompletion 且 agent 上报 ok）
       if (this.validateFn && completion.status === "ok") {
-        const vr = this.validateFn(completion.result);
+        const vr = await runCompletionValidator(
+          this.validateFn,
+          completion.result,
+          this.completionValidationTimeoutMs,
+        );
         if (!vr.isValid) {
-          this.pi.sendMessage(
-            {
-              customType: "loop_graph_retry",
-              content: this.messageFormatter.validationRetry({
-                nodeId: this.currentNodeId ?? "unknown",
-                reason: vr.reason,
-                completeToolName: "__graph_complete__",
-              }),
-              display: false,
+          this.rejectCompletion(vr.reason);
+          return;
+        }
+      }
+
+      if (completion.status === "ok" && this.mechanismLifecycle) {
+        const gate = await this.mechanismLifecycle.validateCompletion(
+          this.activeRunId,
+          completion,
+        );
+        if (gate.action === "reject") {
+          this.rejectCompletion(gate.reason);
+          return;
+        }
+        if (gate.action === "fail-node" || gate.action === "fail-graph") {
+          resolve({
+            nodeId: this.currentNodeId ?? "unknown",
+            status: "failed",
+            result: {
+              reason: gate.reason,
+              completionGate: { action: gate.action },
             },
-            { triggerTurn: true },
-          );
-          debugLog.agentRetry(this.currentNodeId ?? "?", vr.reason);
-          this.pendingCompletions = [];
+          });
+          return;
+        }
+        if (gate.action === "allow" && gate.verifiedResult) {
+          completion.verifiedResult = gate.verifiedResult;
+        }
+      }
+
+      if (this.postMechanismValidateFn && completion.status === "ok") {
+        const vr = await runCompletionValidator(
+          this.postMechanismValidateFn,
+          completion.result,
+          this.completionValidationTimeoutMs,
+        );
+        if (!vr.isValid) {
+          this.rejectCompletion(vr.reason);
           return;
         }
       }
@@ -243,6 +348,23 @@ export class PiNodeContext implements NodeContext {
     this.activeResolve = null;
     this.activeRunId = 0;
     this.validateFn = undefined;
+    this.postMechanismValidateFn = undefined;
+  }
+
+  private rejectCompletion(reason: string): void {
+    this.pi.sendMessage(
+      {
+        customType: "loop_graph_retry",
+        content: this.messageFormatter.validationRetry({
+          nodeId: this.currentNodeId ?? "unknown",
+          reason,
+          completeToolName: "__graph_complete__",
+        }),
+        display: false,
+      },
+      { triggerTurn: true },
+    );
+    debugLog.agentRetry(this.currentNodeId ?? "?", reason);
   }
 
   setCurrentNodeId(nodeId: string): void {
@@ -251,8 +373,10 @@ export class PiNodeContext implements NodeContext {
     // 必须切断前一节点（或前一子图）的 completion，节点内多次 runAgent 则不会
     // 再次调用本方法，仍可保留其 allCompletions 语义。
     this.pendingCompletions = [];
+    this.completionFingerprints.clear();
     this.validateFn = undefined;
     this.nodeValidateFn = undefined;
+    this.postMechanismValidateFn = undefined;
   }
 
   setNodeCompletionValidator(
@@ -261,13 +385,28 @@ export class PiNodeContext implements NodeContext {
     this.nodeValidateFn = validate;
   }
 
+  setPostMechanismCompletionValidator(
+    validate: AgentRunRequest["validateCompletion"],
+  ): void {
+    this.postMechanismValidateFn = validate;
+  }
+
+  setMechanismLifecycle(lifecycle: AgentRunMechanismLifecycle | null): void {
+    this.mechanismLifecycle = lifecycle;
+  }
+
   reset(): void {
     this.currentNodeId = null;
     this.pendingCompletions = [];
+    this.completionFingerprints.clear();
     this.activeRunId = 0;
     this.activeResolve = null;
     this.validateFn = undefined;
     this.nodeValidateFn = undefined;
+    this.postMechanismValidateFn = undefined;
+    this.mechanismLifecycle = null;
+    this.validationInFlight = null;
+    this.agentEndQueued = false;
   }
 }
 
@@ -276,10 +415,10 @@ function composeCompletionValidators(
 ): AgentRunRequest["validateCompletion"] {
   const active = validators.filter((validator): validator is NonNullable<typeof validator> => validator != null);
   if (active.length === 0) return undefined;
-  return (result) => {
+  return async (result) => {
     for (const validator of active) {
       try {
-        const validation = validator(result);
+        const validation = await validator(result);
         if (!validation.isValid) return validation;
       } catch (error) {
         return {
@@ -290,6 +429,43 @@ function composeCompletionValidators(
     }
     return { isValid: true };
   };
+}
+
+async function runCompletionValidator(
+  validator: NonNullable<AgentRunRequest["validateCompletion"]>,
+  result: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<import("../type.js").CompletionValidationResult> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(validator(result)),
+      new Promise<import("../type.js").CompletionValidationResult>((resolve) => {
+        timeout = setTimeout(() => resolve({
+          isValid: false,
+          reason: `completion validation timed out after ${timeoutMs} ms`,
+        }), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    return {
+      isValid: false,
+      reason: `completion validator 异常: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function createCompletionFingerprint(params: {
+  status: "ok" | "failed" | "cancelled";
+  result: Record<string, unknown>;
+}): string {
+  try {
+    return `${params.status}:${JSON.stringify(params.result)}`;
+  } catch {
+    return `${params.status}:${String(params.result)}`;
+  }
 }
 
 function createSchemaValidator(

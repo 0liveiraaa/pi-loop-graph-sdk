@@ -6,6 +6,7 @@
 
 import type {
   ExtensionAPI,
+  ToolCallEvent,
   ToolResultEvent,
   TurnEndEvent,
   TurnStartEvent,
@@ -47,6 +48,10 @@ export interface NodeCompletion {
   nodeId: string;
   status: "ok" | "failed" | "cancelled";
   result: Record<string, unknown>;
+  /** Runtime 生成的可信验收结果；与 AI 自报 result 严格分离。 */
+  verifiedResult?: Readonly<{
+    checks: readonly MechanismVerifiedResultEntry[];
+  }>;
 }
 
 // ── 栈帧 ──
@@ -171,8 +176,12 @@ export interface AgentRunRequest {
    *  不通过 → inject reason → agent 继续 → 再次调用 __graph_complete__ */
   validateCompletion?: (
     result: Record<string, unknown>,
-  ) => { isValid: true } | { isValid: false; reason: string };
+  ) => CompletionValidationResult | Promise<CompletionValidationResult>;
 }
+
+export type CompletionValidationResult =
+  | { isValid: true }
+  | { isValid: false; reason: string };
 
 
 
@@ -242,9 +251,10 @@ export type Node =
  *   node           — 当前节点
  *   input          — 代码侧一次性入参
  *   scope          — 当前 mechanism invocation 的作用域、取消信号和 cleanup。
- *   appendContext  — 向 agent 消息流追加内容（append-only，不触发 turn）。
+ *   context.append — 向 agent 消息流追加文本或 SDK 内容块（append-only，不触发 turn）。
+ *   appendContext  — context.append 的兼容别名。
  *
- * appendContext 是 SDK 托管的安全通道：
+ * context.append/appendContext 是 SDK 托管的安全通道：
  *   · 仅当创建它的 NodeScope 仍为当前活动 scope 时写入；失效后返回 false。
  *   · 遵循原则 7「追加不注入」：不改 system prompt，只在消息流侧追加。
  * ctx.pi 保留完整 ExtensionAPI，是非托管逃生口；通过它产生的监听、消息和
@@ -264,9 +274,28 @@ export type MechanismEventView<T> =
     : T extends object ? { readonly [K in keyof T]: MechanismEventView<T[K]> }
     : T;
 
-export type MechanismToolResultEvent = MechanismEventView<ToolResultEvent>;
-export type MechanismTurnStartEvent = MechanismEventView<TurnStartEvent>;
-export type MechanismTurnEndEvent = MechanismEventView<TurnEndEvent>;
+export type MechanismAgentRunId = number;
+
+export type MechanismToolResultEvent = MechanismEventView<ToolResultEvent> & {
+  readonly agentRunId: MechanismAgentRunId | null;
+  readonly truncated: boolean;
+};
+export type MechanismTurnStartEvent = MechanismEventView<TurnStartEvent> & {
+  readonly agentRunId: MechanismAgentRunId | null;
+};
+export type MechanismTurnEndEvent = MechanismEventView<TurnEndEvent> & {
+  readonly agentRunId: MechanismAgentRunId | null;
+};
+export type MechanismToolStartEvent = Readonly<{
+  type: "tool_execution_start";
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  readonly agentRunId: MechanismAgentRunId;
+}>;
+export type MechanismToolCallEvent = MechanismEventView<ToolCallEvent> & {
+  readonly agentRunId: MechanismAgentRunId;
+};
 
 export interface MechanismEventSubscription {
   readonly disposed: boolean;
@@ -285,6 +314,53 @@ export interface MechanismEvents {
   ): MechanismEventSubscription;
 }
 
+export interface MechanismExecRunOptions {
+  /** 默认使用 Extension 配置值；必须是正数。 */
+  timeoutMs?: number;
+  /** 默认使用受控根目录；除非 Extension 显式放行，否则不能逃出该目录。 */
+  cwd?: string;
+  /** stdout 与 stderr 各自的 UTF-8 字节上限。 */
+  maxOutputBytes?: number;
+}
+
+export interface MechanismExecResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly code: number;
+  readonly killed: boolean;
+  readonly stdoutTruncated: boolean;
+  readonly stderrTruncated: boolean;
+}
+
+export interface MechanismExec {
+  run(
+    command: string,
+    args?: readonly string[],
+    options?: MechanismExecRunOptions,
+  ): Promise<MechanismExecResult>;
+}
+
+export type MechanismDecisionKind =
+  | "tool-allow"
+  | "tool-deny"
+  | "tool-patch"
+  | "tool-result-keep"
+  | "tool-result-replace";
+
+export interface MechanismDecisionTraceEntry {
+  readonly timestamp: number;
+  readonly agentRunId: MechanismAgentRunId;
+  readonly mechanismName: string;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly decision: MechanismDecisionKind;
+  readonly reason?: string;
+}
+
+export interface MechanismDecisionLog {
+  list(): readonly MechanismDecisionTraceEntry[];
+}
+
 export interface MechanismContext<TState = Record<string, unknown>> {
   pi: ExtensionAPI;
   instance: AgentInstance;
@@ -292,8 +368,24 @@ export interface MechanismContext<TState = Record<string, unknown>> {
   input: NodeInput;
   scope: MechanismScope;
   events: MechanismEvents;
+  exec: MechanismExec;
+  decisions: MechanismDecisionLog;
   state: TState;
-  appendContext(content: string): boolean;
+  context: MechanismContextAppender;
+  /** @deprecated 兼容别名；新代码优先使用 ctx.context.append。 */
+  appendContext(content: MechanismContextContent): boolean;
+}
+
+export type MechanismContextContentBlock =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
+
+export type MechanismContextContent =
+  | string
+  | readonly MechanismContextContentBlock[];
+
+export interface MechanismContextAppender {
+  append(content: MechanismContextContent): boolean;
 }
 
 export type MechanismFailurePolicy = "continue" | "fail-node" | "fail-graph";
@@ -302,6 +394,9 @@ export interface MechanismCompletionView {
   readonly nodeId: string;
   readonly status: NodeCompletion["status"];
   readonly result: Readonly<Record<string, unknown>>;
+  readonly verifiedResult?: Readonly<{
+    checks: readonly MechanismVerifiedResultEntry[];
+  }>;
 }
 
 export interface MechanismErrorView {
@@ -320,6 +415,85 @@ export interface MechanismErrorContext<TState = Record<string, unknown>>
   readonly error: Readonly<MechanismErrorView>;
 }
 
+export interface MechanismAgentRunRequestView {
+  readonly prompt: string;
+  readonly skill?: string;
+  readonly outputSchema?: unknown;
+}
+
+export interface MechanismAgentRunContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly request: Readonly<MechanismAgentRunRequestView>;
+}
+
+export interface MechanismTurnStartContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly event: MechanismTurnStartEvent;
+}
+
+export interface MechanismTurnEndContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly event: MechanismTurnEndEvent;
+}
+
+export interface MechanismToolStartContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly event: MechanismToolStartEvent;
+}
+
+export interface MechanismToolResultContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly event: MechanismToolResultEvent;
+}
+
+export interface MechanismToolCallContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly event: MechanismToolCallEvent;
+}
+
+export type ToolCallDecision =
+  | { readonly action: "allow" }
+  | { readonly action: "deny"; readonly reason: string }
+  | { readonly action: "patch"; readonly input: Readonly<Record<string, unknown>> };
+
+export type ToolResultContent =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
+
+export type ToolResultDecision =
+  | { readonly action: "keep" }
+  | {
+      readonly action: "replace";
+      readonly content?: readonly ToolResultContent[];
+      readonly isError?: boolean;
+    };
+
+export interface MechanismVerifiedResultEntry {
+  readonly mechanismName: string;
+  readonly result: Readonly<Record<string, unknown>>;
+}
+
+export type CompletionDecision =
+  | {
+      readonly action: "allow";
+      readonly verifiedResult?: Readonly<Record<string, unknown>>;
+    }
+  | { readonly action: "reject"; readonly reason: string }
+  | { readonly action: "fail-node"; readonly reason: string }
+  | { readonly action: "fail-graph"; readonly reason: string };
+
+export interface MechanismCompletionContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly agentRunId: MechanismAgentRunId;
+  readonly completion: Readonly<MechanismCompletionView>;
+}
+
 /**
  * 横切机制。框架在节点进入后、execute 之前自动分派 onNodeEnter。
  *
@@ -332,7 +506,7 @@ export interface MechanismErrorContext<TState = Record<string, unknown>>
  *
  * SDK 托管的产出通道：
  *   · ctx.instance.scratch —— 代码侧横切工作状态（见 AgentInstance.scratch）
- *   · ctx.appendContext()  —— 向 agent 消息流追加上下文（见 MechanismContext）
+ *   · ctx.context.append() —— 向 agent 消息流追加上下文（appendContext 为兼容别名）
  * ctx.pi 提供完整非托管定制能力。不得直接写 frames/background，也不得依赖
  * 闭包/模块变量传递跨节点业务状态。
  * onNodeEnter 抛错统一记日志后继续（不中止节点）。
@@ -344,6 +518,17 @@ export interface Mechanism<TState = Record<string, unknown>> {
   /** 当前 AgentInstance 中按 mechanism 对象身份懒初始化一次。 */
   createState?(): TState;
   onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  /** 每次 runAgent 发送 prompt 前调用；只读观察，不直接改写请求。 */
+  beforeAgentRun?(ctx: MechanismAgentRunContext<TState>): void | Promise<void>;
+  onTurnStart?(ctx: MechanismTurnStartContext<TState>): void | Promise<void>;
+  onTurnEnd?(ctx: MechanismTurnEndContext<TState>): void | Promise<void>;
+  /** 工具真正开始执行后的只读观察点。 */
+  onToolStart?(ctx: MechanismToolStartContext<TState>): void | Promise<void>;
+  /** 工具结果完成有限变换后收到只读、带预算的最终快照。 */
+  onToolResult?(ctx: MechanismToolResultContext<TState>): void | Promise<void>;
+  beforeToolCall?(ctx: MechanismToolCallContext<TState>): ToolCallDecision | void | Promise<ToolCallDecision | void>;
+  afterToolResult?(ctx: MechanismToolResultContext<TState>): ToolResultDecision | void | Promise<ToolResultDecision | void>;
+  validateCompletion?(ctx: MechanismCompletionContext<TState>): CompletionDecision | Promise<CompletionDecision>;
   /** 节点主体已产出 completion、Router/Edge 尚未处理时调用。 */
   onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
   /** 当前 node visit 任意阶段抛错时调用；只观察原始错误，不能替换它。 */

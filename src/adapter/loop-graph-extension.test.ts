@@ -27,7 +27,19 @@ function fakePi() {
     }),
     setActiveTools: vi.fn(),
     getActiveTools: vi.fn(() => ["read", "__graph_complete__"]),
-    getAllTools: vi.fn(() => [{ name: "read" }, { name: "__graph_complete__" }]),
+    getAllTools: vi.fn(() => [
+      {
+        name: "read",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      },
+      { name: "__graph_complete__", parameters: { type: "object", properties: {} } },
+    ]),
+    exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0, killed: false })),
     sendMessage: vi.fn((message: any, options?: { triggerTurn?: boolean }) => {
       sentMessages.push({ ...message, _options: options });
       if (!options?.triggerTurn) return;
@@ -2874,5 +2886,422 @@ describe("createLoopGraphExtension", () => {
 
       expect(order).toEqual(["global", "local", "execute"]);
     });
+  });
+});
+
+describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
+  it("每次 runAgent 使用独立 agentRunId，并按顺序分派 turn/tool Hook", async () => {
+    const pi = fakePi();
+    const order: string[] = [];
+    let runNumber = 0;
+    pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+      if (!options?.triggerTurn) return;
+      const sequence = ++runNumber;
+      queueMicrotask(async () => {
+        await pi.emitAsync("turn_start", { type: "turn_start", turnIndex: 0, timestamp: sequence });
+        await pi.emitAsync("tool_execution_start", {
+          type: "tool_execution_start",
+          toolCallId: `read-${sequence}`,
+          toolName: "read",
+          args: { path: `file-${sequence}` },
+        });
+        await pi.emitAsync("tool_result", {
+          type: "tool_result",
+          toolCallId: `read-${sequence}`,
+          toolName: "read",
+          input: { path: `file-${sequence}` },
+          content: [{ type: "text", text: "ok" }],
+          details: undefined,
+          isError: false,
+        });
+        await pi.emitAsync("turn_end", {
+          type: "turn_end",
+          turnIndex: 0,
+          message: { role: "assistant", content: [], timestamp: sequence },
+          toolResults: [],
+        });
+        await pi.emitAsync("tool_result", {
+          type: "tool_result",
+          toolCallId: `complete-${sequence}`,
+          toolName: "__graph_complete__",
+          input: {},
+          content: [{ type: "text", text: "done" }],
+          details: { status: "ok", result: { sequence } },
+          isError: false,
+        });
+        await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
+      });
+    });
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase5_run_ids");
+    graph.mechanisms = [{
+      name: "lifecycle",
+      beforeAgentRun(ctx) { order.push(`before:${ctx.agentRunId}`); },
+      onTurnStart(ctx) { order.push(`turn-start:${ctx.agentRunId}`); },
+      onToolStart(ctx) { order.push(`tool-start:${ctx.agentRunId}`); },
+      onToolResult(ctx) {
+        if (ctx.event.toolName === "read") order.push(`tool-result:${ctx.agentRunId}`);
+      },
+      onTurnEnd(ctx) { order.push(`turn-end:${ctx.agentRunId}`); },
+    }];
+    graph.nodes.start = {
+      kind: "code",
+      id: "start",
+      subGoal: "run twice",
+      async execute(_instance, _input, ctx) {
+        await ctx.runAgent({ prompt: "first" });
+        // 第一轮已结束、第二轮尚未开始：晚到事件不能被正式 Hook 接收或误归属。
+        await pi.emitAsync("turn_start", { type: "turn_start", turnIndex: 99, timestamp: 99 });
+        return ctx.runAgent({ prompt: "second" });
+      },
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result.status).toBe("ok");
+    expect(order).toEqual([
+      "before:1", "turn-start:1", "tool-start:1", "tool-result:1", "turn-end:1",
+      "before:2", "turn-start:2", "tool-start:2", "tool-result:2", "turn-end:2",
+    ]);
+  });
+
+  it("串行组合工具 patch、结果脱敏与决策 trace，并重新校验 schema", async () => {
+    const pi = fakePi();
+    let executedInput: Record<string, unknown> | null = null;
+    let modelContent: unknown;
+    let observerContent: unknown;
+    let trace: readonly any[] = [];
+    pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+      if (!options?.triggerTurn) return;
+      queueMicrotask(async () => {
+        const call = {
+          type: "tool_call",
+          toolCallId: "read-1",
+          toolName: "read",
+          input: { path: "unsafe" },
+        };
+        const decisions = await pi.emitAsync("tool_call", call);
+        const blocked = decisions.some((item: any) => item?.block);
+        if (!blocked) {
+          executedInput = { ...call.input };
+          const results = await pi.emitAsync("tool_result", {
+            type: "tool_result",
+            toolCallId: "read-1",
+            toolName: "read",
+            input: call.input,
+            content: [{ type: "text", text: "secret" }],
+            details: { privateRuntimeValue: true },
+            isError: false,
+          });
+          modelContent = results.find((item: any) => item?.content)?.content;
+        }
+        await pi.emitAsync("tool_result", {
+          type: "tool_result",
+          toolCallId: "complete-1",
+          toolName: "__graph_complete__",
+          input: {},
+          content: [{ type: "text", text: "done" }],
+          details: { status: "ok", result: {} },
+          isError: false,
+        });
+        await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
+      });
+    });
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase6_tool_pipeline");
+    graph.mechanisms = [
+      {
+        name: "path-policy",
+        beforeToolCall(ctx) {
+          if (ctx.event.toolName === "read") return { action: "patch", input: { path: "safe.txt" } };
+        },
+        afterToolResult(ctx) {
+          if (ctx.event.toolName === "read") {
+            return { action: "replace", content: [{ type: "text", text: "[redacted]" }] };
+          }
+        },
+      },
+      {
+        name: "audit",
+        beforeToolCall(ctx) {
+          if (ctx.event.toolName === "read") expect(ctx.event.input).toEqual({ path: "safe.txt" });
+          return { action: "allow" };
+        },
+        onToolResult(ctx) {
+          if (ctx.event.toolName === "read") observerContent = ctx.event.content;
+        },
+        onNodeExit(ctx) { trace = ctx.decisions.list(); },
+      },
+    ];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "tool pipeline",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "go" }); },
+    };
+
+    await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(executedInput).toEqual({ path: "safe.txt" });
+    expect(modelContent).toEqual([{ type: "text", text: "[redacted]" }]);
+    expect(observerContent).toEqual([{ type: "text", text: "[redacted]" }]);
+    expect(trace.map((item) => item.decision)).toContain("tool-allow");
+  });
+
+  it("deny 阻止工具执行；非法 patch 也按 fail-closed 处理", async () => {
+    const pi = fakePi();
+    const blocks: string[] = [];
+    let readExecuted = false;
+    pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+      if (!options?.triggerTurn) return;
+      queueMicrotask(async () => {
+        for (const input of [{ path: "denied" }, { path: 42 }]) {
+          const event = { type: "tool_call", toolCallId: String(input.path), toolName: "read", input };
+          const results = await pi.emitAsync("tool_call", event);
+          const block = results.find((item: any) => item?.block) as any;
+          if (block) blocks.push(block.reason);
+          else readExecuted = true;
+        }
+        await pi.emitAsync("tool_result", {
+          type: "tool_result", toolCallId: "complete", toolName: "__graph_complete__", input: {},
+          content: [], details: { status: "ok", result: {} }, isError: false,
+        });
+        await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
+      });
+    });
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase6_deny");
+    graph.mechanisms = [{
+      name: "gate",
+      beforeToolCall(ctx) {
+        if ((ctx.event.input as Record<string, unknown>).path === "denied") {
+          return { action: "deny", reason: "not allowed" };
+        }
+        return { action: "patch", input: { path: 42 } };
+      },
+    }];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "deny",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "go" }); },
+    };
+
+    await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(readExecuted).toBe(false);
+    expect(blocks[0]).toBe("not allowed");
+    expect(blocks[1]).toContain("patch 被拒绝");
+  });
+
+  it("ctx.exec 绑定 scope signal、限制 cwd，并截断输出", async () => {
+    const pi = fakePi();
+    let execSignal: AbortSignal | undefined;
+    pi.exec.mockImplementation(async (_command: string, _args: string[], options: any) => {
+      execSignal = options.signal;
+      return { stdout: "abcdef", stderr: "uvwxyz", code: 0, killed: false };
+    });
+    let result: any;
+    let outsideError = "";
+    const loop = createLoopGraphExtension(pi, {
+      mechanismRuntime: { execRoot: process.cwd(), execMaxOutputBytes: 4 },
+    });
+    const graph = minimalGraph("phase6_exec");
+    graph.mechanisms = [{
+      name: "exec",
+      async onNodeEnter(ctx) {
+        result = await ctx.exec.run("demo");
+        try {
+          await ctx.exec.run("demo", [], { cwd: join(process.cwd(), "..") });
+        } catch (error) {
+          outsideError = error instanceof Error ? error.message : String(error);
+        }
+      },
+    }];
+
+    await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result).toMatchObject({ stdout: "abcd", stderr: "uvwx", stdoutTruncated: true, stderrTruncated: true });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(outsideError).toContain("超出受控根目录");
+    expect(execSignal?.aborted).toBe(true);
+  });
+});
+
+describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
+  it("异步真实验收可 reject 后重试，并把可信结果与 AI result 分离", async () => {
+    const pi = fakePi();
+    let turn = 0;
+    let execCount = 0;
+    let activeValidations = 0;
+    let maxActiveValidations = 0;
+    let routedCompletion: any;
+    pi.exec.mockImplementation(async () => ({
+      stdout: execCount++ === 0 ? "tests failed" : "8 tests passed",
+      stderr: "",
+      code: execCount === 1 ? 1 : 0,
+      killed: false,
+    }));
+    pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+      if (!options?.triggerTurn) return;
+      const currentTurn = ++turn;
+      queueMicrotask(async () => {
+        await pi.emitAsync("tool_result", {
+          type: "tool_result",
+          toolCallId: `complete-${currentTurn}`,
+          toolName: "__graph_complete__",
+          input: {},
+          content: [],
+          details: {
+            status: "ok",
+            result: { testsPassed: 999, verifiedResult: { forged: true } },
+          },
+          isError: false,
+        });
+        await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
+      });
+    });
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase7_async_gate");
+    graph.mechanisms = [{
+      name: "real-tests",
+      async validateCompletion(ctx) {
+        activeValidations += 1;
+        maxActiveValidations = Math.max(maxActiveValidations, activeValidations);
+        try {
+          const result = await ctx.exec.run("npm", ["test"]);
+          if (result.code !== 0) return { action: "reject", reason: "真实测试未通过" };
+          return {
+            action: "allow",
+            verifiedResult: { exitCode: result.code, output: result.stdout },
+          };
+        } finally {
+          activeValidations -= 1;
+        }
+      },
+    }];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "run validation",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "finish" }); },
+    };
+    graph.routing.start!.edges[0].guard = (completion) => {
+      routedCompletion = completion;
+      return true;
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result.status).toBe("ok");
+    expect(turn).toBe(2);
+    expect(maxActiveValidations).toBe(1);
+    expect(routedCompletion.result).toMatchObject({
+      testsPassed: 999,
+      verifiedResult: { forged: true },
+    });
+    expect(routedCompletion.verifiedResult).toEqual({
+      checks: [{
+        mechanismName: "real-tests",
+        result: { exitCode: 0, output: "8 tests passed" },
+      }],
+    });
+  });
+
+  it("completion gate 的 fail-graph 进入 Runtime 控制路径", async () => {
+    const pi = fakePi();
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase7_fail_graph");
+    graph.mechanisms = [{
+      name: "release-gate",
+      validateCompletion() {
+        return { action: "fail-graph", reason: "验收基础设施不可用" };
+      },
+    }];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "fail graph",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "go" }); },
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result.status).toBe("failed");
+    expect(String(result.result.reason)).toContain("验收基础设施不可用");
+  });
+
+  it("completion gate 超时会按 failurePolicy fail-node，不会提前放行", async () => {
+    const pi = fakePi();
+    const loop = createLoopGraphExtension(pi, {
+      mechanismRuntime: { completionValidationTimeoutMs: 5 },
+    });
+    const graph = minimalGraph("phase7_gate_timeout");
+    graph.mechanisms = [{
+      name: "hanging-gate",
+      failurePolicy: "fail-node",
+      validateCompletion() { return new Promise(() => {}); },
+    }];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "timeout",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "go" }); },
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result.status).toBe("failed");
+    expect(String(result.result.reason)).toContain("验收超时");
+  });
+
+  it("failed/cancelled completion 默认绕过可信 gate", async () => {
+    const pi = fakePi();
+    let gateCalls = 0;
+    pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+      if (!options?.triggerTurn) return;
+      queueMicrotask(async () => {
+        await pi.emitAsync("tool_result", {
+          type: "tool_result", toolCallId: "failed", toolName: "__graph_complete__", input: {},
+          content: [], details: { status: "failed", result: { reason: "agent failed" } }, isError: true,
+        });
+        await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
+      });
+    });
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase7_non_ok_bypass");
+    graph.mechanisms = [{
+      name: "only-ok",
+      validateCompletion() { gateCalls += 1; return { action: "allow" }; },
+    }];
+    graph.nodes.start = {
+      kind: "code", id: "start", subGoal: "failed",
+      async execute(_instance, _input, ctx) { return ctx.runAgent({ prompt: "go" }); },
+    };
+
+    const result = await loop.executeGraph(graph, { source: "command", args: "" });
+
+    expect(result.status).toBe("failed");
+    expect(gateCalls).toBe(0);
+  });
+
+  it("ctx.context.append 只发送复制后的 SDK 内容块和固定控制字段", async () => {
+    const pi = fakePi();
+    const blocks: any[] = [{ type: "text", text: "机制说明", customType: "forged" }];
+    const loop = createLoopGraphExtension(pi);
+    const graph = minimalGraph("phase8_structured_context");
+    graph.mechanisms = [{
+      name: "structured",
+      onNodeEnter(ctx) {
+        expect(ctx.context.append(blocks)).toBe(true);
+        blocks[0].text = "被外部修改";
+      },
+    }];
+
+    await loop.executeGraph(graph, { source: "command", args: "" });
+
+    const call = (pi.sendMessage as any).mock.calls.find(
+      (item: any[]) => item[0]?.customType === "loop_graph_mechanism",
+    );
+    expect(call[0]).toMatchObject({
+      customType: "loop_graph_mechanism",
+      content: [{ type: "text", text: "机制说明" }],
+      display: false,
+      details: { protocol: 1 },
+    });
+    expect(call[0].details.scopeId).toEqual(expect.any(String));
+    expect(call[1]).toEqual({});
+    expect(call[0].content[0]).not.toHaveProperty("customType");
+    expect(Object.isFrozen(call[0].content)).toBe(true);
   });
 });
