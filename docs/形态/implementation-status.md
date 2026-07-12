@@ -1,8 +1,8 @@
 # Loop Graph SDK 实现形态
 
-> 2026-07-12 | 全阶段完成
+> 2026-07-13 | 全阶段完成
 >
-> 重构计划 Phase 0-12 全部落地，206 项测试全通过。以下为当前实现形态的完整快照。
+> 重构计划 Phase 0-12 全部落地；Mechanism Runtime Phase 0-4 全部落地。265 项测试全通过（14 文件，含真实 LLM spike）。以下为当前实现形态的完整快照。
 
 ## 重构完成状态（Phase 0-12）
 
@@ -23,7 +23,11 @@
 - **Phase 15（上下文定制 Phase 4-5）**：`outputSchema` 接入 Runtime completion retry；Node validator 和 agent-choice 形成稳定校验链；恢复/失败/completion result 文案可定制。`node.skill` 支持异步 provider、自定义 renderer、missing/error 策略，并传播到 runtime-only delegate session。
 - **Phase 16（上下文定制 Phase 3）**：新增 renderer registry 与直接调用 override，覆盖顺序固定为调用级 > Node > Graph > Extension > 默认。调用级 renderer 沿共享 Session 的 call/compose 传播；delegate Session 使用自身 factory 配置。renderer 抛错时图失败且不回退默认 CURRENT。
 - **Phase 17（Mechanism Runtime Phase 0-1）**：每个 mechanism 的每次 node visit 获得独立 scope，提供 `signal/isActive/onCleanup`；正常、异常、call、compose 和 runtime-only delegate 路径统一关闭，cleanup 按 LIFO 执行且错误不覆盖主结果。安全 `appendContext` 绑定当前 `scopeId`，失效后返回 false；完整 `ctx.pi` 继续作为非托管能力保留。
-- 验证：`npm test -- --run` 通过（14 文件、247 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
+- **Phase 18（Mechanism Runtime Phase 3 核心）**：新增 `onNodeExit/onNodeError` 和 `continue/fail-node/fail-graph`。exit hook 在 Router/Edge 前读取冻结 completion；error hook 覆盖 enter/execute/exit/router/migrate 异常且不替换主错误。多个 Hook 失败按 `fail-graph > fail-node > continue` 归并；fail-node 由 Runtime 生成可信 failed completion 并继续走 Router。
+- **Phase 19（Mechanism Runtime Phase 2 — Event Broker）**：Extension 级 `MechanismEventBroker`；tool_result、turn_start、turn_end 各注册单一底层 pi listener；`ctx.events` 提供 `onToolResult/onTurnStart/onTurnEnd` 返回幂等 `dispose()`；NodeScope 关闭时自动 dispose 全部订阅；事件快照被复制并冻结；handler 按 mechanism 组合顺序串行执行；循环访问不增加底层 listener 数量；call/compose 只向当前 scope 分发，返回后恢复父订阅；handler 失败已接入 `failurePolicy`，在 Runtime 安全检查点消费，不直接从 pi callback 随机抛出。
+- **Phase 20（Mechanism Runtime Phase 4 — 机制私有 State）**：`Mechanism<TState>` 泛型；`createState(): TState`；`ctx.state`；双层 `WeakMap` 以 `AgentInstance + mechanism 对象身份` 为键；同一实例同一 mechanism 跨 visit 复用 state；同名但不同对象隔离；call 创建新 state；compose 复用 state；runtime-only delegate 新 AgentInstance 创建新 state；state 不写入 `instance.scratch`，不进入模型上下文；`createState` 每实例每定义只执行一次；`createState` 失败进入 `failurePolicy` 并跳过依赖该 state 的 Hook；`instance.scratch` 继续保留为兼容共享命名空间。
+- 事件 handler 的 failurePolicy 接线已通过 Phase 19（Event Broker）完成，不再等待。
+- 验证：`npm test -- --run` 通过（14 文件、**265 项**，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节为准。
 
@@ -33,7 +37,7 @@
 
 ```
 src/
-├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, …）
+├── type.ts                 # 核心类型（Graph, Node, Edge, Router, AgentInstance, Mechanism, …）
 ├── runtime.ts              # GraphRuntime（调用栈 callStack + 帧栈 frames + NodeScope）
 ├── validate.ts             # 图校验 + 工具校验（validateGraphTools）
 ├── router.ts               # 单边裁决
@@ -42,6 +46,7 @@ src/
 ├── registry.ts             # GraphRegistry 实例级图注册表（+ deprecated 全局兼容层）
 ├── index.ts                # 对外导出（library API + deprecated 兼容层）
 ├── adapter/
+│   ├── mechanism-runtime.ts     # ★ MechanismInvocationGroup + MechanismEventBroker + mechanism state 管理
 │   ├── loop-graph-extension.ts  # ★ 可实例化运行时工厂 createLoopGraphExtension()
 │   ├── extension.ts             # debug/demo extension 入口（可选，{ demoGraphs: true }）
 │   ├── projection.ts            # 纯函数：scope 匹配 + frames 格式化
@@ -50,7 +55,7 @@ src/
 │   ├── complete-tool.ts         # __graph_complete__ 工具定义
 │   ├── debug-log.ts             # 调试日志（不再假设 frame 必含兼容字段）
 │   ├── compaction-frame.test.ts # Compaction 边界 / frame 行为 / fail-closed 测试
-│   ├── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent + 工具校验
+│   ├── loop-graph-extension.test.ts  # 工厂 + 实例隔离 + 子图 agent + 工具校验 + Mechanism 生命周期/state/事件/~35 条
 │   ├── characterization.test.ts # NodeScope 行为冻结基准（NodeScope visit/唯一性/时序/fail-closed）
 │   ├── graph-execution-host.ts       # DelegateGraphInvoker / IsolatedSessionGraphHost
 │   ├── graph-execution-host.test.ts  # Host 生命周期测试
@@ -283,10 +288,11 @@ enterNode
 - compose 子图的 `Graph.mechanisms` 保存在当前 `CallFrame.localMechanisms`，退出后撤销。
 - `Node.mechanisms` 只在当前节点叠加。
 - 每个 mechanism 若定义了 `onNodeEnter`，串行 `await onNodeEnter(ctx)`。
-- `onNodeEnter` 抛错统一记 debug log 后继续，不中止节点。
+- 节点主体完成后、Router/Edge 前串行执行 `onNodeExit`；任意 visit 阶段抛错时执行 `onNodeError`。
+- Hook 抛错按 mechanism 的 `failurePolicy` 处理；默认 `continue` 保持旧行为。
 - 每次 node visit 为每个 mechanism 创建独立 scope；正常或异常退出都会 abort 并执行 cleanup。
 
-`MechanismContext` 提供 pi 全部能力 + 两个显式作用通道：
+`MechanismContext<TState>` 提供完整非托管 pi 能力和 Runtime 托管作用通道：
 
 | 成员                           | 用途                                                                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -295,9 +301,35 @@ enterNode
 | `ctx.node`                   | 当前节点                                                                                                                                |
 | `ctx.input`                  | 代码侧一次性入参                                                                                                                        |
 | `ctx.scope`                  | 当前 visit 的 `scopeId/visit/signal/isActive/onCleanup`                                                                                |
+| `ctx.events`                 | scoped 事件订阅：`onToolResult/onTurnStart/onTurnEnd`，返回幂等 `dispose()`；scope 关闭时自动取消                                     |
+| `ctx.state`                  | 类型化私有 state，由 `createState()` 懒初始化，跨 visit 保留；双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离                  |
 | `ctx.appendContext(content)` | 仅在当前 scope 活跃时追加；失效后返回 false，不触发额外 turn                                                                            |
 
-裸 `ctx.pi.on()` 保持完全可用，但 pi 没有 off，监听器属于 Session 级非托管资源；`ctx.scope.isActive()` 可让旧回调静默，却不会移除底层监听器。
+Mechanism 定义支持泛型和私有状态：
+
+```typescript
+export interface Mechanism<TState = Record<string, unknown>> {
+  name: string;
+  failurePolicy?: MechanismFailurePolicy;
+  createState?(): TState;                       // 当前 AgentInstance 中按 mechanism 对象身份懒初始化一次
+  onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
+  onNodeError?(ctx: MechanismErrorContext<TState>): void | Promise<void>;
+}
+```
+
+`ctx.state` 使用双层 WeakMap：
+- 以 `AgentInstance` 为第一层键，`mechanism 对象身份` 为第二层键。
+- 同一实例、同一 mechanism 对象跨 visit 复用 state。
+- 同名但不同对象（不同 `Graph.mechanisms` 与 `Node.mechanisms` 中的实例）隔离。
+- `call` 边界创建新 AgentInstance，因此创建新 state。
+- `compose` 复用父 AgentInstance，因此复用 state。
+- runtime-only delegate 的新 AgentInstance 创建新 state。
+- state **不写入** `instance.scratch`，**不进入**模型上下文。
+- `createState` 每实例每定义只执行一次；失败后进入 `failurePolicy` 并跳过依赖该 state 的 Hook。
+- `instance.scratch` 继续保留为兼容的共享命名空间。
+
+裸 `ctx.pi.on()` 保持完全可用，但 pi 没有 off，监听器属于 Session 级非托管资源；`ctx.scope.isActive()` 可让旧回调静默，却不会移除底层监听器。推荐优先使用 `ctx.events` 获取 scope 托管的订阅生命周期。
 
 ### 2.17 agent-choice 路由
 
@@ -496,6 +528,8 @@ DelegateGraphInvoker.invoke(graph, request)
 | **Phase 10 delegate host 接线**        | `DelegateGraphInvoker` + `IsolatedSessionGraphHost` + Registry 接线；graph node 的 `boundary: "delegate"` 通过 `delegateInvoker.invoke()` 执行；`createDelegateHost` 选项暴露给工厂 | ✅   |
 | **Phase 11 完整验证矩阵**              | 206 项全量测试通过（13 文件，含真实 LLM spike），覆盖 compaction+scope、compose 异常回滚、delegate 隔离、并发等                                                                               | ✅   |
 | **Phase 12 兼容性**                    | `GraphNode.boundary` 可选缺省 `call`；`ContextFrame`/`Edge.guard`/`Edge.migrate`/`frameFormatter` 签名不变；`executeGraph()` 保留为高级低层 API；支持回滚提交拆分               | ✅   |
+| **Phase 19（Mechanism Runtime Phase 2 — Event Broker）** | `MechanismEventBroker`；tool_result/turn_start/turn_end 单底层 listener；`ctx.events.onToolResult/onTurnStart/onTurnEnd` 返回幂等 `dispose()`；scope close 自动取消订阅；事件复制冻结；循环不增 listener；call/compose 作用域隔离；handler 错误接入 failurePolicy | ✅   |
+| **Phase 20（Mechanism Runtime Phase 4 — 机制私有 State）** | `Mechanism<TState>` 泛型；`createState()`；`ctx.state`；双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离；call 新 state / compose 复用 / delegate 新 instance 新 state；state 不写入 scratch 不进模型上下文；`createState` 失败进入 failurePolicy | ✅   |
 
 ---
 

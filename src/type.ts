@@ -4,7 +4,12 @@
 //
 //  栈式子图编排
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ToolResultEvent,
+  TurnEndEvent,
+  TurnStartEvent,
+} from "@earendil-works/pi-coding-agent";
 //
 //    AgentInstance 持有一个有序逻辑帧栈（frames），节点离开时由边折叠；
 //    compose 以有界 frame segment 实现结构化生长与归约。
@@ -253,13 +258,66 @@ export interface MechanismScope {
   onCleanup(cleanup: () => void | Promise<void>): void;
 }
 
-export interface MechanismContext {
+export type MechanismEventView<T> =
+  T extends (...args: any[]) => any ? T
+    : T extends readonly (infer U)[] ? readonly MechanismEventView<U>[]
+    : T extends object ? { readonly [K in keyof T]: MechanismEventView<T[K]> }
+    : T;
+
+export type MechanismToolResultEvent = MechanismEventView<ToolResultEvent>;
+export type MechanismTurnStartEvent = MechanismEventView<TurnStartEvent>;
+export type MechanismTurnEndEvent = MechanismEventView<TurnEndEvent>;
+
+export interface MechanismEventSubscription {
+  readonly disposed: boolean;
+  dispose(): void;
+}
+
+export interface MechanismEvents {
+  onToolResult(
+    handler: (event: MechanismToolResultEvent) => void | Promise<void>,
+  ): MechanismEventSubscription;
+  onTurnStart(
+    handler: (event: MechanismTurnStartEvent) => void | Promise<void>,
+  ): MechanismEventSubscription;
+  onTurnEnd(
+    handler: (event: MechanismTurnEndEvent) => void | Promise<void>,
+  ): MechanismEventSubscription;
+}
+
+export interface MechanismContext<TState = Record<string, unknown>> {
   pi: ExtensionAPI;
   instance: AgentInstance;
   node: Node;
   input: NodeInput;
   scope: MechanismScope;
+  events: MechanismEvents;
+  state: TState;
   appendContext(content: string): boolean;
+}
+
+export type MechanismFailurePolicy = "continue" | "fail-node" | "fail-graph";
+
+export interface MechanismCompletionView {
+  readonly nodeId: string;
+  readonly status: NodeCompletion["status"];
+  readonly result: Readonly<Record<string, unknown>>;
+}
+
+export interface MechanismErrorView {
+  readonly name: string;
+  readonly message: string;
+  readonly stack?: string;
+}
+
+export interface MechanismExitContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly completion: Readonly<MechanismCompletionView>;
+}
+
+export interface MechanismErrorContext<TState = Record<string, unknown>>
+  extends MechanismContext<TState> {
+  readonly error: Readonly<MechanismErrorView>;
 }
 
 /**
@@ -279,9 +337,17 @@ export interface MechanismContext {
  * 闭包/模块变量传递跨节点业务状态。
  * onNodeEnter 抛错统一记日志后继续（不中止节点）。
  */
-export interface Mechanism {
+export interface Mechanism<TState = Record<string, unknown>> {
   name: string;
-  onNodeEnter?(ctx: MechanismContext): void | Promise<void>;
+  /** hook 抛错后的控制策略。默认 continue，保持向后兼容。 */
+  failurePolicy?: MechanismFailurePolicy;
+  /** 当前 AgentInstance 中按 mechanism 对象身份懒初始化一次。 */
+  createState?(): TState;
+  onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  /** 节点主体已产出 completion、Router/Edge 尚未处理时调用。 */
+  onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
+  /** 当前 node visit 任意阶段抛错时调用；只观察原始错误，不能替换它。 */
+  onNodeError?(ctx: MechanismErrorContext<TState>): void | Promise<void>;
 }
 
 // ── 边 ──

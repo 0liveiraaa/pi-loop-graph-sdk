@@ -31,6 +31,9 @@ import type {
   GraphRunResult,
   Mechanism,
   MechanismContext,
+  MechanismErrorContext,
+  MechanismExitContext,
+  MechanismFailurePolicy,
   Node,
   NodeCompletion,
   NodeInput,
@@ -80,7 +83,12 @@ import {
   type SkillFailurePolicies,
   type SkillLoadContext,
 } from "./skill-content.js";
-import { MechanismInvocationGroup } from "./mechanism-runtime.js";
+import {
+  MechanismEventBroker,
+  MechanismInvocationGroup,
+  MechanismStateStore,
+  type MechanismFailureRecord,
+} from "./mechanism-runtime.js";
 
 const NODE_SCOPE_TYPE = "loop_graph_node_scope";
 const completeToolRegistered = new WeakSet<object>();
@@ -376,6 +384,14 @@ export function createLoopGraphExtension(
     activeNodeContext?.onAgentEnd();
   });
 
+  const mechanismEventBroker = new MechanismEventBroker(pi, (failure) => {
+    debugLog.graphError(
+      `mechanism:${failure.mechanismName}:${failure.phase}`,
+      `${failure.reason} (policy=${failure.policy})`,
+    );
+  });
+  const mechanismStateStore = new MechanismStateStore();
+
   // 新 session 必须解除 fail-closed；runtime-only session 同样需要该重置。
   pi.on("session_start", async (_event, ctx) => {
     pendingCompactionFrameBase = null;
@@ -613,11 +629,14 @@ export function createLoopGraphExtension(
 
         const previousTools = saveActiveTools(pi);
         let mechanismInvocations: MechanismInvocationGroup | null = null;
+        let activeMechanisms: ActiveMechanismInvocation[] = [];
+        let mechanismScopeId: string | null = null;
         try {
           setNodeToolsForInstance(pi, node);
           debugLog.toolsChanged(nodeId, pi.getActiveTools());
 
           const scope = runtime.nextScope(nodeId);
+          mechanismScopeId = scope.scopeId;
           const availableEdges = getAvailableEdges(graph, nodeId) ?? [];
           const skill = await loadSkillContent(graph, node, input);
           const renderer = resolveNodeContextRenderer(
@@ -650,25 +669,36 @@ export function createLoopGraphExtension(
             scope,
             () => runtime.isNodeActive && runtime.currentScope?.scopeId === scope.scopeId,
           );
-          await applyMechanisms(
+          activeMechanisms = prepareMechanismInvocations(
             pi,
             runtime.topInstance!,
             node,
             input,
             runtime.top?.localMechanisms,
             mechanismInvocations,
+            mechanismEventBroker,
+            mechanismStateStore,
           );
+          const enterFailures = await invokeMechanismEnterHooks(activeMechanisms);
+          const earlyEventFailures = mechanismEventBroker.consumeControlFailures(scope.scopeId);
+          const preExecFailures = [...enterFailures, ...earlyEventFailures];
+          const enterControl = resolveMechanismControlFailure(preExecFailures);
+          if (enterControl?.policy === "fail-graph") {
+            throw createMechanismControlError(enterControl, preExecFailures);
+          }
           runtime.assertNoCompactionBoundaryViolation();
           const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
           nodeContext.setNodeCompletionValidator(
             effectiveNode.kind === "code" ? effectiveNode.validateCompletion : undefined,
           );
-          const completion = await execNodeInGraph(
-            runtime,
-            nodeContext,
-            effectiveNode,
-            input,
-            async (graphNode, callBackground) => {
+          let completion = enterControl?.policy === "fail-node"
+            ? createMechanismFailedCompletion(nodeId, enterControl, preExecFailures)
+            : await execNodeInGraph(
+              runtime,
+              nodeContext,
+              effectiveNode,
+              input,
+              async (graphNode, callBackground) => {
               const graphBoundary = graphNode.boundary ?? "call";
               if (graphBoundary === "delegate") {
                 const child = await delegateInvoker.invoke(graphNode.graph, {
@@ -733,8 +763,39 @@ export function createLoopGraphExtension(
                 contextRenderer: request.contextRenderer,
               });
               return { nodeId: graphNode.id, status: child.status, result: child.result };
-            },
-          );
+              },
+            );
+          const eventFailures = mechanismEventBroker.consumeControlFailures(scope.scopeId);
+          const preExitFailures = [...preExecFailures, ...eventFailures];
+          const eventControl = resolveMechanismControlFailure(preExitFailures);
+          if (eventControl?.policy === "fail-graph") {
+            throw createMechanismControlError(eventControl, preExitFailures);
+          }
+          if (eventControl?.policy === "fail-node") {
+            completion = createMechanismFailedCompletion(
+              nodeId,
+              eventControl,
+              preExitFailures,
+            );
+          }
+          const exitFailures = await invokeMechanismExitHooks(activeMechanisms, completion);
+          const lateEventFailures = mechanismEventBroker.consumeControlFailures(scope.scopeId);
+          const allControlFailures = [
+            ...preExitFailures,
+            ...exitFailures,
+            ...lateEventFailures,
+          ];
+          const exitControl = resolveMechanismControlFailure(allControlFailures);
+          if (exitControl?.policy === "fail-graph") {
+            throw createMechanismControlError(exitControl, allControlFailures);
+          }
+          if (exitControl?.policy === "fail-node") {
+            completion = createMechanismFailedCompletion(
+              nodeId,
+              exitControl,
+              allControlFailures,
+            );
+          }
           runtime.assertNoCompactionBoundaryViolation();
 
           const routing = graph.routing[nodeId];
@@ -783,7 +844,13 @@ export function createLoopGraphExtension(
             data: migration.input ?? {},
             source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
           };
+        } catch (error) {
+          await invokeMechanismErrorHooks(activeMechanisms, error);
+          throw error;
         } finally {
+          if (mechanismScopeId) {
+            mechanismEventBroker.consumeControlFailures(mechanismScopeId);
+          }
           if (mechanismInvocations) {
             const cleanupErrors = await mechanismInvocations.close();
             for (const cleanupError of cleanupErrors) {
@@ -1206,22 +1273,34 @@ function getAvailableEdges(graph: Graph, nodeId: string): EdgeChoice[] | undefin
  * 每个 mechanism 获得独立 invocation scope。安全 append 同时核对 invocation
  * 和 Runtime 当前 scope，节点离开后返回 false；裸 ctx.pi 仍保持非托管能力。
  */
-async function applyMechanisms(
+interface ActiveMechanismInvocation {
+  mechanism: Mechanism;
+  context: MechanismContext;
+  initializationFailure?: MechanismFailureRecord;
+}
+
+type MechanismHookFailure = MechanismFailureRecord;
+
+function prepareMechanismInvocations(
   pi: ExtensionAPI,
   instance: AgentInstance,
   node: Node,
   input: NodeInput,
   localMechanisms: readonly Mechanism[] = [],
   invocationGroup: MechanismInvocationGroup,
-): Promise<void> {
+  eventBroker: MechanismEventBroker,
+  stateStore: MechanismStateStore,
+): ActiveMechanismInvocation[] {
   const mechanisms: Mechanism[] = [
     ...instance.mechanisms,
     ...localMechanisms,
     ...(node.kind === "code" ? (node.mechanisms ?? []) : []),
   ];
+  const active: ActiveMechanismInvocation[] = [];
   for (const m of mechanisms) {
-    if (!m.onNodeEnter) continue;
+    if (!m.onNodeEnter && !m.onNodeExit && !m.onNodeError) continue;
     const scope = invocationGroup.createScope(m.name);
+    const stateResolution = stateStore.resolve(instance, m);
     const appendContext = (content: string): boolean => {
       if (!scope.isActive()) return false;
       pi.sendMessage({
@@ -1237,17 +1316,208 @@ async function applyMechanisms(
       node,
       input,
       scope,
+      events: eventBroker.createEvents(
+        m.name,
+        m.failurePolicy ?? "continue",
+        scope,
+      ),
+      state: stateResolution.state as Record<string, unknown>,
       appendContext,
     };
+    active.push({
+      mechanism: m,
+      context: ctx,
+      ...(stateResolution.initializationFailed
+        ? {
+            initializationFailure: recordMechanismHookFailure(
+              m,
+              "createState",
+              stateResolution.initializationError,
+              scope.scopeId,
+            ),
+          }
+        : {}),
+    });
+  }
+  return active;
+}
+
+async function invokeMechanismEnterHooks(
+  active: readonly ActiveMechanismInvocation[],
+): Promise<MechanismHookFailure[]> {
+  const failures: MechanismHookFailure[] = [];
+  for (const invocation of active) {
+    if (invocation.initializationFailure) {
+      failures.push(invocation.initializationFailure);
+      continue;
+    }
+    const hook = invocation.mechanism.onNodeEnter;
+    if (!hook) continue;
     try {
-      await m.onNodeEnter(ctx);
-    } catch (err) {
-      debugLog.graphError(
-        `mechanism:${m.name}`,
-        err instanceof Error ? err.message : String(err),
+      await hook(invocation.context);
+    } catch (error) {
+      failures.push(recordMechanismHookFailure(
+        invocation.mechanism,
+        "onNodeEnter",
+        error,
+        invocation.context.scope.scopeId,
+      ));
+    }
+  }
+  return failures;
+}
+
+async function invokeMechanismExitHooks(
+  active: readonly ActiveMechanismInvocation[],
+  completion: NodeCompletion,
+): Promise<MechanismHookFailure[]> {
+  const failures: MechanismHookFailure[] = [];
+  const snapshot = createMechanismCompletionView(completion);
+  for (const invocation of active) {
+    if (invocation.initializationFailure) continue;
+    const hook = invocation.mechanism.onNodeExit;
+    if (!hook) continue;
+    const context: MechanismExitContext = Object.freeze({
+      ...invocation.context,
+      completion: snapshot,
+    });
+    try {
+      await hook(context);
+    } catch (error) {
+      failures.push(recordMechanismHookFailure(
+        invocation.mechanism,
+        "onNodeExit",
+        error,
+        invocation.context.scope.scopeId,
+      ));
+    }
+  }
+  return failures;
+}
+
+async function invokeMechanismErrorHooks(
+  active: readonly ActiveMechanismInvocation[],
+  error: unknown,
+): Promise<void> {
+  if (active.length === 0) return;
+  const errorView = createMechanismErrorView(error);
+  for (const invocation of active) {
+    if (invocation.initializationFailure) continue;
+    const hook = invocation.mechanism.onNodeError;
+    if (!hook) continue;
+    const context: MechanismErrorContext = Object.freeze({
+      ...invocation.context,
+      error: errorView,
+    });
+    try {
+      await hook(context);
+    } catch (hookError) {
+      // 当前 visit 已有主错误。error hook 的 failurePolicy 只进入诊断，
+      // 不能把原始失败降级、替换或制造第二条控制路径。
+      recordMechanismHookFailure(
+        invocation.mechanism,
+        "onNodeError",
+        hookError,
+        invocation.context.scope.scopeId,
       );
     }
   }
+}
+
+function recordMechanismHookFailure(
+  mechanism: Mechanism,
+  phase: MechanismHookFailure["phase"],
+  error: unknown,
+  scopeId: string,
+): MechanismHookFailure {
+  const policy = mechanism.failurePolicy ?? "continue";
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = `mechanism "${mechanism.name}" ${phase} 失败: ${message}`;
+  debugLog.graphError(`mechanism:${mechanism.name}:${phase}`, `${reason} (policy=${policy})`);
+  return {
+    mechanismName: mechanism.name,
+    phase,
+    policy,
+    error,
+    reason,
+    scopeId,
+  };
+}
+
+function resolveMechanismControlFailure(
+  failures: readonly MechanismHookFailure[],
+): MechanismHookFailure | null {
+  return failures.find((failure) => failure.policy === "fail-graph")
+    ?? failures.find((failure) => failure.policy === "fail-node")
+    ?? null;
+}
+
+function createMechanismControlError(
+  primary: MechanismHookFailure,
+  failures: readonly MechanismHookFailure[],
+): Error {
+  const diagnostics = failures
+    .filter((failure) => failure.policy !== "continue")
+    .map((failure) => failure.reason);
+  return new Error(
+    diagnostics.length > 1
+      ? `${primary.reason}; 其他机制失败: ${diagnostics.filter((reason) => reason !== primary.reason).join("; ")}`
+      : primary.reason,
+  );
+}
+
+function createMechanismFailedCompletion(
+  nodeId: string,
+  primary: MechanismHookFailure,
+  failures: readonly MechanismHookFailure[],
+): NodeCompletion {
+  const diagnostics = failures
+    .filter((failure) => failure.policy !== "continue")
+    .map((failure) => Object.freeze({
+      mechanismName: failure.mechanismName,
+      phase: failure.phase,
+      policy: failure.policy,
+      reason: failure.reason,
+    }));
+  return {
+    nodeId,
+    status: "failed",
+    result: {
+      reason: primary.reason,
+      mechanismFailure: Object.freeze({
+        mechanismName: primary.mechanismName,
+        phase: primary.phase,
+        policy: primary.policy,
+        diagnostics: Object.freeze(diagnostics),
+      }),
+    },
+  };
+}
+
+function createMechanismCompletionView(
+  completion: NodeCompletion,
+): Readonly<import("../type.js").MechanismCompletionView> {
+  return Object.freeze({
+    nodeId: completion.nodeId,
+    status: completion.status,
+    result: snapshotRendererValue(completion.result) as Readonly<Record<string, unknown>>,
+  });
+}
+
+function createMechanismErrorView(
+  error: unknown,
+): Readonly<import("../type.js").MechanismErrorView> {
+  if (error instanceof Error) {
+    return Object.freeze({
+      name: error.name,
+      message: error.message,
+      ...(error.stack ? { stack: error.stack } : {}),
+    });
+  }
+  return Object.freeze({
+    name: "NonErrorThrow",
+    message: String(error),
+  });
 }
 
 async function execNodeInGraph(

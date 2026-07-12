@@ -4,7 +4,7 @@
 
 import { describe, expect, it, beforeAll, vi } from "vitest";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Node, NodeCompletion, NodeInput } from "../type.js";
+import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Mechanism, Node, NodeCompletion, NodeInput } from "../type.js";
 import { END } from "../type.js";
 import { createIsolatedGraphSessionFactory } from "./isolated-graph-session.js";
 import type { IsolatedGraphSessionFactoryOptions } from "./isolated-graph-session.js";
@@ -387,6 +387,33 @@ describe("纯代码节点图", () => {
     expect(cleanupCount).toBe(1);
     expect(scope.isActive()).toBe(false);
     expect(scope.signal.aborted).toBe(true);
+    session.dispose();
+  });
+
+  it("runtime-only delegate 的每次新 AgentInstance 都获得独立 mechanism state", async () => {
+    const graph = pureCodeGraph();
+    const seen: number[] = [];
+    let createCount = 0;
+    const mechanism: Mechanism<{ count: number }> = {
+      name: "delegate-state",
+      createState() {
+        createCount += 1;
+        return { count: 0 };
+      },
+      onNodeEnter(ctx) {
+        ctx.state.count += 1;
+        seen.push(ctx.state.count);
+      },
+    };
+    graph.mechanisms = [mechanism];
+    const factory = createIsolatedGraphSessionFactory(factoryOptions());
+    const session = await factory(delegateReq());
+
+    await session.run(graph, delegateReq());
+    await session.run(graph, delegateReq());
+
+    expect(seen).toEqual([1, 1]);
+    expect(createCount).toBe(2);
     session.dispose();
   });
 });

@@ -375,19 +375,38 @@ interface MechanismScope {
   onCleanup(cleanup: () => void | Promise<void>): void;
 }
 
-interface MechanismContext {
+```typescript
+interface MechanismContext<TState = Record<string, unknown>> {
   pi: ExtensionAPI;                              // 完整但非托管的 pi 能力
   instance: AgentInstance;                       // 当前实例（scratch 可写）
   node: Node;                                    // 当前节点
   input: NodeInput;                              // 代码侧入参
   scope: MechanismScope;                         // 当前 node visit 的托管生命周期
+  events: MechanismEvents;                       // scoped 事件订阅，scope 关闭时自动取消
+  state: TState;                                 // 类型化私有 state，跨 visit 保留
   appendContext(content: string): boolean;        // 活跃时追加；失效后返回 false
 }
 
-interface Mechanism {
-  name: string;
-  onNodeEnter?(ctx: MechanismContext): void | Promise<void>;
+interface MechanismEvents {
+  onToolResult(handler: (event: MechanismToolResultEvent) => void | Promise<void>): MechanismEventSubscription;
+  onTurnStart(handler: (event: MechanismTurnStartEvent) => void | Promise<void>): MechanismEventSubscription;
+  onTurnEnd(handler: (event: MechanismTurnEndEvent) => void | Promise<void>): MechanismEventSubscription;
 }
+
+interface MechanismEventSubscription {
+  readonly disposed: boolean;
+  dispose(): void;                               // 幂等，scope 关闭时自动调用
+}
+
+interface Mechanism<TState = Record<string, unknown>> {
+  name: string;
+  failurePolicy?: "continue" | "fail-node" | "fail-graph";
+  createState?(): TState;                        // 当前 AgentInstance 中按机制对象身份懒初始化一次
+  onNodeEnter?(ctx: MechanismContext<TState>): void | Promise<void>;
+  onNodeExit?(ctx: MechanismExitContext<TState>): void | Promise<void>;
+  onNodeError?(ctx: MechanismErrorContext<TState>): void | Promise<void>;
+}
+```
 ```
 
 执行顺序：
@@ -398,6 +417,7 @@ enterNode
 → 当前 CallFrame.localMechanisms
 → Node.mechanisms
 → execute
+→ onNodeExit（Router/Edge 之前）
 → scope abort + cleanup
 ```
 
@@ -407,14 +427,28 @@ enterNode
 - compose 子图的 Graph mechanisms 作为当前 CallFrame 的局部机制，退出子图后撤销。
 - 局部机制写在 `Node.mechanisms`，只在当前节点叠加。
 - `onNodeEnter` 串行 await；抛错记日志后继续，不中止节点。
-- 未定义 `onNodeEnter` 的 mechanism 被跳过。
+- `onNodeExit` 在节点产出 completion 后、Router/Edge 处理前串行执行，收到无别名只读快照。
+- node visit 任意阶段抛错时调用 `onNodeError`；它只观察原始错误，不能替换主错误。
+- 没有声明任何生命周期 Hook 的 mechanism 被跳过。
 - cleanup 逆注册顺序执行；一个 cleanup 抛错不会阻止其他 cleanup，也不会覆盖节点原始错误。
+
+失败策略：
+
+| `failurePolicy` | Hook 抛错后的行为 |
+| --- | --- |
+| `continue` | 记日志并继续，默认值，保持兼容 |
+| `fail-node` | Runtime 生成可信 failed completion，跳过/终止节点主体并交给 Router |
+| `fail-graph` | 终止当前图调用，但仍执行 `onNodeError` 和全部 cleanup |
+
+同一阶段多个机制发生控制性失败时，全部 Hook 仍按顺序执行，最终优先级为 `fail-graph > fail-node > continue`。Runtime 使用自己的当前 nodeId 生成失败 completion，不接受 mechanism 伪造节点身份。`onNodeError` 自身抛错只作为次级诊断，已有主错误始终保留。
 
 两层能力面：
 
 | 通道 | 作用 | Runtime 保证 |
 | --- | --- | --- |
 | `ctx.scope` | signal、active 检查、cleanup | 与当前 node visit 同生共死 |
+| `ctx.events` | scoped 事件订阅（onToolResult/onTurnStart/onTurnEnd） | 底层单一 pi listener；scope 关闭时自动 dispose；handler 失败进入 failurePolicy |
+| `ctx.state` | 类型化私有 state，由 `createState()` 懒初始化 | 双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离；call 创建新 state，compose 复用；不入模型上下文 |
 | `ctx.appendContext(content)` | 向当前 NodeScope 追加上下文 | 失效后返回 `false`，不会污染后继节点 |
 | `ctx.instance.scratch` | 代码侧共享横切状态 | 随 AgentInstance 生命周期；当前仍是共享命名空间 |
 | `ctx.pi` | 完整 pi ExtensionAPI | 仅保证原生 API 可用；副作用不自动获得 scope/cleanup 保证 |
@@ -438,6 +472,35 @@ const timingMechanism: Mechanism = {
 };
 ```
 
+私有 state 示例（跨 visit 计数，由 `createState` 懒初始化）：
+
+```typescript
+const retryTracker: Mechanism<{ retries: number }> = {
+  name: "retry-tracker",
+  createState: () => ({ retries: 0 }),
+  onNodeExit(ctx) {
+    if (ctx.completion.status === "failed") {
+      ctx.state.retries += 1;
+      ctx.appendContext(`已重试 ${ctx.state.retries} 次`);
+    }
+  },
+};
+```
+
+scoped event 示例（scope 退出时自动取消订阅，不积累底层 listener）：
+
+```typescript
+const toolObserver: Mechanism = {
+  name: "tool-observer",
+  onNodeEnter(ctx) {
+    ctx.events.onToolResult((event) => {
+      ctx.appendContext(`工具 ${event.toolName} 完成`);
+    });
+    // scope 关闭时自动 dispose 全部订阅，无需手动清理
+  },
+};
+```
+
 `ctx.pi` 继续提供完全定制能力，例如直接注册原生事件：
 
 ```typescript
@@ -453,7 +516,7 @@ const toolAuditor: Mechanism = {
 };
 ```
 
-> `pi.on()` 返回 `void`，没有 `off`。上例的底层监听器会保留到 Session 结束；`isActive()` 只让旧 handler 静默，不会移除它。需要自动取消订阅和稳定 Hook 组合时，应等待/使用后续的 scoped events API。裸 `ctx.pi` 的消息、额外 turn、工具修改和后台任务同样由机制作者自行负责。
+> `pi.on()` 返回 `void`，没有 `off`。上例的底层监听器会保留到 Session 结束；`isActive()` 只让旧 handler 静默，不会移除它。**推荐优先使用 `ctx.events` 获取 scope 托管的订阅生命周期**——事件在 scope 关闭时自动取消，不积累底层监听器，handler 失败还受 `failurePolicy` 保护。裸 `ctx.pi` 的消息、额外 turn、工具修改和后台任务同样由机制作者自行负责。
 
 ---
 

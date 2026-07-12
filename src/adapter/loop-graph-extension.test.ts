@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { createLoopGraphExtension } from "./loop-graph-extension.js";
 import type { LoopGraphExtension } from "./loop-graph-extension.js";
 import { debugLog } from "./debug-log.js";
-import type { Graph, Edge, Entry, Node } from "../type.js";
+import type { Graph, Edge, Entry, Mechanism, Node } from "../type.js";
 import { END } from "../type.js";
 
 // ── 帮助函数：构造最小 fake pi 对象 ──
@@ -47,9 +47,22 @@ function fakePi() {
     emit(eventName: string, event: any) {
       let result: unknown;
       for (const handler of handlers.get(eventName) ?? []) {
-        result = handler(event);
+        const candidate = handler(event);
+        // 同步 characterization 只观察同步 patch；异步事件用 emitAsync。
+        // pi 会 await handler，并忽略返回 undefined 的观察器。
+        if (!(candidate instanceof Promise) && candidate !== undefined) result = candidate;
       }
       return result;
+    },
+    async emitAsync(eventName: string, event: any) {
+      const results: unknown[] = [];
+      for (const handler of handlers.get(eventName) ?? []) {
+        results.push(await handler(event));
+      }
+      return results;
+    },
+    _handlerCount(eventName: string) {
+      return (handlers.get(eventName) ?? []).length;
     },
     _sentMessages: sentMessages,
   } as any;
@@ -1764,6 +1777,764 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("横切机制", () => {
+    it("ctx.state 在同一 AgentInstance 中跨 visit 保留，createState 只执行一次", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const seen: number[] = [];
+      let createCount = 0;
+      let visits = 0;
+      let scratchKeys: string[] = [];
+      const stateful: Mechanism<{ count: number }> = {
+        name: "stateful",
+        createState() {
+          createCount += 1;
+          return { count: 0 };
+        },
+        onNodeEnter(ctx) {
+          ctx.state.count += 1;
+          seen.push(ctx.state.count);
+        },
+      };
+      const g = minimalGraph("mech_state_visits");
+      g.mechanisms = [stateful];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "访问两次",
+        async execute(instance) {
+          scratchKeys = Object.keys(instance.scratch);
+          visits += 1;
+          return { nodeId: "start", status: "ok", result: { visits } };
+        },
+      };
+      g.routing.start = {
+        nodeId: "start",
+        router: { kind: "first-match" },
+        edges: [
+          {
+            id: "again",
+            from: "start",
+            to: "start",
+            priority: 2,
+            guard: (completion) => completion.result.visits === 1,
+            migrate(_instance, completion) {
+              return { frame: { result: completion.result }, input: {} };
+            },
+          },
+          { ...edgeToEnd("start"), guard: (completion) => completion.result.visits === 2 },
+        ],
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(createCount).toBe(1);
+      expect(seen).toEqual([1, 2]);
+      expect(scratchKeys).toEqual([]);
+    });
+
+    it("同名但不同对象的 mechanism state 完全隔离", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const seen: string[] = [];
+      const makeMechanism = (label: string): Mechanism<{ count: number }> => ({
+        name: "same-name",
+        createState: () => ({ count: 0 }),
+        onNodeEnter(ctx) {
+          ctx.state.count += 1;
+          seen.push(`${label}:${ctx.state.count}`);
+        },
+      });
+      const g = minimalGraph("mech_state_object_identity");
+      g.mechanisms = [makeMechanism("a"), makeMechanism("b")];
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(seen).toEqual(["a:1", "b:1"]);
+    });
+
+    it("call 创建新 state，compose 在共享 instance 上复用 state", async () => {
+      for (const boundary of ["call", "compose"] as const) {
+        const pi = fakePi();
+        const loop = createLoopGraphExtension(pi);
+        const seen: number[] = [];
+        let createCount = 0;
+        const mechanism: Mechanism<{ visits: number }> = {
+          name: `${boundary}-state`,
+          createState() {
+            createCount += 1;
+            return { visits: 0 };
+          },
+          onNodeEnter(ctx) {
+            ctx.state.visits += 1;
+            seen.push(ctx.state.visits);
+          },
+        };
+        const child = minimalGraph(`mech_state_${boundary}_child`);
+        child.mechanisms = [mechanism];
+        const makeGraphNode = (id: string): Node => ({
+          kind: "graph",
+          id,
+          subGoal: `${boundary} child`,
+          graph: child,
+          boundary,
+          ...(boundary === "compose"
+            ? { fold: ({ finalResult }: any) => ({ status: finalResult.status, result: finalResult.result }) }
+            : {}),
+        });
+        const parent: Graph = {
+          id: `mech_state_${boundary}_parent`,
+          goal: "连续调用两次",
+          entries: [{ id: "entry", guard: () => true, startNodeId: "first" }],
+          nodes: { first: makeGraphNode("first"), second: makeGraphNode("second") },
+          routing: {
+            first: {
+              nodeId: "first",
+              router: { kind: "first-match" },
+              edges: [edgeToNext("first", "second")],
+            },
+            second: {
+              nodeId: "second",
+              router: { kind: "first-match" },
+              edges: [edgeToEnd("second")],
+            },
+          },
+        };
+
+        const result = await loop.executeGraph(parent, { source: "command", args: "" });
+
+        expect(result.status).toBe("ok");
+        expect(seen).toEqual(boundary === "call" ? [1, 1] : [1, 2]);
+        expect(createCount).toBe(boundary === "call" ? 2 : 1);
+      }
+    });
+
+    it("createState 失败遵循 failurePolicy，且不执行依赖无效 state 的 Hook", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let entered = false;
+      let executed = false;
+      let routed: any;
+      const g = minimalGraph("mech_state_init_failure");
+      g.mechanisms = [{
+        name: "broken-state",
+        failurePolicy: "fail-node",
+        createState() { throw new Error("state init failed"); },
+        onNodeEnter() { entered = true; },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "不应执行",
+        async execute() {
+          executed = true;
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+      g.routing.start!.edges[0].guard = (completion) => {
+        routed = completion;
+        return completion.status === "failed";
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(entered).toBe(false);
+      expect(executed).toBe(false);
+      expect(routed).toMatchObject({
+        nodeId: "start",
+        status: "failed",
+        result: {
+          mechanismFailure: {
+            mechanismName: "broken-state",
+            phase: "createState",
+            policy: "fail-node",
+          },
+        },
+      });
+      expect(result.status).toBe("failed");
+    });
+
+    it("scoped events 在 20 次循环中只命中当前 visit，底层监听器数量恒定", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const observedVisits: number[] = [];
+      const subscriptions: any[] = [];
+      let visits = 0;
+
+      const g = minimalGraph("mech_scoped_event_loop");
+      g.mechanisms = [{
+        name: "turn-observer",
+        onNodeEnter(ctx) {
+          subscriptions.push(ctx.events.onTurnStart(() => {
+            observedVisits.push(ctx.scope.visit);
+          }));
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "循环 20 次",
+        async execute() {
+          visits += 1;
+          await pi.emitAsync("turn_start", {
+            type: "turn_start",
+            turnIndex: visits - 1,
+            timestamp: Date.now(),
+          });
+          return { nodeId: "start", status: "ok", result: { visits } };
+        },
+      };
+      g.routing.start = {
+        nodeId: "start",
+        router: { kind: "first-match" },
+        edges: [
+          {
+            id: "again",
+            from: "start",
+            to: "start",
+            priority: 2,
+            guard: (completion) => Number(completion.result.visits) < 20,
+            migrate(_instance, completion) {
+              return { frame: { result: completion.result }, input: {} };
+            },
+          },
+          {
+            ...edgeToEnd("start"),
+            guard: (completion) => completion.result.visits === 20,
+          },
+        ],
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+      await pi.emitAsync("turn_start", {
+        type: "turn_start",
+        turnIndex: 99,
+        timestamp: Date.now(),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(observedVisits).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+      expect(subscriptions.every((subscription) => subscription.disposed)).toBe(true);
+      expect(pi._handlerCount("turn_start")).toBe(1);
+      expect(pi._handlerCount("turn_end")).toBe(1);
+      // 一个是 __graph_complete__ 捕获器，一个是 MechanismEventBroker。
+      expect(pi._handlerCount("tool_result")).toBe(2);
+    });
+
+    it("scoped event 支持手动幂等 dispose", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let observed = 0;
+      let subscription: any;
+      const g = minimalGraph("mech_event_manual_dispose");
+      g.mechanisms = [{
+        name: "manual-dispose",
+        onNodeEnter(ctx) {
+          subscription = ctx.events.onTurnStart(() => { observed += 1; });
+          subscription.dispose();
+          subscription.dispose();
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "不应收到事件",
+        async execute() {
+          await pi.emitAsync("turn_start", {
+            type: "turn_start",
+            turnIndex: 0,
+            timestamp: Date.now(),
+          });
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(subscription.disposed).toBe(true);
+      expect(observed).toBe(0);
+    });
+
+    it("turn_start、turn_end 与 tool_result 三类 scoped event 均可观察", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const observed: string[] = [];
+      const g = minimalGraph("mech_all_scoped_events");
+      g.mechanisms = [{
+        name: "all-events",
+        onNodeEnter(ctx) {
+          ctx.events.onTurnStart((event) => { observed.push(`start:${event.turnIndex}`); });
+          ctx.events.onTurnEnd((event) => { observed.push(`end:${event.turnIndex}`); });
+          ctx.events.onToolResult((event) => { observed.push(`tool:${event.toolName}`); });
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "观察全部事件",
+        async execute() {
+          await pi.emitAsync("turn_start", {
+            type: "turn_start",
+            turnIndex: 3,
+            timestamp: Date.now(),
+          });
+          await pi.emitAsync("tool_result", {
+            type: "tool_result",
+            toolCallId: "call-all",
+            toolName: "read",
+            input: { path: "x" },
+            content: [{ type: "text", text: "x" }],
+            details: undefined,
+            isError: false,
+          });
+          await pi.emitAsync("turn_end", {
+            type: "turn_end",
+            turnIndex: 3,
+            message: { role: "assistant", content: [], timestamp: Date.now() },
+            toolResults: [],
+          });
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(observed).toEqual(["start:3", "tool:read", "end:3"]);
+    });
+
+    it("事件快照无别名且 handler 串行；continue 错误不阻止后续机制", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      let seenEvent: any;
+      const originalInput = { nested: { value: 1 } };
+      const g = minimalGraph("mech_event_snapshot_order");
+      g.mechanisms = [
+        {
+          name: "first",
+          onNodeEnter(ctx) {
+            ctx.events.onToolResult(async (event) => {
+              order.push("first:start");
+              seenEvent = event;
+              expect(Object.isFrozen(event)).toBe(true);
+              expect(Object.isFrozen((event.input as any).nested)).toBe(true);
+              await Promise.resolve();
+              order.push("first:end");
+              throw new Error("optional audit failed");
+            });
+          },
+        },
+        {
+          name: "second",
+          onNodeEnter(ctx) {
+            ctx.events.onToolResult(() => { order.push("second"); });
+          },
+        },
+      ];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "发出工具结果",
+        async execute() {
+          await pi.emitAsync("tool_result", {
+            type: "tool_result",
+            toolCallId: "call-1",
+            toolName: "custom",
+            input: originalInput,
+            content: [{ type: "text", text: "ok" }],
+            details: { trace: 1 },
+            isError: false,
+          });
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+      originalInput.nested.value = 9;
+
+      expect(result.status).toBe("ok");
+      expect(order).toEqual(["first:start", "first:end", "second"]);
+      expect(seenEvent.input).toEqual({ nested: { value: 1 } });
+    });
+
+    it("event handler 的 fail-node 在安全检查点替换 completion 并继续 Router", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let routed: any;
+      let exitStatus: string | undefined;
+      const g = minimalGraph("mech_event_fail_node");
+      g.mechanisms = [{
+        name: "required-turn-check",
+        failurePolicy: "fail-node",
+        onNodeEnter(ctx) {
+          ctx.events.onTurnStart(() => { throw new Error("turn check failed"); });
+        },
+        onNodeExit(ctx) { exitStatus = ctx.completion.status; },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "事件失败",
+        async execute() {
+          await pi.emitAsync("turn_start", {
+            type: "turn_start",
+            turnIndex: 0,
+            timestamp: Date.now(),
+          });
+          return { nodeId: "start", status: "ok", result: { aiClaimed: true } };
+        },
+      };
+      g.routing.start!.edges[0].guard = (completion) => {
+        routed = completion;
+        return completion.status === "failed";
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(exitStatus).toBe("failed");
+      expect(routed).toMatchObject({
+        nodeId: "start",
+        status: "failed",
+        result: {
+          reason: expect.stringContaining("turn check failed"),
+          mechanismFailure: {
+            mechanismName: "required-turn-check",
+            phase: "turn_start",
+            policy: "fail-node",
+          },
+        },
+      });
+      expect(result.status).toBe("failed");
+    });
+
+    it("event handler 的 fail-graph 触发 onNodeError 和 cleanup", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      const g = minimalGraph("mech_event_fail_graph");
+      g.mechanisms = [{
+        name: "required-tool-audit",
+        failurePolicy: "fail-graph",
+        onNodeEnter(ctx) {
+          ctx.scope.onCleanup(() => { order.push("cleanup"); });
+          ctx.events.onToolResult(() => { throw new Error("audit unavailable"); });
+        },
+        onNodeError(ctx) { order.push(`error:${ctx.error.message}`); },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "事件失败整图",
+        async execute() {
+          await pi.emitAsync("tool_result", {
+            type: "tool_result",
+            toolCallId: "call-2",
+            toolName: "custom",
+            input: {},
+            content: [{ type: "text", text: "ok" }],
+            details: null,
+            isError: false,
+          });
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("failed");
+      expect(result.result.reason).toContain("audit unavailable");
+      expect(order[0]).toContain("error:");
+      expect(order[1]).toBe("cleanup");
+    });
+
+    it("call/compose 嵌套期间只分发给当前 scope，返回父节点后恢复父订阅", async () => {
+      for (const boundary of ["call", "compose"] as const) {
+        const pi = fakePi();
+        const loop = createLoopGraphExtension(pi);
+        const observed: string[] = [];
+        const child = minimalGraph(`event_scope_${boundary}_child`);
+        child.nodes.start = {
+          kind: "code",
+          id: "start",
+          subGoal: "子节点发事件",
+          async execute() {
+            await pi.emitAsync("turn_start", {
+              type: "turn_start",
+              turnIndex: 1,
+              timestamp: Date.now(),
+            });
+            return { nodeId: "start", status: "ok", result: {} };
+          },
+        };
+        child.mechanisms = [{
+          name: "child-local",
+          onNodeEnter(ctx) {
+            ctx.events.onTurnStart(() => { observed.push(`child-local:${ctx.node.id}`); });
+          },
+        }];
+
+        const graphNode: Node = {
+          kind: "graph",
+          id: "invoke",
+          subGoal: "调用子图",
+          graph: child,
+          boundary,
+          ...(boundary === "compose"
+            ? { fold: ({ finalResult }: any) => ({ status: finalResult.status, result: finalResult.result }) }
+            : {}),
+        };
+        const parent = terminalGraph(`event_scope_${boundary}_parent`, graphNode);
+        parent.mechanisms = [{
+          name: "parent-global",
+          onNodeEnter(ctx) {
+            ctx.events.onTurnStart(() => { observed.push(`parent-global:${ctx.node.id}`); });
+          },
+          async onNodeExit(ctx) {
+            if (ctx.node.id !== "invoke") return;
+            await pi.emitAsync("turn_start", {
+              type: "turn_start",
+              turnIndex: 2,
+              timestamp: Date.now(),
+            });
+          },
+        }];
+
+        const result = await loop.executeGraph(parent, { source: "command", args: "" });
+
+        expect(result.status).toBe("ok");
+        expect(observed).toEqual(boundary === "call"
+          ? ["child-local:start", "parent-global:invoke"]
+          : ["parent-global:start", "child-local:start", "parent-global:invoke"]);
+      }
+    });
+
+    it("onNodeExit 在路由前收到无别名只读 completion，随后执行 cleanup", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      const liveResult = { nested: { value: 1 } };
+      let exitResult: any;
+
+      const g = minimalGraph("mech_exit_snapshot");
+      g.mechanisms = [{
+        name: "exit-observer",
+        onNodeEnter(ctx) {
+          order.push("enter");
+          ctx.scope.onCleanup(() => { order.push("cleanup"); });
+        },
+        onNodeExit(ctx) {
+          order.push("exit");
+          exitResult = ctx.completion.result;
+          expect(Object.isFrozen(ctx.completion)).toBe(true);
+          expect(Object.isFrozen((ctx.completion.result as any).nested)).toBe(true);
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "完成",
+        async execute() {
+          order.push("execute");
+          return { nodeId: "start", status: "ok", result: liveResult };
+        },
+      };
+      g.routing.start!.edges[0].migrate = (_instance, completion) => {
+        order.push("migrate");
+        return { frame: { result: completion.result } };
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+      liveResult.nested.value = 9;
+
+      expect(order).toEqual(["enter", "execute", "exit", "migrate", "cleanup"]);
+      expect(exitResult).toEqual({ nested: { value: 1 } });
+    });
+
+    it("默认 continue：exit hook 抛错只记日志，后续 hook 与节点路由继续", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      const g = minimalGraph("mech_exit_continue");
+      g.mechanisms = [
+        {
+          name: "broken-observer",
+          onNodeExit() {
+            order.push("broken");
+            throw new Error("observer failed");
+          },
+        },
+        {
+          name: "healthy-observer",
+          onNodeExit() { order.push("healthy"); },
+        },
+      ];
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("ok");
+      expect(order).toEqual(["broken", "healthy"]);
+    });
+
+    it("fail-node 的 enter hook 跳过 execute，并生成可信 failed completion 交给 Router", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let executed = false;
+      let routedCompletion: any;
+      let exitStatus: string | undefined;
+      let cleanupCount = 0;
+      const g = minimalGraph("mech_enter_fail_node");
+      g.mechanisms = [{
+        name: "required-policy",
+        failurePolicy: "fail-node",
+        onNodeEnter(ctx) {
+          ctx.scope.onCleanup(() => { cleanupCount += 1; });
+          throw new Error("permission denied");
+        },
+        onNodeExit(ctx) {
+          exitStatus = ctx.completion.status;
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "不应执行",
+        async execute() {
+          executed = true;
+          return { nodeId: "forged", status: "ok", result: {} };
+        },
+      };
+      g.routing.start!.edges[0].guard = (completion) => {
+        routedCompletion = completion;
+        return completion.status === "failed";
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(executed).toBe(false);
+      expect(exitStatus).toBe("failed");
+      expect(routedCompletion).toMatchObject({
+        nodeId: "start",
+        status: "failed",
+        result: {
+          reason: expect.stringContaining("permission denied"),
+          mechanismFailure: {
+            mechanismName: "required-policy",
+            phase: "onNodeEnter",
+            policy: "fail-node",
+          },
+        },
+      });
+      expect(result.status).toBe("failed");
+      expect(cleanupCount).toBe(1);
+    });
+
+    it("fail-graph 优先于 fail-node，全部同阶段 hook 执行后触发 onNodeError 与 cleanup", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      const g = minimalGraph("mech_fail_graph_priority");
+      g.mechanisms = [
+        {
+          name: "node-failure",
+          failurePolicy: "fail-node",
+          onNodeEnter(ctx) {
+            order.push("enter-node-failure");
+            ctx.scope.onCleanup(() => { order.push("cleanup-node"); });
+            throw new Error("node policy failed");
+          },
+          onNodeError(ctx) {
+            order.push(`error-node:${ctx.error.message.includes("graph policy failed")}`);
+          },
+        },
+        {
+          name: "graph-failure",
+          failurePolicy: "fail-graph",
+          onNodeEnter(ctx) {
+            order.push("enter-graph-failure");
+            ctx.scope.onCleanup(() => { order.push("cleanup-graph"); });
+            throw new Error("graph policy failed");
+          },
+          onNodeError() { order.push("error-graph"); },
+        },
+      ];
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("failed");
+      expect(result.result.reason).toContain("graph policy failed");
+      expect(order).toEqual([
+        "enter-node-failure",
+        "enter-graph-failure",
+        "error-node:true",
+        "error-graph",
+        "cleanup-graph",
+        "cleanup-node",
+      ]);
+    });
+
+    it("onNodeError hook 抛错不会替换 execute 的原始错误", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let errorView: any;
+      let cleanupCount = 0;
+      const g = minimalGraph("mech_error_observer_failure");
+      g.mechanisms = [{
+        name: "broken-error-observer",
+        failurePolicy: "fail-graph",
+        onNodeEnter(ctx) {
+          ctx.scope.onCleanup(() => { cleanupCount += 1; });
+        },
+        onNodeError(ctx) {
+          errorView = ctx.error;
+          throw new Error("secondary error");
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "抛出主错误",
+        async execute() { throw new Error("primary execute error"); },
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("failed");
+      expect(result.result.reason).toContain("primary execute error");
+      expect(result.result.reason).not.toContain("secondary error");
+      expect(errorView).toMatchObject({ name: "Error", message: "primary execute error" });
+      expect(Object.isFrozen(errorView)).toBe(true);
+      expect(cleanupCount).toBe(1);
+    });
+
+    it("migrate 阶段抛错也会触发 onNodeError，然后关闭 scope", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const order: string[] = [];
+      const g = minimalGraph("mech_migrate_error_hook");
+      g.mechanisms = [{
+        name: "migrate-observer",
+        onNodeEnter(ctx) {
+          ctx.scope.onCleanup(() => { order.push("cleanup"); });
+        },
+        onNodeExit() { order.push("exit"); },
+        onNodeError(ctx) { order.push(`error:${ctx.error.message}`); },
+      }];
+      g.routing.start!.edges[0].migrate = () => {
+        order.push("migrate");
+        throw new Error("migration exploded");
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("failed");
+      expect(result.result.reason).toContain("migration exploded");
+      expect(order).toEqual([
+        "exit",
+        "migrate",
+        "error:migration exploded",
+        "cleanup",
+      ]);
+    });
+
     it("scope 在节点内活跃，退出时 abort 并按 LIFO 执行 cleanup", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);

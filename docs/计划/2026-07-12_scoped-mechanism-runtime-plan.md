@@ -1,7 +1,7 @@
 # 作用域化 Mechanism 与 Agent Hook Runtime 实施计划
 
-> 状态：proposed  
-> 日期：2026-07-12  
+> 状态：partial — Phase 0–4 已完成，Phase 5–9 待实施  
+> 日期：2026-07-12（初始版），2026-07-13（更新 Phase 2–4 完成状态）  
 > 范围：单 Agent Loop Graph SDK 的 Mechanism 生命周期、节点 Agent Hook、安全能力与兼容迁移  
 > 不包含：多 Agent 通讯协议、任意 Runtime 控制面修改、一次性补齐所有 pi 事件
 
@@ -9,7 +9,10 @@
 
 - Phase 0：已完成（2026-07-12）——冻结裸 `ctx.pi.on()` 的非托管累积语义，修正文档中的天然隔离承诺与机制组合顺序。
 - Phase 1：已完成（2026-07-12）——每个 mechanism/node visit 独立 scope、AbortSignal、active 检查、LIFO cleanup、scope-aware append，以及正常/异常/call/compose/runtime-only delegate 回归。
-- Phase 2–9：待实施。
+- Phase 2：已完成（2026-07-13）——Extension 级 MechanismEventBroker、ctx.events（onToolResult/onTurnStart/onTurnEnd）、手动/自动 dispose、事件复制冻结、按 mechanism 顺序串行分发、循环不增底层监听器、call/compose 作用域隔离。
+- Phase 3：已完成（2026-07-13）——onNodeExit、onNodeError、continue/fail-node/fail-graph 三种策略；多机制失败优先级 fail-graph > fail-node > continue；fail-node 由 Runtime 生成可信 completion 走 Router；fail-graph 仍触发 onNodeError 和 cleanup；事件 handler 错误已接入 failurePolicy，在安全检查点消费。
+- Phase 4：已完成（2026-07-13）——Mechanism<TState> 泛型、createState()、ctx.state、双层 WeakMap 按 AgentInstance + mechanism 对象身份隔离、call 创建新 state、compose 复用 state、delegate 新 instance 创建新 state、state 不写入 scratch 不进入模型上下文、createState 失败进入 failurePolicy。
+- Phase 5–9：待实施。
 
 ## 一、结论
 
@@ -333,7 +336,7 @@ P0 支持三种策略：
 - 增加 `onNodeExit` 和 `onNodeError`。
 - 增加 `continue/fail-node/fail-graph`。
 - `onNodeExit` 接收只读 completion 快照；`onNodeError` 接收只读错误上下文。
-- 定义多 mechanism 失败组合：按顺序执行；首个控制性失败为主因，其余作为附加诊断。
+- 定义多 mechanism 失败组合：同阶段 Hook 全部按顺序执行；`fail-graph > fail-node > continue`，同策略首个失败为主因，其余作为附加诊断。
 - `fail-node` 产生由 Runtime 写入的失败信息，不信任 mechanism 自行伪造 nodeId。
 
 验收：三种策略分别覆盖 enter/exit/error/event handler；Router 能接收 fail-node completion；fail-graph 仍完整清理。
