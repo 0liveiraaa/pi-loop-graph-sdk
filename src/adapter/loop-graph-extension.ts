@@ -54,6 +54,10 @@ import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
 import { debugLog } from "./debug-log.js";
+import {
+  defaultModelMessageFormatter,
+  type ModelMessageFormatter,
+} from "./model-messages.js";
 import { GraphRegistry } from "../registry.js";
 import {
   DelegateGraphInvoker,
@@ -68,6 +72,14 @@ import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js"
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  defaultSkillContentProvider,
+  defaultSkillContentRenderer,
+  type SkillContentProvider,
+  type SkillContentRenderer,
+  type SkillFailurePolicies,
+  type SkillLoadContext,
+} from "./skill-content.js";
 
 const NODE_SCOPE_TYPE = "loop_graph_node_scope";
 const completeToolRegistered = new WeakSet<object>();
@@ -105,7 +117,39 @@ export interface LoopGraphExtensionOptions {
   /** 自定义 SDK 在 node-enter 时追加给模型的 CURRENT/skill/instruction 载荷。
    * NodeScope、GraphCallScope、compaction 与 frame baseline 仍由 SDK 固定管理。 */
   contextRenderer?: NodeContextRenderer;
+  /** 自定义 validation retry、incomplete、dead-run 和 graph failure 文案。 */
+  modelMessageFormatter?: Partial<ModelMessageFormatter>;
+  /** 自定义 __graph_complete__ 返回给模型的文本；控制 details/ABI 不变。 */
+  completionToolResultFormatter?: CompletionToolResultFormatter;
+  /** 异步解析 node.skill 引用。默认读取 skillBasePath/{ref}/SKILL.md。 */
+  skillProvider?: SkillContentProvider;
+  /** 控制默认 context renderer 如何展示 skill；返回 null 可隐藏正文。 */
+  skillRenderer?: SkillContentRenderer;
+  /** skill 缺失或 provider/renderer 出错时的策略。默认均为 ignore。 */
+  skillFailure?: SkillFailurePolicies;
+  /** 按 graphId/nodeId 声明 renderer。Node 覆盖 Graph。 */
+  contextRenderers?: ContextRendererRegistry;
 }
+
+export interface ContextRendererRegistry {
+  graphs?: Readonly<Record<string, NodeContextRenderer>>;
+  nodes?: Readonly<Record<string, Readonly<Record<string, NodeContextRenderer>>>>;
+}
+
+export interface LoopGraphExecutionOptions {
+  /** 本次直接 executeGraph 调用的最高优先级 renderer。
+   * 沿共享 Session 的 call/compose 传播，不跨 delegate Session。 */
+  contextRenderer?: NodeContextRenderer;
+}
+
+export interface CompletionToolResultInput {
+  nodeId: string;
+  status: "ok" | "failed" | "cancelled";
+  result: Readonly<Record<string, unknown>>;
+}
+
+export type CompletionToolResultFormatter =
+  (input: CompletionToolResultInput) => string;
 
 export interface LoopGraphLimits {
   /** 顶层 root 图最大节点步数。默认 100。 */
@@ -126,6 +170,7 @@ export interface LoopGraphExtension {
     trigger:
       | { source: "command"; args?: string; params?: Record<string, unknown> }
       | { source: "tool"; params?: Record<string, unknown> },
+    options?: LoopGraphExecutionOptions,
   ): Promise<GraphRunResult>;
 }
 
@@ -136,6 +181,16 @@ export function createLoopGraphExtension(
   options: LoopGraphExtensionOptions = {},
 ): LoopGraphExtension {
   const limits = resolveLoopGraphLimits(options.limits);
+  const modelMessageFormatter: ModelMessageFormatter = {
+    validationRetry: options.modelMessageFormatter?.validationRetry
+      ?? defaultModelMessageFormatter.validationRetry,
+    incompleteNode: options.modelMessageFormatter?.incompleteNode
+      ?? defaultModelMessageFormatter.incompleteNode,
+    deadRun: options.modelMessageFormatter?.deadRun
+      ?? defaultModelMessageFormatter.deadRun,
+    graphFailure: options.modelMessageFormatter?.graphFailure
+      ?? defaultModelMessageFormatter.graphFailure,
+  };
   // ── 实例级状态（替代原模块级 activeRuntime / activeNodeContext）──
 
   let activeRuntime: GraphRuntime | null = null;
@@ -145,6 +200,22 @@ export function createLoopGraphExtension(
   let rootRunActive = false;
   const defaultTools = options.defaultTools ?? [];
   const skillBasePath = options.skillBasePath ?? path.join(process.cwd(), "skills");
+  const skillProvider = options.skillProvider ?? defaultSkillContentProvider;
+  const skillRenderer = options.skillRenderer ?? defaultSkillContentRenderer;
+  const skillFailure = {
+    missing: options.skillFailure?.missing ?? "ignore",
+    error: options.skillFailure?.error ?? "ignore",
+  } as const;
+  // 配置在 extension 创建时快照化，避免业务在图运行期间修改 registry，
+  // 造成同一节点不同 visit 使用不同 renderer。
+  const graphContextRenderers = new Map(
+    Object.entries(options.contextRenderers?.graphs ?? {}),
+  );
+  const nodeContextRenderers = new Map(
+    Object.entries(options.contextRenderers?.nodes ?? {}).map(
+      ([graphId, renderers]) => [graphId, new Map(Object.entries(renderers))] as const,
+    ),
+  );
 
   /** 已完成工具存在性校验的图 ID（首次 executeGraph 时校验一次） */
   const toolValidated = new Set<string>();
@@ -288,6 +359,14 @@ export function createLoopGraphExtension(
         status: params.status,
         result: params.result ?? {},
       });
+      if (options.completionToolResultFormatter) {
+        const text = options.completionToolResultFormatter(Object.freeze({
+          nodeId,
+          status: params.status,
+          result: snapshotRendererValue(params.result ?? {}) as Readonly<Record<string, unknown>>,
+        }));
+        return { content: [{ type: "text", text }] };
+      }
     }
   });
 
@@ -331,6 +410,7 @@ export function createLoopGraphExtension(
     piInner: ExtensionAPI,
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
+    executionOptions?: LoopGraphExecutionOptions,
   ): Promise<GraphRunResult> {
     if (rootRunActive) {
       throw new Error(
@@ -360,7 +440,11 @@ export function createLoopGraphExtension(
     }
 
     const runtime = new GraphRuntime();
-    const nodeContext = new PiNodeContext(piInner, limits.agentRunTimeoutMs);
+    const nodeContext = new PiNodeContext(
+      piInner,
+      limits.agentRunTimeoutMs,
+      modelMessageFormatter,
+    );
     rootRunActive = true;
 
     // 保存/恢复外层运行时状态（支持子图嵌套时切换 activeRuntime）
@@ -385,6 +469,7 @@ export function createLoopGraphExtension(
         boundary: "root",
         maxSteps: limits.rootMaxSteps,
         invocationKind: trigger.source === "command" ? "command" : "tool",
+        contextRenderer: executionOptions?.contextRenderer,
       });
       piInner.sendMessage({
         customType: result.status === "failed" ? "loop_graph_error" : "loop_graph_complete",
@@ -400,7 +485,7 @@ export function createLoopGraphExtension(
 
       // 向 agent 注入终止信号，让图运行层的事被 agent 感知
       piInner.sendUserMessage(
-        `[系统] 图 "${graph.id}" 因错误意外终止：${reason}。当前节点已失效，请停止相关图工作。`,
+        modelMessageFormatter.graphFailure({ graphId: graph.id, reason }),
       );
 
       piInner.sendMessage({
@@ -438,8 +523,8 @@ export function createLoopGraphExtension(
       registry.registerGraph(graph, defaultTools);
     },
     // 公开接口只暴露 (graph, trigger)，内部 executeGraph 已有 pi
-    executeGraph(graph, trigger) {
-      return executeGraph(pi, graph, trigger);
+    executeGraph(graph, trigger, executionOptions) {
+      return executeGraph(pi, graph, trigger, executionOptions);
     },
   };
 
@@ -454,6 +539,8 @@ export function createLoopGraphExtension(
     parentNodeId?: string;
     /** root 调用时由 executeGraph 传入；子调用默认为 "graph-node"。 */
     invocationKind?: import("../type.js").GraphInvocationKind;
+    /** root 调用点 renderer；共享 call/compose 向下传播。 */
+    contextRenderer?: NodeContextRenderer;
   }
 
   /**
@@ -530,7 +617,12 @@ export function createLoopGraphExtension(
 
           const scope = runtime.nextScope(nodeId);
           const availableEdges = getAvailableEdges(graph, nodeId) ?? [];
-          const skill = loadSkillContent(node);
+          const skill = await loadSkillContent(graph, node, input);
+          const renderer = resolveNodeContextRenderer(
+            graph.id,
+            node.id,
+            request.contextRenderer,
+          );
           const renderedContext = renderNodeContext({
             graph,
             node,
@@ -538,7 +630,7 @@ export function createLoopGraphExtension(
             frames: runtime.projectedFrames,
             availableEdges,
             skill,
-          }, scope);
+          }, scope, renderer);
           renderedContextByScope.set(scope.scopeId, renderedContext);
           appendRenderedNodeContext(pi, renderedContext);
 
@@ -555,6 +647,9 @@ export function createLoopGraphExtension(
           await applyMechanisms(pi, runtime.topInstance!, node, input, runtime.top?.localMechanisms);
           runtime.assertNoCompactionBoundaryViolation();
           const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
+          nodeContext.setNodeCompletionValidator(
+            effectiveNode.kind === "code" ? effectiveNode.validateCompletion : undefined,
+          );
           const completion = await execNodeInGraph(
             runtime,
             nodeContext,
@@ -589,6 +684,7 @@ export function createLoopGraphExtension(
                     maxSteps: limits.childMaxSteps,
                     sharedInstance: parentInstance,
                     parentNodeId: graphNode.id,
+                    contextRenderer: request.contextRenderer,
                   });
                   const frames = runtime.readFrameSegment(segment);
                   const folded = graphNode.fold
@@ -621,6 +717,7 @@ export function createLoopGraphExtension(
                 // 保持旧子图的独立上限，避免本次抽取改变 call 的失败语义。
                 maxSteps: limits.childMaxSteps,
                 parentNodeId: graphNode.id,
+                contextRenderer: request.contextRenderer,
               });
               return { nodeId: graphNode.id, status: child.status, result: child.result };
             },
@@ -715,30 +812,44 @@ export function createLoopGraphExtension(
   }
 
   /**
-   * 节点声明了 skill 时，读取 SKILL.md 追加到消息流。
-   * 必须在 NodeScope 之后调用，确保内容属于当前节点的 active 段。
+   * 节点声明了 skill 时，在 NodeScope 消息写入前异步解析并渲染正文；
+   * 随后 appendRenderedNodeContext 保证 scope anchor → skill 的消息顺序。
    */
-  function loadSkillContent(node: Node): { ref: string; content: string } | null {
+  async function loadSkillContent(
+    graph: Graph,
+    node: Node,
+    input: NodeInput,
+  ): Promise<{
+    ref: string;
+    content: string;
+    message: RenderedContextMessage | null;
+    showRefInCurrent: boolean;
+  } | null> {
     if (node.kind !== "code" || !node.skill) return null;
-
-    const skillDir = path.join(skillBasePath, node.skill);
-    const skillFile = path.join(skillDir, "SKILL.md");
-
-    if (!fs.existsSync(skillFile)) {
-      debugLog.graphError(
-        `skill:${node.skill}`,
-        `SKILL.md 未找到: ${skillFile}`,
-      );
-      return null;
-    }
-
+    const context = createSkillLoadContext(graph, node, input, skillBasePath);
     try {
-      const content = fs.readFileSync(skillFile, "utf-8");
-      return { ref: node.skill, content };
-    } catch (err) {
+      const content = await skillProvider(node.skill, context);
+      if (content == null) {
+        const reason = `skill 未找到: ${node.skill}`;
+        debugLog.graphError(`skill:${node.skill}`, reason);
+        if (skillFailure.missing === "fail") throw new Error(reason);
+        return null;
+      }
+      const message = skillRenderer(node.skill, content, context);
+      return {
+        ref: node.skill,
+        content,
+        message,
+        showRefInCurrent: options.skillRenderer == null,
+      };
+    } catch (error) {
+      if (skillFailure.error === "fail" ||
+          (skillFailure.missing === "fail" && error instanceof Error && error.message.startsWith("skill 未找到:"))) {
+        throw error;
+      }
       debugLog.graphError(
         `skill:${node.skill}`,
-        `读取失败: ${err instanceof Error ? err.message : String(err)}`,
+        `加载失败: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -751,29 +862,28 @@ export function createLoopGraphExtension(
       input: NodeInput;
       frames: readonly import("../type.js").ContextFrame[];
       availableEdges: readonly EdgeChoice[];
-      skill: { ref: string; content: string } | null;
+      skill: {
+        ref: string;
+        content: string;
+        message: RenderedContextMessage | null;
+        showRefInCurrent: boolean;
+      } | null;
     },
     scope: import("../runtime.js").NodeScopeDescriptor,
+    renderer: NodeContextRenderer,
   ): readonly MessageEntry[] {
-    const renderer = options.contextRenderer ?? defaultNodeContextRenderer;
     const renderInput: NodeContextRenderInput = Object.freeze({
-      graph: Object.freeze({ id: input.graph.id, goal: input.graph.goal }),
-      node: Object.freeze({
-        id: input.node.id,
-        kind: input.node.kind,
-        subGoal: input.node.subGoal,
-        skill: input.node.kind === "code" ? input.node.skill : undefined,
-        tools: Object.freeze(input.node.kind === "code" ? [...(input.node.tools ?? [])] : []),
-        boundary: input.node.kind === "graph" ? input.node.boundary : undefined,
-        childGraphId: input.node.kind === "graph" ? input.node.graph.id : undefined,
-      }),
-      input: Object.freeze({
-        data: snapshotRendererValue(input.input.data) as Readonly<Record<string, unknown>>,
-        source: snapshotRendererValue(input.input.source) as Readonly<NodeInput["source"]>,
-      }),
+      graph: createGraphContextView(input.graph),
+      node: createNodeContextView(input.node),
+      input: createNodeInputView(input.input),
       frames: snapshotRendererValue(input.frames) as readonly import("../type.js").ContextFrame[],
       availableEdges: Object.freeze(input.availableEdges.map((edge) => Object.freeze({ ...edge }))),
-      skill: input.skill ? Object.freeze({ ...input.skill }) : null,
+      skill: input.skill ? Object.freeze({
+        ref: input.skill.ref,
+        content: input.skill.content,
+        message: input.skill.message ? copyRenderedMessage(input.skill.message) : null,
+        showRefInCurrent: input.skill.showRefInCurrent,
+      }) : null,
       completion: Object.freeze({
         toolName: COMPLETE_TOOL_NAME,
         statuses: Object.freeze(["ok", "failed", "cancelled"] as const),
@@ -803,6 +913,18 @@ export function createLoopGraphExtension(
     return Object.freeze(frozen.map((message) => Object.freeze(message)));
   }
 
+  function resolveNodeContextRenderer(
+    graphId: string,
+    nodeId: string,
+    callSiteRenderer: NodeContextRenderer | undefined,
+  ): NodeContextRenderer {
+    return callSiteRenderer
+      ?? nodeContextRenderers.get(graphId)?.get(nodeId)
+      ?? graphContextRenderers.get(graphId)
+      ?? options.contextRenderer
+      ?? defaultNodeContextRenderer;
+  }
+
   function appendRenderedNodeContext(
     piInner: ExtensionAPI,
     messages: readonly MessageEntry[],
@@ -828,6 +950,50 @@ function copyRenderedContent(
 ): string | readonly RenderedContextContentBlock[] {
   if (typeof content === "string") return content;
   return Object.freeze(content.map((block) => Object.freeze({ ...block })));
+}
+
+function copyRenderedMessage(message: RenderedContextMessage): Readonly<RenderedContextMessage> {
+  return Object.freeze({
+    kind: message.kind,
+    content: copyRenderedContent(message.content),
+  });
+}
+
+function createGraphContextView(graph: Graph): import("./projection.js").GraphContextView {
+  return Object.freeze({ id: graph.id, goal: graph.goal });
+}
+
+function createNodeContextView(node: Node): import("./projection.js").NodeContextView {
+  return Object.freeze({
+    id: node.id,
+    kind: node.kind,
+    subGoal: node.subGoal,
+    skill: node.kind === "code" ? node.skill : undefined,
+    tools: Object.freeze(node.kind === "code" ? [...(node.tools ?? [])] : []),
+    boundary: node.kind === "graph" ? node.boundary : undefined,
+    childGraphId: node.kind === "graph" ? node.graph.id : undefined,
+  });
+}
+
+function createNodeInputView(input: NodeInput): import("./projection.js").NodeInputView {
+  return Object.freeze({
+    data: snapshotRendererValue(input.data) as Readonly<Record<string, unknown>>,
+    source: snapshotRendererValue(input.source) as Readonly<NodeInput["source"]>,
+  });
+}
+
+function createSkillLoadContext(
+  graph: Graph,
+  node: Node,
+  input: NodeInput,
+  basePath: string,
+): SkillLoadContext {
+  return Object.freeze({
+    graph: createGraphContextView(graph),
+    node: createNodeContextView(node),
+    input: createNodeInputView(input),
+    basePath,
+  });
 }
 
 /** 创建只供 renderer 阅读的无别名快照。函数和 Symbol 不属于模型上下文数据，

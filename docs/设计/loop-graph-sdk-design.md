@@ -424,6 +424,12 @@ const reviewGraph: Graph = {
 
 **决策**：开放 `contextRenderer` 定制 CURRENT、skill 与完成说明，但 renderer 不接管完整 transcript。它在 node-enter 时接收不共享 Runtime 引用的只读 Graph/Node/Input/frame 快照，明确返回 anchor 与 additional；SDK 复制并冻结输出文本块。scope missing 或 compaction recovery 只复用冻结载荷。NodeScope `details` 继续只保存控制元数据，正文为空也必须保留锚点。GraphCallScope 清洗、scope 匹配、fail-closed、summary/recent messages 和 frame baseline 仍是 Runtime/投影内核的不变量。已完成 frames 继续由 `frameFormatter` 动态投影，避免同一节点内 compaction 后重放已被 summary 替代的历史。详见 ADR-0002。
 
+renderer 分层配置保留在 adapter：调用级 override > Node registry > Graph registry > Extension 默认 > SDK 兼容 renderer。这样核心 Graph/Node 类型不依赖 pi 消息表现层。同 Session 的 call/compose 继承调用级 renderer；delegate 作为物理 Session 边界不隐式继承函数配置。
+
+### Completion 业务校验与 skill 内容扩展
+
+**决策**：完成工具名和最低状态保持固定；`outputSchema` 在 Runtime 捕获结果后校验并走 retry，不动态改写全局工具 schema。校验顺序为 schema → run request validator → Node validator → agent-choice。模型恢复/失败文案与 completion tool result content 可替换，但 details 与控制状态不变。skill 从固定文件读取抽象为异步 provider，展示抽象为同步 renderer，missing/error 可分别 fail 或 ignore；默认行为保持文件系统与 `[skill: ref]` 兼容格式。详见 ADR-0003。
+
 ---
 
 ## 后续步骤

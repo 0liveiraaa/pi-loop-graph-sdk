@@ -101,6 +101,23 @@ interface LoopGraphExtensionOptions {
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   /** 自定义节点进入时 SDK 给模型追加的 CURRENT/skill/完成说明。 */
   contextRenderer?: NodeContextRenderer;
+  /** 按 graphId/nodeId 声明更具体的 renderer。 */
+  contextRenderers?: {
+    graphs?: Record<string, NodeContextRenderer>;
+    nodes?: Record<string, Record<string, NodeContextRenderer>>;
+  };
+  /** 自定义 retry、incomplete、dead-run 和 graph failure 文案。 */
+  modelMessageFormatter?: Partial<ModelMessageFormatter>;
+  /** 自定义 __graph_complete__ 工具返回给模型的文本。 */
+  completionToolResultFormatter?: CompletionToolResultFormatter;
+  /** 异步加载 node.skill；默认读取 skillBasePath/{ref}/SKILL.md。 */
+  skillProvider?: SkillContentProvider;
+  /** 自定义 skill 正文的模型展示；返回 null 可隐藏。 */
+  skillRenderer?: SkillContentRenderer;
+  skillFailure?: {
+    missing?: "ignore" | "fail"; // 默认 ignore
+    error?: "ignore" | "fail";   // 默认 ignore
+  };
   /** 图循环与单次 agent run 的运行限制。 */
   limits?: {
     rootMaxSteps?: number;       // 默认 100
@@ -147,6 +164,48 @@ createLoopGraphExtension(pi, {
 ```
 
 未提供 `contextRenderer` 时，`defaultNodeContextRenderer` 保持原有 CURRENT 和 `[skill: name]` 格式。
+
+### Graph、Node 与调用级覆盖
+
+不需要把 renderer 写进核心 Graph/Node 定义，可以在 adapter 配置中按 ID 声明：
+
+```typescript
+const loop = createLoopGraphExtension(pi, {
+  contextRenderer: renderDefault,
+  contextRenderers: {
+    graphs: {
+      contract_review: renderContractGraph,
+    },
+    nodes: {
+      contract_review: {
+        final_check: renderFinalCheckNode,
+      },
+    },
+  },
+});
+```
+
+直接使用低层 API 时还可以覆盖本次调用：
+
+```typescript
+await loop.executeGraph(
+  graph,
+  { source: "command", args: "" },
+  { contextRenderer: renderThisRun },
+);
+```
+
+覆盖顺序固定为：
+
+```text
+本次 executeGraph 调用
+> 当前 Node
+> 当前 Graph
+> Extension 默认
+> SDK 兼容 renderer
+```
+
+调用级 renderer 会沿同一 Session 的 `call/compose` 子图传播。`delegate` 创建独立 AgentSession，不隐式继承调用函数；需要在 `createIsolatedGraphSessionFactory()` / delegate host factory 的配置中声明其 renderer registry。任何 renderer 抛错都会让图 fail-closed，不会回退默认 CURRENT 或原始 transcript。
 
 所有 limit 必须是有限正整数，非法值会在 `createLoopGraphExtension()` 时直接报错。默认值保持历史行为。`rootMaxSteps` 只控制公开低层 `executeGraph()` 的顶层循环；`childMaxSteps` 控制同一 Runtime 内的 `call/compose` 子图。delegate 图在独立 host 中运行，使用该 host 创建时传入的 limits。
 
@@ -546,7 +605,7 @@ const subCompose: Node = {
 
 ### 机制
 
-`node.skill` 将对应的 SKILL.md 文件内容在节点进入时（NodeScope 之后）追加到消息流中。严格作用域投影将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。NodeScope 缺失时投影 fail closed，不会回退外层完整 transcript。
+`node.skill` 是一个单值引用。节点进入时 SDK 先异步调用 `skillProvider` 获取正文，再调用同步 `skillRenderer` 生成模型消息，最后与 NodeScope 一起追加到消息流。严格作用域投影将其归入当前节点的 active 段；节点完成后该段随 ReAct 被帧摘要折叠，不泄漏到下一节点。NodeScope 缺失时投影 fail closed，不会回退外层完整 transcript。
 
 底层使用 `sendMessage({ display: false })`（不触发额外 LLM turn），遵守"追加不注入"原则。
 
@@ -556,9 +615,28 @@ const subCompose: Node = {
 
 如果取消策略因竞态或其他 extension 异常失效、嵌套调用仍收到 `session_compact`，SDK 会把它视为隔离违规：终止当前共享调用，并在该 session 后续模型投影中移除 compactionSummary。该路径优先保证不泄漏，代价是丢失压缩摘要；不会重发 `call_start` 来宣称边界已经恢复。
 
-### 位置约定
+### 默认文件位置与自定义来源
 
 `skillBasePath/{skill名称}/SKILL.md`。默认 `skillBasePath` 为 `cwd/skills`，可通过 `createLoopGraphExtension(pi, { skillBasePath: "..." })` 配置。SDK 通过 `resources_discover` 事件将 `skillBasePath` 注册到 pi 的原生 skill 系统，pi 自动扫描 frontmatter 并在系统提示中以 XML 形式列出可用 skill。
+
+业务也可以从数据库或远程服务加载：
+
+```typescript
+createLoopGraphExtension(pi, {
+  async skillProvider(ref, context) {
+    return await skillDatabase.load(ref, context.input.data.tenantId);
+  },
+  skillRenderer(_ref, content) {
+    return { kind: "skill", content: `业务规则：\n${content}` };
+  },
+  skillFailure: {
+    missing: "fail",
+    error: "fail",
+  },
+});
+```
+
+provider 和 renderer 接收只读快照，不能修改 Runtime。自定义 `skillRenderer` 接管展示后，默认 CURRENT 不再重复显示内部 skill ref；返回 `null` 会同时隐藏默认 skill 名称和正文。`missing/error: "ignore"` 会记录诊断并继续，`"fail"` 会终止当前图。
 
 ### 多 skill 支持
 
@@ -577,7 +655,7 @@ const subCompose: Node = {
 
 ### 投影中的 skill 行
 
-在 CURRENT 段中，`skill: {名称}` 行仅保留名称作为上下文提示。完整 skill 内容由主循环在进入节点时追加。projection 是纯函数，不接触 IO。
+使用默认 provider/renderer 时，CURRENT 保留 `skill: {名称}`，正文使用 `[skill: name]` 包装。使用自定义 skill renderer 时，展示完全由业务 renderer 决定。projection 仍是纯函数，不接触 IO。
 
 ---
 
@@ -688,6 +766,31 @@ SDK 监听 `session_compact` / `session_before_compact`，推进 frame 投影基
 
 ## 完成度验证
 
+### outputSchema
+
+`AgentRunRequest.outputSchema` 已接入 Runtime。可通过 `createAgentExecute` 声明：
+
+```typescript
+execute: createAgentExecute({
+  outputSchema: {
+    type: "object",
+    properties: {
+      score: { type: "number" },
+      explanation: { type: "string" },
+    },
+    required: ["score", "explanation"],
+  },
+})
+```
+
+结果不符合 schema 时节点不会退出，而是向模型发送 retry 消息。校验顺序固定为：
+
+```text
+outputSchema → runAgent validator → Node.validateCompletion → agent-choice
+```
+
+前一层失败时后续层不会执行。
+
 节点声明 `validateCompletion` 函数，引擎在 `__graph_complete__` 调用时自动执行：
 
 ```typescript
@@ -708,6 +811,21 @@ validateCompletion(result) {
 5. 验证通过 → 路由 → 下一节点
 
 **注意**：验证只在 `completion.status === "ok"` 时执行。`failed` 和 `cancelled` 不验证，直接进入路由。
+
+### 自定义恢复与完成反馈
+
+```typescript
+createLoopGraphExtension(pi, {
+  modelMessageFormatter: {
+    validationRetry: ({ reason }) => `结果需要修改：${reason}`,
+    graphFailure: ({ graphId, reason }) => `流程 ${graphId} 已终止：${reason}`,
+  },
+  completionToolResultFormatter: ({ status, result }) =>
+    `阶段状态：${status}；已收到 ${Object.keys(result).length} 个字段`,
+});
+```
+
+这些 formatter 只改变模型看到的文字。`__graph_complete__` 名称、三种状态、result/details 和 Runtime 退出规则保持固定。
 
 ---
 

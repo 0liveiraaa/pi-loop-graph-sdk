@@ -166,6 +166,260 @@ function terminalGraph(id: string, node: Node): Graph {
 // ── 测试 ──
 
 describe("createLoopGraphExtension", () => {
+  describe("Phase 3 renderer 分层覆盖", () => {
+    const renderer = (label: string) => () => ({ anchor: { content: label } });
+
+    it("按 Node > Graph > Extension 选择 renderer，调用级 override 最高", async () => {
+      const pi = fakePi();
+      const seen: Record<string, string> = {};
+      const makeNode = (id: string): Node => ({
+        kind: "code", id, subGoal: id,
+        async execute() {
+          const projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          const scope = projected.messages.find((message: any) =>
+            message.customType === "loop_graph_node_scope" && message.details?.nodeId === id);
+          seen[id] = String(scope?.content);
+          return { nodeId: id, status: "ok", result: {} };
+        },
+      });
+      const graph: Graph = {
+        id: "phase3_graph", goal: "phase3",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "a" }],
+        nodes: { a: makeNode("a"), b: makeNode("b") },
+        routing: {
+          a: { nodeId: "a", router: { kind: "first-match" }, edges: [edgeToNext("a", "b")] },
+          b: { nodeId: "b", router: { kind: "first-match" }, edges: [edgeToEnd("b")] },
+        },
+      };
+      const extGraph = terminalGraph("extension_fallback", makeNode("ext"));
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderer: renderer("EXTENSION"),
+        contextRenderers: {
+          graphs: { phase3_graph: renderer("GRAPH") },
+          nodes: { phase3_graph: { b: renderer("NODE") } },
+        },
+      });
+
+      await loop.executeGraph(graph, { source: "command", args: "" });
+      expect(seen).toMatchObject({ a: "GRAPH", b: "NODE" });
+      await loop.executeGraph(extGraph, { source: "command", args: "" });
+      expect(seen.ext).toBe("EXTENSION");
+
+      seen.a = "";
+      seen.b = "";
+      await loop.executeGraph(
+        graph,
+        { source: "command", args: "" },
+        { contextRenderer: renderer("CALL") },
+      );
+      expect(seen).toMatchObject({ a: "CALL", b: "CALL" });
+    });
+
+    it("调用级 renderer 沿 compose 传播，但仍按父子 scope 隔离", async () => {
+      const pi = fakePi();
+      let childContent = "";
+      const childNode: Node = {
+        kind: "code", id: "child_step", subGoal: "child",
+        async execute() {
+          const projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          const scope = projected.messages.find((message: any) =>
+            message.customType === "loop_graph_node_scope" && message.details?.nodeId === "child_step");
+          childContent = String(scope?.content);
+          return { nodeId: "child_step", status: "ok", result: {} };
+        },
+      };
+      const child = terminalGraph("phase3_child", childNode);
+      const parentNode: Node = {
+        kind: "graph", id: "compose_child", subGoal: "compose", graph: child, boundary: "compose",
+      };
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderer: renderer("EXT"),
+        contextRenderers: { graphs: { phase3_child: renderer("CHILD_GRAPH") } },
+      });
+
+      await loop.executeGraph(
+        terminalGraph("phase3_parent", parentNode),
+        { source: "command", args: "" },
+        { contextRenderer: renderer("CALL_SHARED") },
+      );
+      expect(childContent).toBe("CALL_SHARED");
+    });
+
+    it("renderer 抛错时图 fail-closed，不回退默认 CURRENT", async () => {
+      const pi = fakePi();
+      const node: Node = {
+        kind: "code", id: "renderer_boom", subGoal: "secret",
+        async execute() { return { nodeId: "renderer_boom", status: "ok", result: {} }; },
+      };
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderers: {
+          nodes: {
+            renderer_failure: {
+              renderer_boom: () => { throw new Error("renderer failed"); },
+            },
+          },
+        },
+      });
+
+      await expect(loop.executeGraph(terminalGraph("renderer_failure", node), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "failed", result: { reason: "renderer failed" } });
+      expect(pi._sentMessages.some((message: any) =>
+        message.customType === "loop_graph_node_scope" && message.details?.nodeId === "renderer_boom"))
+        .toBe(false);
+      expect(pi._sentMessages.some((message: any) => String(message.content).includes("=== CURRENT ===")))
+        .toBe(false);
+    });
+  });
+
+  describe("Phase 4 completion 与消息格式", () => {
+    it("自定义 graph failure 文案", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        modelMessageFormatter: {
+          graphFailure: ({ graphId, reason }) => `GRAPH_FAIL:${graphId}:${reason}`,
+        },
+      });
+      const node: Node = {
+        kind: "code", id: "boom", subGoal: "boom",
+        async execute() { throw new Error("broken"); },
+      };
+      await loop.executeGraph(terminalGraph("failure_format", node), { source: "command", args: "" });
+      expect(pi.sendUserMessage).toHaveBeenCalledWith("GRAPH_FAIL:failure_format:broken");
+    });
+
+    it("自定义 completion tool result 文本但保留 details", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        completionToolResultFormatter: ({ nodeId, status, result }) =>
+          `DONE:${nodeId}:${status}:${String(result.answer)}`,
+      });
+      let toolPatch: any;
+      const node: Node = {
+        kind: "code", id: "complete_format", subGoal: "complete",
+        async execute() {
+          toolPatch = pi.emit("tool_result", {
+            toolName: "__graph_complete__",
+            details: { status: "ok", result: { answer: 42 } },
+          });
+          return { nodeId: "complete_format", status: "ok", result: {} };
+        },
+      };
+      await loop.executeGraph(terminalGraph("completion_format", node), { source: "command", args: "" });
+      expect(toolPatch).toEqual({ content: [{ type: "text", text: "DONE:complete_format:ok:42" }] });
+    });
+  });
+
+  describe("Phase 5 skill provider 与 renderer", () => {
+    it("等待异步 provider，并把只读上下文交给 skill renderer", async () => {
+      const pi = fakePi();
+      const events: string[] = [];
+      const provider = vi.fn(async (_ref: string, context: any) => {
+        events.push("provider-start");
+        expect(Object.isFrozen(context)).toBe(true);
+        expect(Object.isFrozen(context.node)).toBe(true);
+        await Promise.resolve();
+        events.push("provider-end");
+        return "REMOTE_SKILL_BODY";
+      });
+      const skillRenderer = vi.fn((ref: string, content: string) => ({
+        kind: "skill" as const,
+        content: `REMOTE:${ref}:${content}`,
+      }));
+      const loop = createLoopGraphExtension(pi, { skillProvider: provider, skillRenderer });
+      const node: Node = {
+        kind: "code", id: "remote_skill_node", subGoal: "remote", skill: "remote-secret",
+        async execute() {
+          events.push("execute");
+          return { nodeId: "remote_skill_node", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(terminalGraph("remote_skill", node), { source: "command", args: "" });
+
+      expect(events).toEqual(["provider-start", "provider-end", "execute"]);
+      expect(provider).toHaveBeenCalledTimes(1);
+      expect(skillRenderer).toHaveBeenCalledWith(
+        "remote-secret",
+        "REMOTE_SKILL_BODY",
+        expect.objectContaining({
+          graph: expect.objectContaining({ id: "remote_skill" }),
+          node: expect.objectContaining({ id: "remote_skill_node" }),
+        }),
+      );
+    });
+
+    it("自定义 skillRenderer 可隐藏内部 ref 并替换正文格式", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        skillProvider: async () => "SECRET BODY",
+        skillRenderer: () => ({ kind: "skill", content: "BUSINESS GUIDANCE" }),
+      });
+      let projected: any;
+      const node: Node = {
+        kind: "code", id: "hidden_skill", subGoal: "work", skill: "internal-skill-name",
+        async execute() {
+          projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          return { nodeId: "hidden_skill", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(terminalGraph("skill_hidden", node), { source: "command", args: "" });
+      const text = projected.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).toContain("BUSINESS GUIDANCE");
+      expect(text).not.toContain("internal-skill-name");
+      expect(text).not.toContain("SECRET BODY");
+    });
+
+    it("skillRenderer 返回 null 时隐藏 skill 名称与正文", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        skillProvider: async () => "HIDDEN BODY",
+        skillRenderer: () => null,
+      });
+      let projected: any;
+      const node: Node = {
+        kind: "code", id: "null_skill", subGoal: "work", skill: "hidden-ref",
+        async execute() {
+          projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          return { nodeId: "null_skill", status: "ok", result: {} };
+        },
+      };
+      await loop.executeGraph(terminalGraph("skill_null", node), { source: "command", args: "" });
+      const text = projected.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).not.toContain("hidden-ref");
+      expect(text).not.toContain("HIDDEN BODY");
+    });
+
+    it("missing/error 策略可选择 ignore 或 fail", async () => {
+      const ignoredPi = fakePi();
+      const ignored = createLoopGraphExtension(ignoredPi, {
+        skillProvider: async () => null,
+      });
+      const ignoredNode: Node = {
+        kind: "code", id: "ignored", subGoal: "ignored", skill: "missing",
+        async execute() { return { nodeId: "ignored", status: "ok", result: {} }; },
+      };
+      await expect(ignored.executeGraph(terminalGraph("missing_ignore", ignoredNode), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "ok" });
+
+      const failedPi = fakePi();
+      const failed = createLoopGraphExtension(failedPi, {
+        skillProvider: async () => null,
+        skillFailure: { missing: "fail" },
+      });
+      await expect(failed.executeGraph(terminalGraph("missing_fail", ignoredNode), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "failed", result: { reason: "skill 未找到: missing" } });
+
+      const errorPi = fakePi();
+      const errored = createLoopGraphExtension(errorPi, {
+        skillProvider: async () => { throw new Error("remote down"); },
+        skillFailure: { error: "fail" },
+      });
+      await expect(errored.executeGraph(terminalGraph("error_fail", ignoredNode), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "failed", result: { reason: "remote down" } });
+    });
+  });
+
   describe("Phase 2 contextRenderer", () => {
     it("可完全隐藏默认 CURRENT 控制字段，并接收已加载 skill 与完成协议", async () => {
       const pi = fakePi();

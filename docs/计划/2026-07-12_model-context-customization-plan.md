@@ -9,7 +9,10 @@
 - Phase 0：已完成（2026-07-12）——冻结模型可见默认消息，修正文档中的多 skill/已实现能力漂移。
 - Phase 1：已完成（2026-07-12）——limits 配置、参数校验、同 instance root run fail-fast 并发保护。
 - Phase 2：已完成（2026-07-12）——Extension 级 scope-safe renderer、输入输出无别名快照、node-enter 冻结、null 锚点、recovery 复用和 delegate 传播验证。
-- Phase 3 及以后：待实施。
+- Phase 3：已完成（2026-07-12）——调用级 > Node > Graph > Extension > 默认覆盖；call/compose 传播，delegate 保持独立配置。
+- Phase 4：已完成（2026-07-12）——outputSchema 校验链、恢复消息 formatter、completion tool result formatter。
+- Phase 5：已完成（2026-07-12）——异步 skill provider、skill renderer、缺失/错误策略和 delegate 传播。
+- Phase 6：待实施。
 
 ## 一、结论
 

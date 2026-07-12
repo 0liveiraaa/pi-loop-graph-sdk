@@ -16,7 +16,15 @@ import {
   createLoopGraphExtension,
   type LoopGraphExtension,
   type LoopGraphLimits,
+  type CompletionToolResultFormatter,
+  type ContextRendererRegistry,
 } from "./loop-graph-extension.js";
+import type { ModelMessageFormatter } from "./model-messages.js";
+import type {
+  SkillContentProvider,
+  SkillContentRenderer,
+  SkillFailurePolicies,
+} from "./skill-content.js";
 import type {
   DelegateHostFactory,
   IsolatedGraphSession,
@@ -36,6 +44,12 @@ export interface IsolatedGraphSessionFactoryOptions {
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   limits?: LoopGraphLimits;
   contextRenderer?: NodeContextRenderer;
+  modelMessageFormatter?: Partial<ModelMessageFormatter>;
+  completionToolResultFormatter?: CompletionToolResultFormatter;
+  skillProvider?: SkillContentProvider;
+  skillRenderer?: SkillContentRenderer;
+  skillFailure?: SkillFailurePolicies;
+  contextRenderers?: ContextRendererRegistry;
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   /** 省略时遵循 pi 默认 compaction；可由 host 显式覆盖。 */
   compaction?: CompactionSettings;
@@ -81,6 +95,12 @@ export function createIsolatedGraphSessionFactory(
             delegateCompaction: options.compaction,
             limits: options.limits,
             contextRenderer: options.contextRenderer,
+            modelMessageFormatter: options.modelMessageFormatter,
+            completionToolResultFormatter: options.completionToolResultFormatter,
+            skillProvider: options.skillProvider,
+            skillRenderer: options.skillRenderer,
+            skillFailure: options.skillFailure,
+            contextRenderers: options.contextRenderers,
           });
         },
       ],

@@ -13,7 +13,29 @@ export type {
   LoopGraphExtension,
   LoopGraphExtensionOptions,
   LoopGraphLimits,
+  CompletionToolResultFormatter,
+  CompletionToolResultInput,
+  ContextRendererRegistry,
+  LoopGraphExecutionOptions,
 } from "./adapter/loop-graph-extension.js";
+export type {
+  DeadRunMessageInput,
+  GraphFailureMessageInput,
+  IncompleteNodeMessageInput,
+  ModelMessageFormatter,
+  ValidationRetryMessageInput,
+} from "./adapter/model-messages.js";
+export {
+  defaultSkillContentProvider,
+  defaultSkillContentRenderer,
+} from "./adapter/skill-content.js";
+export type {
+  SkillContentProvider,
+  SkillContentRenderer,
+  SkillFailurePolicies,
+  SkillFailurePolicy,
+  SkillLoadContext,
+} from "./adapter/skill-content.js";
 
 // ── 图注册表（新 API）──
 export { GraphRegistry } from "./registry.js";

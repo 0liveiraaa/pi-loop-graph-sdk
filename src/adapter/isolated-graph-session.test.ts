@@ -405,6 +405,47 @@ describe("contextRenderer", () => {
       session.dispose();
     }
   });
+
+  it("传播 skillProvider/skillRenderer 到 runtime-only 隔离 session", async () => {
+    const provider = vi.fn(async () => "ISOLATED SKILL");
+    const renderer = vi.fn(() => ({ kind: "skill" as const, content: "ISOLATED GUIDANCE" }));
+    const graph = pureCodeGraph();
+    (graph.nodes.step1 as Extract<Node, { kind: "code" }>).skill = "remote-skill";
+    const factory = createIsolatedGraphSessionFactory(factoryOptions({
+      skillProvider: provider,
+      skillRenderer: renderer,
+    }));
+    const session = await factory(delegateReq());
+    try {
+      await session.run(graph, delegateReq());
+      expect(provider).toHaveBeenCalledTimes(1);
+      expect(renderer).toHaveBeenCalledWith("remote-skill", "ISOLATED SKILL", expect.any(Object));
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("传播 Graph/Node renderer registry，并保持 Node 优先", async () => {
+    const extensionRenderer = vi.fn(() => ({ anchor: { content: "EXT" } }));
+    const graphRenderer = vi.fn(() => ({ anchor: { content: "GRAPH" } }));
+    const nodeRenderer = vi.fn(() => ({ anchor: { content: "NODE" } }));
+    const factory = createIsolatedGraphSessionFactory(factoryOptions({
+      contextRenderer: extensionRenderer,
+      contextRenderers: {
+        graphs: { pure_code: graphRenderer },
+        nodes: { pure_code: { step1: nodeRenderer } },
+      },
+    }));
+    const session = await factory(delegateReq());
+    try {
+      await session.run(pureCodeGraph(), delegateReq());
+      expect(nodeRenderer).toHaveBeenCalledTimes(1);
+      expect(graphRenderer).not.toHaveBeenCalled();
+      expect(extensionRenderer).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
 });
 
 describe("agent 节点（需要 LLM）", () => {

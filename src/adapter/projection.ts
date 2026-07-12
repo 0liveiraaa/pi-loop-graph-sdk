@@ -235,7 +235,12 @@ export interface NodeContextRenderInput {
    * frameFormatter 管理，避免 compaction 后重复投影旧 frame。 */
   frames: readonly ContextFrame[];
   availableEdges: readonly EdgeChoice[];
-  skill: { ref: string; content: string } | null;
+  skill: {
+    ref: string;
+    content: string;
+    message: RenderedContextMessage | null;
+    showRefInCurrent: boolean;
+  } | null;
   completion: {
     toolName: "__graph_complete__";
     statuses: readonly ["ok", "failed", "cancelled"];
@@ -257,16 +262,16 @@ export type NodeContextRenderer =
  * 由 frameFormatter 投影，使 compaction baseline 可以独立推进。 */
 export const defaultNodeContextRenderer: NodeContextRenderer = (input) => {
   const additional: RenderedContextMessage[] = [];
-  if (input.skill) {
-    additional.push({
-      kind: "skill",
-      content: `[skill: ${input.skill.ref}]\n\n${input.skill.content}`,
-    });
-  }
+  if (input.skill?.message) additional.push(input.skill.message);
   return {
     anchor: {
     kind: "current",
-      content: buildNodeInfoContent(input.node, [...input.availableEdges]),
+      content: buildNodeInfoContent(
+        input.skill && !input.skill.showRefInCurrent
+          ? { ...input.node, skill: undefined }
+          : input.node,
+        [...input.availableEdges],
+      ),
     },
     additional,
   };

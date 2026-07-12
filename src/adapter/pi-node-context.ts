@@ -16,6 +16,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { NodeCompletion, NodeContext, NodeInput } from "../type.js";
 import type { AgentRunRequest } from "../type.js";
 import { debugLog } from "./debug-log.js";
+import Schema from "typebox/schema";
+import {
+  defaultModelMessageFormatter,
+  type ModelMessageFormatter,
+} from "./model-messages.js";
 
 export class PiNodeContext implements NodeContext {
   readonly signal: AbortSignal;
@@ -31,10 +36,17 @@ export class PiNodeContext implements NodeContext {
   private activeRunId = 0;
   private nextRunId = 1;
   private readonly agentRunTimeoutMs: number;
+  private readonly messageFormatter: ModelMessageFormatter;
+  private nodeValidateFn: AgentRunRequest["validateCompletion"] = undefined;
 
-  constructor(pi: ExtensionAPI, agentRunTimeoutMs = 5 * 60 * 1000) {
+  constructor(
+    pi: ExtensionAPI,
+    agentRunTimeoutMs = 5 * 60 * 1000,
+    messageFormatter: ModelMessageFormatter = defaultModelMessageFormatter,
+  ) {
     this.pi = pi;
     this.agentRunTimeoutMs = agentRunTimeoutMs;
+    this.messageFormatter = messageFormatter;
     this.signal = new AbortController().signal;
 
     // ── Provider 错误回流通道（单一监听器，生命周期跟实例走）──
@@ -62,9 +74,16 @@ export class PiNodeContext implements NodeContext {
   private validateFn: AgentRunRequest["validateCompletion"] = undefined;
 
   async runAgent(request: AgentRunRequest): Promise<NodeCompletion> {
+    // schema 配置错误必须在占用 active run 之前抛出，避免把 NodeContext
+    // 永久留在一个没有 Promise/timeout 可以收尾的运行状态。
+    const validateFn = composeCompletionValidators(
+      createSchemaValidator(request.outputSchema),
+      request.validateCompletion,
+      this.nodeValidateFn,
+    );
     const runId = this.nextRunId++;
     this.activeRunId = runId;
-    this.validateFn = request.validateCompletion;
+    this.validateFn = validateFn;
 
     const promise = new Promise<NodeCompletion>((res) => {
       const timeout = setTimeout(() => {
@@ -160,7 +179,7 @@ export class PiNodeContext implements NodeContext {
       this.pi.sendMessage(
         {
           customType: "loop_graph_dead",
-          content: "[系统] 当前图已终止，你的后续操作不会被接收。",
+          content: this.messageFormatter.deadRun({ nodeId: this.currentNodeId }),
           display: false,
         },
         {},
@@ -192,7 +211,11 @@ export class PiNodeContext implements NodeContext {
           this.pi.sendMessage(
             {
               customType: "loop_graph_retry",
-              content: `验证未通过: ${vr.reason}\n请修正后再次调用 __graph_complete__`,
+              content: this.messageFormatter.validationRetry({
+                nodeId: this.currentNodeId ?? "unknown",
+                reason: vr.reason,
+                completeToolName: "__graph_complete__",
+              }),
               display: false,
             },
             { triggerTurn: true },
@@ -209,7 +232,10 @@ export class PiNodeContext implements NodeContext {
         nodeId: this.currentNodeId ?? "unknown",
         status: "failed",
         result: {
-          reason: "Agent finished without calling __graph_complete__.",
+          reason: this.messageFormatter.incompleteNode({
+            nodeId: this.currentNodeId ?? "unknown",
+            completeToolName: "__graph_complete__",
+          }),
         },
       });
     }
@@ -226,6 +252,13 @@ export class PiNodeContext implements NodeContext {
     // 再次调用本方法，仍可保留其 allCompletions 语义。
     this.pendingCompletions = [];
     this.validateFn = undefined;
+    this.nodeValidateFn = undefined;
+  }
+
+  setNodeCompletionValidator(
+    validate: AgentRunRequest["validateCompletion"],
+  ): void {
+    this.nodeValidateFn = validate;
   }
 
   reset(): void {
@@ -234,5 +267,43 @@ export class PiNodeContext implements NodeContext {
     this.activeRunId = 0;
     this.activeResolve = null;
     this.validateFn = undefined;
+    this.nodeValidateFn = undefined;
   }
+}
+
+function composeCompletionValidators(
+  ...validators: Array<AgentRunRequest["validateCompletion"]>
+): AgentRunRequest["validateCompletion"] {
+  const active = validators.filter((validator): validator is NonNullable<typeof validator> => validator != null);
+  if (active.length === 0) return undefined;
+  return (result) => {
+    for (const validator of active) {
+      try {
+        const validation = validator(result);
+        if (!validation.isValid) return validation;
+      } catch (error) {
+        return {
+          isValid: false,
+          reason: `completion validator 异常: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    return { isValid: true };
+  };
+}
+
+function createSchemaValidator(
+  outputSchema: unknown,
+): AgentRunRequest["validateCompletion"] {
+  if (outputSchema == null) return undefined;
+  const validator = Schema.Compile(outputSchema as any);
+  return (result) => {
+    const [isValid, errors] = validator.Errors(result);
+    if (isValid) return { isValid: true };
+    const summary = errors.slice(0, 3).map((error) => {
+      const path = error.instancePath || "$";
+      return `${path} ${error.message}`;
+    }).join("; ");
+    return { isValid: false, reason: `输出不符合 outputSchema: ${summary}` };
+  };
 }
