@@ -11,7 +11,12 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ContextFrame, GraphRunRequest } from "../type.js";
-import { createLoopGraphExtension, type LoopGraphExtension } from "./loop-graph-extension.js";
+import type { NodeContextRenderer } from "./projection.js";
+import {
+  createLoopGraphExtension,
+  type LoopGraphExtension,
+  type LoopGraphLimits,
+} from "./loop-graph-extension.js";
 import type {
   DelegateHostFactory,
   IsolatedGraphSession,
@@ -29,6 +34,8 @@ export interface IsolatedGraphSessionFactoryOptions {
   customTools?: ToolDefinition[];
   skillBasePath?: string;
   frameFormatter?: (frames: ContextFrame[]) => string | null;
+  limits?: LoopGraphLimits;
+  contextRenderer?: NodeContextRenderer;
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   /** 省略时遵循 pi 默认 compaction；可由 host 显式覆盖。 */
   compaction?: CompactionSettings;
@@ -72,6 +79,8 @@ export function createIsolatedGraphSessionFactory(
             createDelegateHost: options.createDelegateHost,
             delegateTools: options.customTools,
             delegateCompaction: options.compaction,
+            limits: options.limits,
+            contextRenderer: options.contextRenderer,
           });
         },
       ],

@@ -26,6 +26,9 @@ export interface ProjectionInput {
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   /** 活动图已经历 compaction；原生 summary 是此前上下文的权威替代。 */
   compactionActive?: boolean;
+  /** node-enter 时已冻结的 SDK 合成上下文。仅在活动 scope 锚点缺失时恢复，
+   *  不包含 live ReAct，也不接管 GraphCallScope/compaction 清洗。 */
+  renderedContext?: readonly MessageEntry[];
 }
 
 export interface MessageEntry {
@@ -69,7 +72,10 @@ export function projectMessages(input: ProjectionInput): MessageEntry[] {
     const includeAnchor = messages[currentIdx]?.customType === "loop_graph_node_scope";
     result.push(...messages.slice(currentIdx + (includeAnchor ? 0 : 1)));
   } else if (currentNode) {
-    result.push(buildNodeInfo(currentNode, input.availableEdges));
+    const recovered = input.renderedContext?.length
+      ? input.renderedContext
+      : [buildNodeInfo(currentNode, input.availableEdges)];
+    result.push(...recovered);
     if (summaryIdx >= 0) result.push(...messages.slice(summaryIdx + 1));
   }
   return result;
@@ -160,7 +166,12 @@ function findLastCompactionSummary(messages: MessageEntry[]): number {
   return -1;
 }
 
-export function buildNodeInfoContent(node: Node, availableEdges?: EdgeChoice[]): string {
+type NodeInfoLike = Pick<Node, "id" | "kind" | "subGoal"> & {
+  tools?: readonly string[];
+  skill?: string;
+};
+
+export function buildNodeInfoContent(node: NodeInfoLike, availableEdges?: EdgeChoice[]): string {
   const lines: string[] = ["=== CURRENT ==="];
   lines.push(`nodeId: ${node.id}`);
   lines.push(`subGoal: ${node.subGoal}`);
@@ -186,6 +197,80 @@ export function buildNodeInfoContent(node: Node, availableEdges?: EdgeChoice[]):
 
   return lines.join("\n");
 }
+
+export type RenderedContextContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+export interface RenderedContextMessage {
+  content: string | readonly RenderedContextContentBlock[];
+  kind?: "current" | "completed" | "skill" | "instruction";
+}
+
+export interface GraphContextView {
+  readonly id: string;
+  readonly goal: string;
+}
+
+export interface NodeContextView {
+  readonly id: string;
+  readonly kind: Node["kind"];
+  readonly subGoal: string;
+  readonly skill?: string;
+  readonly tools: readonly string[];
+  readonly boundary?: import("../type.js").GraphInvocationBoundary;
+  readonly childGraphId?: string;
+}
+
+export interface NodeInputView {
+  readonly data: Readonly<Record<string, unknown>>;
+  readonly source: Readonly<import("../type.js").NodeInput["source"]>;
+}
+
+export interface NodeContextRenderInput {
+  graph: GraphContextView;
+  node: NodeContextView;
+  input: NodeInputView;
+  /** node-enter 时 Runtime 已选择的 frame 快照。COMPLETED 主投影仍由
+   * frameFormatter 管理，避免 compaction 后重复投影旧 frame。 */
+  frames: readonly ContextFrame[];
+  availableEdges: readonly EdgeChoice[];
+  skill: { ref: string; content: string } | null;
+  completion: {
+    toolName: "__graph_complete__";
+    statuses: readonly ["ok", "failed", "cancelled"];
+  };
+  reason: "node-enter";
+}
+
+export interface RenderedNodeContext {
+  /** NodeScope 锚点的模型可见正文。null 表示使用空正文，但安全锚点仍存在。 */
+  anchor: RenderedContextMessage | null;
+  /** 锚点之后追加的其它 SDK 合成消息。 */
+  additional?: readonly RenderedContextMessage[];
+}
+
+export type NodeContextRenderer =
+  (input: NodeContextRenderInput) => RenderedNodeContext | null;
+
+/** 兼容 renderer：保持当前 CURRENT 与 skill 消息的正文格式。历史 frames 继续
+ * 由 frameFormatter 投影，使 compaction baseline 可以独立推进。 */
+export const defaultNodeContextRenderer: NodeContextRenderer = (input) => {
+  const additional: RenderedContextMessage[] = [];
+  if (input.skill) {
+    additional.push({
+      kind: "skill",
+      content: `[skill: ${input.skill.ref}]\n\n${input.skill.content}`,
+    });
+  }
+  return {
+    anchor: {
+    kind: "current",
+      content: buildNodeInfoContent(input.node, [...input.availableEdges]),
+    },
+    additional,
+  };
+};
 
 function buildNodeInfo(node: Node, availableEdges?: EdgeChoice[]): MessageEntry {
   return { role: "user", content: buildNodeInfoContent(node, availableEdges), timestamp: Date.now() };

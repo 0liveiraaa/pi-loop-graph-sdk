@@ -30,9 +30,11 @@ export class PiNodeContext implements NodeContext {
   private activeResolve: ((c: NodeCompletion) => void) | null = null;
   private activeRunId = 0;
   private nextRunId = 1;
+  private readonly agentRunTimeoutMs: number;
 
-  constructor(pi: ExtensionAPI) {
+  constructor(pi: ExtensionAPI, agentRunTimeoutMs = 5 * 60 * 1000) {
     this.pi = pi;
+    this.agentRunTimeoutMs = agentRunTimeoutMs;
     this.signal = new AbortController().signal;
 
     // ── Provider 错误回流通道（单一监听器，生命周期跟实例走）──
@@ -72,9 +74,13 @@ export class PiNodeContext implements NodeContext {
         res({
           nodeId: this.currentNodeId ?? "unknown",
           status: "failed",
-          result: { reason: "Agent run timed out after 5 minutes" },
+          result: {
+            reason: this.agentRunTimeoutMs === 5 * 60 * 1000
+              ? "Agent run timed out after 5 minutes"
+              : `Agent run timed out after ${this.agentRunTimeoutMs} ms`,
+          },
         });
-      }, 5 * 60 * 1000);
+      }, this.agentRunTimeoutMs);
 
       this.activeResolve = (c: NodeCompletion) => {
         clearTimeout(timeout);

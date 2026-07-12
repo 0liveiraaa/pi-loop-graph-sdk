@@ -12,6 +12,7 @@ export { createLoopGraphExtension } from "./adapter/loop-graph-extension.js";
 export type {
   LoopGraphExtension,
   LoopGraphExtensionOptions,
+  LoopGraphLimits,
 } from "./adapter/loop-graph-extension.js";
 
 // ── 图注册表（新 API）──
@@ -47,8 +48,25 @@ export type { GraphValidationIssue, GraphValidationOptions } from "./validate.js
 export { selectEdge } from "./router.js";
 
 // ── 消息投影（高级）──
-export { projectMessages, defaultFrameFormatter, stripClosedGraphCalls } from "./adapter/projection.js";
-export type { ProjectionInput, MessageEntry, EdgeChoice } from "./adapter/projection.js";
+export {
+  projectMessages,
+  defaultFrameFormatter,
+  defaultNodeContextRenderer,
+  stripClosedGraphCalls,
+} from "./adapter/projection.js";
+export type {
+  ProjectionInput,
+  MessageEntry,
+  EdgeChoice,
+  GraphContextView,
+  NodeContextView,
+  NodeInputView,
+  NodeContextRenderInput,
+  NodeContextRenderer,
+  RenderedContextContentBlock,
+  RenderedContextMessage,
+  RenderedNodeContext,
+} from "./adapter/projection.js";
 
 // ── @deprecated 全局兼容层（向后兼容旧代码）──
 export {

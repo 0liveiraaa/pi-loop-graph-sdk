@@ -39,7 +39,17 @@ import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
 import { assertValidGraph, validateGraphTools } from "../validate.js";
 import { selectEdge } from "../router.js";
-import { buildNodeInfoContent, projectMessages, stripClosedGraphCalls, type EdgeChoice } from "./projection.js";
+import {
+  defaultNodeContextRenderer,
+  projectMessages,
+  stripClosedGraphCalls,
+  type EdgeChoice,
+  type MessageEntry,
+  type NodeContextRenderInput,
+  type NodeContextRenderer,
+  type RenderedContextContentBlock,
+  type RenderedContextMessage,
+} from "./projection.js";
 import { PiNodeContext } from "./pi-node-context.js";
 import { COMPLETE_TOOL_NAME, createCompleteTool } from "./complete-tool.js";
 import { resolveNodeTools } from "../tools-resolve.js";
@@ -90,6 +100,20 @@ export interface LoopGraphExtensionOptions {
   delegateCompaction?: CompactionSettings;
   /** graph tool 返回给模型的最大 UTF-8 字节数。 */
   toolResultMaxBytes?: number;
+  /** 图循环与单次 agent run 的运行限制。省略时保持兼容默认值。 */
+  limits?: LoopGraphLimits;
+  /** 自定义 SDK 在 node-enter 时追加给模型的 CURRENT/skill/instruction 载荷。
+   * NodeScope、GraphCallScope、compaction 与 frame baseline 仍由 SDK 固定管理。 */
+  contextRenderer?: NodeContextRenderer;
+}
+
+export interface LoopGraphLimits {
+  /** 顶层 root 图最大节点步数。默认 100。 */
+  rootMaxSteps?: number;
+  /** call/compose 子图最大节点步数。默认 50。 */
+  childMaxSteps?: number;
+  /** 单次 NodeContext.runAgent 超时毫秒数。默认 300000（5 分钟）。 */
+  agentRunTimeoutMs?: number;
 }
 
 export interface LoopGraphExtension {
@@ -111,10 +135,14 @@ export function createLoopGraphExtension(
   pi: ExtensionAPI,
   options: LoopGraphExtensionOptions = {},
 ): LoopGraphExtension {
+  const limits = resolveLoopGraphLimits(options.limits);
   // ── 实例级状态（替代原模块级 activeRuntime / activeNodeContext）──
 
   let activeRuntime: GraphRuntime | null = null;
   let activeNodeContext: PiNodeContext | null = null;
+  /** renderer 结果按 scopeId 保存，避免嵌套 call/compose 覆盖父节点的恢复载荷。 */
+  const renderedContextByScope = new Map<string, readonly MessageEntry[]>();
+  let rootRunActive = false;
   const defaultTools = options.defaultTools ?? [];
   const skillBasePath = options.skillBasePath ?? path.join(process.cwd(), "skills");
 
@@ -182,6 +210,9 @@ export function createLoopGraphExtension(
       availableEdges,
       frameFormatter: options.frameFormatter,
       compactionActive: rt.compactionGeneration > 0,
+      renderedContext: rt.currentScope
+        ? renderedContextByScope.get(rt.currentScope.scopeId) ?? []
+        : [],
     };
     const projected = projectMessages(input);
     debugLog.projection(input, projected as any[]);
@@ -301,6 +332,12 @@ export function createLoopGraphExtension(
     graph: Graph,
     trigger: { source: string; args?: string; params?: Record<string, unknown> },
   ): Promise<GraphRunResult> {
+    if (rootRunActive) {
+      throw new Error(
+        "同一 LoopGraphExtension instance 不支持并发 root executeGraph；请为并发任务创建独立 AgentSession 或 delegate host",
+      );
+    }
+
     assertValidGraph(graph, {
       supportedBoundaries: options.createDelegateHost
         ? ["call", "compose", "delegate"]
@@ -323,9 +360,8 @@ export function createLoopGraphExtension(
     }
 
     const runtime = new GraphRuntime();
-    const nodeContext = new PiNodeContext(piInner);
-
-    debugLog.graphStart(graph.id, trigger);
+    const nodeContext = new PiNodeContext(piInner, limits.agentRunTimeoutMs);
+    rootRunActive = true;
 
     // 保存/恢复外层运行时状态（支持子图嵌套时切换 activeRuntime）
     const prevRt = activeRuntime;
@@ -334,6 +370,9 @@ export function createLoopGraphExtension(
     activeNodeContext = nodeContext;
 
     try {
+      // 必须位于 rootRunActive 对应的 try/finally 内；日志 IO 失败也不能让
+      // extension instance 永久停留在 busy 状态。
+      debugLog.graphStart(graph.id, trigger);
       const background =
         trigger.source === "tool" || trigger.params
           ? (trigger.params ?? {})
@@ -344,7 +383,7 @@ export function createLoopGraphExtension(
         graph,
         background,
         boundary: "root",
-        maxSteps: 100,
+        maxSteps: limits.rootMaxSteps,
         invocationKind: trigger.source === "command" ? "command" : "tool",
       });
       piInner.sendMessage({
@@ -381,6 +420,8 @@ export function createLoopGraphExtension(
       restoreDefaultTools(piInner);
       activeRuntime = prevRt;
       activeNodeContext = prevNc;
+      renderedContextByScope.clear();
+      rootRunActive = false;
     }
   }
 
@@ -488,8 +529,18 @@ export function createLoopGraphExtension(
           debugLog.toolsChanged(nodeId, pi.getActiveTools());
 
           const scope = runtime.nextScope(nodeId);
-          appendNodeScope(pi, node, scope, getAvailableEdges(graph, nodeId));
-          appendSkillContent(pi, node);
+          const availableEdges = getAvailableEdges(graph, nodeId) ?? [];
+          const skill = loadSkillContent(node);
+          const renderedContext = renderNodeContext({
+            graph,
+            node,
+            input,
+            frames: runtime.projectedFrames,
+            availableEdges,
+            skill,
+          }, scope);
+          renderedContextByScope.set(scope.scopeId, renderedContext);
+          appendRenderedNodeContext(pi, renderedContext);
 
           runtime.enterNode(nodeId, scope, input);
           debugLog.enterNode(
@@ -535,7 +586,7 @@ export function createLoopGraphExtension(
                     graph: graphNode.graph,
                     background: callBackground,
                     boundary: "compose",
-                    maxSteps: 50,
+                    maxSteps: limits.childMaxSteps,
                     sharedInstance: parentInstance,
                     parentNodeId: graphNode.id,
                   });
@@ -568,7 +619,7 @@ export function createLoopGraphExtension(
                 background: callBackground,
                 boundary: "call",
                 // 保持旧子图的独立上限，避免本次抽取改变 call 的失败语义。
-                maxSteps: 50,
+                maxSteps: limits.childMaxSteps,
                 parentNodeId: graphNode.id,
               });
               return { nodeId: graphNode.id, status: child.status, result: child.result };
@@ -667,8 +718,8 @@ export function createLoopGraphExtension(
    * 节点声明了 skill 时，读取 SKILL.md 追加到消息流。
    * 必须在 NodeScope 之后调用，确保内容属于当前节点的 active 段。
    */
-  function appendSkillContent(piInner: ExtensionAPI, node: Node): void {
-    if (node.kind !== "code" || !node.skill) return;
+  function loadSkillContent(node: Node): { ref: string; content: string } | null {
+    if (node.kind !== "code" || !node.skill) return null;
 
     const skillDir = path.join(skillBasePath, node.skill);
     const skillFile = path.join(skillDir, "SKILL.md");
@@ -678,40 +729,150 @@ export function createLoopGraphExtension(
         `skill:${node.skill}`,
         `SKILL.md 未找到: ${skillFile}`,
       );
-      return;
+      return null;
     }
 
     try {
       const content = fs.readFileSync(skillFile, "utf-8");
-      // 用 sendMessage 追加入消息流，不触发 turn。
-      // sendUserMessage 语义是"发起一轮"，会触发额外 turn，
-      // 在 runAgent 之前调用会造成 turn 竞跑。
-      piInner.sendMessage({
-        customType: "loop_graph_skill",
-        content: `[skill: ${node.skill}]\n\n${content}`,
-        display: false,
-      });
+      return { ref: node.skill, content };
     } catch (err) {
       debugLog.graphError(
         `skill:${node.skill}`,
         `读取失败: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return null;
     }
   }
 
-  function appendNodeScope(
-    piInner: ExtensionAPI,
-    node: Node,
+  function renderNodeContext(
+    input: {
+      graph: Graph;
+      node: Node;
+      input: NodeInput;
+      frames: readonly import("../type.js").ContextFrame[];
+      availableEdges: readonly EdgeChoice[];
+      skill: { ref: string; content: string } | null;
+    },
     scope: import("../runtime.js").NodeScopeDescriptor,
-    availableEdges?: EdgeChoice[],
-  ): void {
-    piInner.sendMessage({
+  ): readonly MessageEntry[] {
+    const renderer = options.contextRenderer ?? defaultNodeContextRenderer;
+    const renderInput: NodeContextRenderInput = Object.freeze({
+      graph: Object.freeze({ id: input.graph.id, goal: input.graph.goal }),
+      node: Object.freeze({
+        id: input.node.id,
+        kind: input.node.kind,
+        subGoal: input.node.subGoal,
+        skill: input.node.kind === "code" ? input.node.skill : undefined,
+        tools: Object.freeze(input.node.kind === "code" ? [...(input.node.tools ?? [])] : []),
+        boundary: input.node.kind === "graph" ? input.node.boundary : undefined,
+        childGraphId: input.node.kind === "graph" ? input.node.graph.id : undefined,
+      }),
+      input: Object.freeze({
+        data: snapshotRendererValue(input.input.data) as Readonly<Record<string, unknown>>,
+        source: snapshotRendererValue(input.input.source) as Readonly<NodeInput["source"]>,
+      }),
+      frames: snapshotRendererValue(input.frames) as readonly import("../type.js").ContextFrame[],
+      availableEdges: Object.freeze(input.availableEdges.map((edge) => Object.freeze({ ...edge }))),
+      skill: input.skill ? Object.freeze({ ...input.skill }) : null,
+      completion: Object.freeze({
+        toolName: COMPLETE_TOOL_NAME,
+        statuses: Object.freeze(["ok", "failed", "cancelled"] as const),
+      }),
+      reason: "node-enter",
+    });
+    const rendered = renderer(renderInput);
+    const anchor = rendered?.anchor ?? null;
+    const additional = rendered?.additional ?? [];
+    const now = Date.now();
+    const frozen: MessageEntry[] = [{
       customType: NODE_SCOPE_TYPE,
-      content: buildNodeInfoContent(node, availableEdges),
+      content: anchor ? copyRenderedContent(anchor.content) : "",
       details: scope,
       display: false,
-    });
+      timestamp: now,
+    }];
+    for (let index = 0; index < additional.length; index++) {
+      const message = additional[index];
+      frozen.push({
+        customType: renderedMessageType(message),
+        content: copyRenderedContent(message.content),
+        display: false,
+        timestamp: now + index + 1,
+      });
+    }
+    return Object.freeze(frozen.map((message) => Object.freeze(message)));
   }
+
+  function appendRenderedNodeContext(
+    piInner: ExtensionAPI,
+    messages: readonly MessageEntry[],
+  ): void {
+    for (const message of messages) {
+      piInner.sendMessage({
+        customType: message.customType!,
+        content: message.content as any,
+        details: message.details,
+        display: false,
+      });
+    }
+  }
+}
+
+function renderedMessageType(message: RenderedContextMessage): string {
+  if (message.kind === "skill") return "loop_graph_skill";
+  return `loop_graph_rendered_${message.kind ?? "instruction"}`;
+}
+
+function copyRenderedContent(
+  content: RenderedContextMessage["content"],
+): string | readonly RenderedContextContentBlock[] {
+  if (typeof content === "string") return content;
+  return Object.freeze(content.map((block) => Object.freeze({ ...block })));
+}
+
+/** 创建只供 renderer 阅读的无别名快照。函数和 Symbol 不属于模型上下文数据，
+ * 转为稳定文本；普通对象/数组保留循环引用，但不保留可变原型。 */
+function snapshotRendererValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`;
+  if (typeof value === "symbol") return String(value);
+  if (typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(value, clone);
+    for (const item of value) clone.push(snapshotRendererValue(item, seen));
+    return Object.freeze(clone);
+  }
+  const clone: Record<string, unknown> = {};
+  seen.set(value, clone);
+  for (const [key, item] of Object.entries(value)) {
+    clone[key] = snapshotRendererValue(item, seen);
+  }
+  return Object.freeze(clone);
+}
+
+interface ResolvedLoopGraphLimits {
+  rootMaxSteps: number;
+  childMaxSteps: number;
+  agentRunTimeoutMs: number;
+}
+
+function resolveLoopGraphLimits(limits: LoopGraphLimits | undefined): ResolvedLoopGraphLimits {
+  const resolved: ResolvedLoopGraphLimits = {
+    rootMaxSteps: limits?.rootMaxSteps ?? 100,
+    childMaxSteps: limits?.childMaxSteps ?? 50,
+    agentRunTimeoutMs: limits?.agentRunTimeoutMs ?? 5 * 60 * 1000,
+  };
+
+  for (const [name, value] of Object.entries(resolved)) {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+      throw new Error(`LoopGraph limits.${name} 必须是有限正整数，收到: ${String(value)}`);
+    }
+  }
+  return resolved;
 }
 
 // ── 内部辅助函数 ────────────────────────────────────────────

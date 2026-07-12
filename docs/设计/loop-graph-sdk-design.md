@@ -420,6 +420,10 @@ const reviewGraph: Graph = {
 
 **决策**：ContextFrame 是开发者完全自定义的工作记忆，Runtime 控制元数据与 LLM 载荷分离；默认 formatter 只稳定序列化开发者 frame。图返回通过 `MigrationResult.output` 与 frame 解耦。pi compaction summary 是旧上下文的权威替代，Runtime 使用 `branchEntries + firstKeptEntryId + NodeScope` 精确推进模型可见 frame 基线，不物理删除完整帧；切点内部节点的 frame 保留，活动 scope 被压缩时恢复 CURRENT，并保留 summary 与 recent messages。共享 call/compose 的混合摘要仍不可安全归属，因此继续阻止跨调用 compaction。
 
+### Extension 级模型上下文 renderer
+
+**决策**：开放 `contextRenderer` 定制 CURRENT、skill 与完成说明，但 renderer 不接管完整 transcript。它在 node-enter 时接收不共享 Runtime 引用的只读 Graph/Node/Input/frame 快照，明确返回 anchor 与 additional；SDK 复制并冻结输出文本块。scope missing 或 compaction recovery 只复用冻结载荷。NodeScope `details` 继续只保存控制元数据，正文为空也必须保留锚点。GraphCallScope 清洗、scope 匹配、fail-closed、summary/recent messages 和 frame baseline 仍是 Runtime/投影内核的不变量。已完成 frames 继续由 `frameFormatter` 动态投影，避免同一节点内 compaction 后重放已被 summary 替代的历史。详见 ADR-0002。
+
 ---
 
 ## 后续步骤

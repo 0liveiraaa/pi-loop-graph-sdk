@@ -99,8 +99,58 @@ interface LoopGraphExtensionOptions {
    *  接收 ContextFrame[]，返回完整文本或 null（跳过 COMPLETED 段）。
    *  默认保持 JSON 格式。参见 §帧栈与投影。 */
   frameFormatter?: (frames: ContextFrame[]) => string | null;
+  /** 自定义节点进入时 SDK 给模型追加的 CURRENT/skill/完成说明。 */
+  contextRenderer?: NodeContextRenderer;
+  /** 图循环与单次 agent run 的运行限制。 */
+  limits?: {
+    rootMaxSteps?: number;       // 默认 100
+    childMaxSteps?: number;      // 默认 50
+    agentRunTimeoutMs?: number;  // 默认 300000（5 分钟）
+  };
 }
 ```
+
+### 自定义当前节点上下文
+
+`contextRenderer` 控制 SDK 在节点进入时主动追加给模型的内容。它不会拿到完整对话，也不能替换 NodeScope、子图清洗或 compaction 逻辑：
+
+```typescript
+const loop = createLoopGraphExtension(pi, {
+  contextRenderer(input) {
+    return {
+      anchor: {
+        kind: "current",
+        content: `当前任务：\n${input.node.subGoal}\n\n完成后请提交结构化结果。`,
+      },
+    };
+  },
+});
+```
+
+这样模型不再默认看到 nodeId、工具名、skill 名、edge target/priority 或 `=== CURRENT ===` 标签。renderer 可以读取：
+
+- 当前 graph、node 和 NodeInput；
+- node-enter 时的可见 frame 快照；
+- agent-choice 可选边；
+- 已加载的单个 skill 正文；
+- 固定 completion 协议名称和状态。
+
+renderer 是同步函数，每次节点进入只执行一次。输入中的 graph/node/input/frames 是 SDK 创建的只读快照，不是 Runtime 的真实可变对象；renderer 无法通过修改输入改变图或帧栈。返回值分为 `anchor` 和可选 `additional`，SDK 会复制并冻结文本块；scope 丢失或 compaction 恢复时复用同一结果，不重新调用 renderer。返回 `null` 或 `anchor: null` 表示不展示锚点正文，但 SDK 仍保留正文为空的内部 NodeScope 锚点并继续 fail-closed。
+
+历史 frame 的主展示仍使用 `frameFormatter`。这是因为同一节点运行期间 compaction 可能改变哪些 frames 还应显示；把完整 frames 写死在冻结 renderer 结果中会重复展示已压缩历史。需要完全自定义时同时配置：
+
+```typescript
+createLoopGraphExtension(pi, {
+  frameFormatter: (frames) => renderBusinessMemory(frames),
+  contextRenderer: (input) => ({ anchor: { content: renderCurrentTask(input) } }),
+});
+```
+
+未提供 `contextRenderer` 时，`defaultNodeContextRenderer` 保持原有 CURRENT 和 `[skill: name]` 格式。
+
+所有 limit 必须是有限正整数，非法值会在 `createLoopGraphExtension()` 时直接报错。默认值保持历史行为。`rootMaxSteps` 只控制公开低层 `executeGraph()` 的顶层循环；`childMaxSteps` 控制同一 Runtime 内的 `call/compose` 子图。delegate 图在独立 host 中运行，使用该 host 创建时传入的 limits。
+
+同一个 `LoopGraphExtension` instance 不支持并发调用低层 `executeGraph()`。第二个 root run 会在修改活动 Runtime 前 fail-fast；需要并发时应为每个任务创建独立 AgentSession/delegate host。仅在同一个 pi Session 上再创建一个 extension instance 不构成事件隔离，不能作为并发方案。图内部的嵌套 `call/compose` 使用同一个 Runtime callStack，不属于并发 root run。
 
 `defaultTools` 在注册期通过 `resolveNodeTools` 与每个节点的 `tools` 合并并去重：
 
@@ -1000,5 +1050,7 @@ export const reviewGraph: Graph = {
 | --- | -------- |
 | schema 辅助工具 | `NodeCompletion.result` 保持 `Record<string, unknown>` |
 | session 续跑 | 帧栈未持久化到磁盘 |
+| 同 instance root 并发 | `executeGraph()` fail-fast；并发任务使用独立 delegate host |
+| 单节点 skill 数量 | `node.skill?: string`，一次只关联一个 skill 引用 |
 | delegate host | 独立 Session 执行载体；需业务 extension 提供 `createDelegateHost` 工厂 |
 | 失败边处理 | `selectEdge` 返回 null 时优雅结束 |

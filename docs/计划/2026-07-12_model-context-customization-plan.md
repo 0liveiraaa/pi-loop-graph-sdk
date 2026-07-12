@@ -4,6 +4,13 @@
 > 日期：2026-07-12  
 > 范围：单 Agent Loop Graph SDK；不扩展多 Agent 通讯或 session 恢复
 
+## 实施进度
+
+- Phase 0：已完成（2026-07-12）——冻结模型可见默认消息，修正文档中的多 skill/已实现能力漂移。
+- Phase 1：已完成（2026-07-12）——limits 配置、参数校验、同 instance root run fail-fast 并发保护。
+- Phase 2：已完成（2026-07-12）——Extension 级 scope-safe renderer、输入输出无别名快照、node-enter 冻结、null 锚点、recovery 复用和 delegate 传播验证。
+- Phase 3 及以后：待实施。
+
 ## 一、结论
 
 原建议的主判断基本成立：`ContextFrame` 已可完全自定义，但 SDK 生成的 CURRENT、skill、completion/retry 和错误恢复消息仍包含固定格式，因此尚不能宣称“整个模型可见上下文高度可定制”。
@@ -75,9 +82,9 @@ renderer 只接收内核已计算好的业务语义输入，并产出 SDK 合成
 
 ```typescript
 export interface NodeContextRenderInput {
-  graph: Graph;
-  node: Node;
-  input: NodeInput;
+  graph: GraphContextView;
+  node: NodeContextView;
+  input: NodeInputView;
   frames: readonly ContextFrame[];
   availableEdges: readonly EdgeChoice[];
   skill: { ref: string; content: string } | null;
@@ -85,7 +92,7 @@ export interface NodeContextRenderInput {
     toolName: "__graph_complete__";
     statuses: readonly ["ok", "failed", "cancelled"];
   };
-  reason: "node-enter" | "compaction-recovery" | "scope-recovery";
+  reason: "node-enter";
 }
 
 export interface RenderedContextMessage {
@@ -94,10 +101,13 @@ export interface RenderedContextMessage {
 }
 
 export type NodeContextRenderer =
-  (input: NodeContextRenderInput) => readonly RenderedContextMessage[] | null;
+  (input: NodeContextRenderInput) => {
+    anchor: RenderedContextMessage | null;
+    additional?: readonly RenderedContextMessage[];
+  } | null;
 ```
 
-Runtime 在 node-enter 时解析 skill、执行 renderer，并把结果冻结在当前 NodeScope 状态中。projection 只复用这份结果；compaction/scope 恢复不得重新执行任意业务 renderer，以保证确定性。
+Runtime 在 node-enter 时解析 skill，并把 Graph/Node/Input/frame 转换为不共享引用的只读快照后执行 renderer。返回的 anchor 与 additional 内容同样被复制、冻结到当前 NodeScope 状态中。projection 只复用这份结果；compaction/scope 恢复不得重新执行任意业务 renderer，以保证确定性。
 
 兼容 renderer 复现当前 COMPLETED/CURRENT/skill 格式。现有 `frameFormatter` 保留，作为兼容 renderer 的一个局部覆盖点，不立即移除。
 
@@ -153,7 +163,7 @@ type SkillContentRenderer =
 MVP 不引入同 Session 多运行调度器，采用 fail-fast：
 
 - 同一 extension instance 已有 root run 活跃时，再次调用 `executeGraph()` 立即抛出明确错误；
-- 错误提示要求创建独立 extension/AgentSession host；
+- 错误提示要求创建独立 AgentSession/delegate host；同一 pi Session 上的另一个 extension instance 不视为并发隔离；
 - 保持嵌套 `call/compose` 使用同一 Runtime callStack，不被误判为并发；
 - 增加交错 Promise 测试，证明第二个 root run 在修改活动状态前被拒绝。
 

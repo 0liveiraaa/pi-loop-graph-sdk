@@ -20,6 +20,9 @@
 // ============================================================
 
 import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createLoopGraphExtension } from "./loop-graph-extension.js";
 import type { Edge, Entry, Graph, Node } from "../type.js";
 import { END } from "../type.js";
@@ -365,7 +368,11 @@ describe("characterization — 节点内多次 runAgent", () => {
 describe("characterization — mechanism 与 skill 消息顺序", () => {
   it("NodeScope 后消息追加顺序为：skill → mechanism → prompt", async () => {
     const pi = fakePi();
-    const loop = createLoopGraphExtension(pi);
+    const skillBasePath = mkdtempSync(join(tmpdir(), "loop-graph-skill-order-"));
+    const skillDir = join(skillBasePath, "test-skill");
+    mkdirSync(skillDir);
+    writeFileSync(join(skillDir, "SKILL.md"), "ORDER_SKILL_BODY", "utf8");
+    const loop = createLoopGraphExtension(pi, { skillBasePath });
 
     const g = minimalGraph("order_test");
     g.mechanisms = [
@@ -388,8 +395,8 @@ describe("characterization — mechanism 与 skill 消息顺序", () => {
 
     try {
       await loop.executeGraph(g, { source: "command", args: "" });
-    } catch {
-      // skill 文件可能不存在，但消息顺序仍可检查
+    } finally {
+      rmSync(skillBasePath, { recursive: true, force: true });
     }
 
     const seq = messageSequence(pi);
@@ -402,15 +409,9 @@ describe("characterization — mechanism 与 skill 消息顺序", () => {
     // 哨兵应存在
     expect(scopeIdx).toBeGreaterThanOrEqual(0);
 
-    // skill 在 mechanism 之前（如果 skill 文件存在）
-    if (skillIdx >= 0 && mechIdx >= 0) {
-      expect(skillIdx).toBeLessThan(mechIdx);
-    }
-
-    // mechanism 在 prompt 之前
-    if (mechIdx >= 0 && promptIdx >= 0) {
-      expect(mechIdx).toBeLessThan(promptIdx);
-    }
+    expect(skillIdx).toBeGreaterThan(scopeIdx);
+    expect(skillIdx).toBeLessThan(mechIdx);
+    expect(mechIdx).toBeLessThan(promptIdx);
   });
 
   it("无 skill 节点时 mechanism 仍在 prompt 之前", async () => {
@@ -449,7 +450,11 @@ describe("characterization — mechanism 与 skill 消息顺序", () => {
 
   it("skill 内容以 loop_graph_skill 类型追加，display 为 false", async () => {
     const pi = fakePi();
-    const loop = createLoopGraphExtension(pi);
+    const skillBasePath = mkdtempSync(join(tmpdir(), "loop-graph-skill-content-"));
+    const skillDir = join(skillBasePath, "test-skill");
+    mkdirSync(skillDir);
+    writeFileSync(join(skillDir, "SKILL.md"), "FIXED_SKILL_BODY", "utf8");
+    const loop = createLoopGraphExtension(pi, { skillBasePath });
 
     const g = minimalGraph("skill_display_test");
     g.nodes.start = {
@@ -464,20 +469,19 @@ describe("characterization — mechanism 与 skill 消息顺序", () => {
 
     try {
       await loop.executeGraph(g, { source: "command", args: "" });
-    } catch {
-      // skill 文件不存在
+    } finally {
+      rmSync(skillBasePath, { recursive: true, force: true });
     }
 
     const skillMessages = pi._sentMessages.filter(
       (m: any) => m.customType === "loop_graph_skill",
     );
 
-    // 如果 skill 文件存在则有消息
-    if (skillMessages.length > 0) {
-      for (const m of skillMessages) {
-        expect(m.display).toBe(false);
-      }
-    }
+    expect(skillMessages).toHaveLength(1);
+    expect(skillMessages[0]).toMatchObject({
+      display: false,
+      content: "[skill: test-skill]\n\nFIXED_SKILL_BODY",
+    });
   });
 });
 

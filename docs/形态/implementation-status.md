@@ -18,7 +18,9 @@
 - **Phase 10**：delegate host 已接线。`DelegateGraphInvoker` + `IsolatedSessionGraphHost` 提供隔离执行载体；`GraphRegistry` 和 `runGraphLoop` 通过 `delegateInvoker.invoke()` 调用。默认 `createDelegateHost` 未配置时抛明确错误，不静默降级。
 - **Phase 11**：完整验证矩阵通过（206 项测试，含真实 LLM spike）。
 - **Phase 12**：兼容层保留——`GraphNode.boundary` 可选缺省 `call`；`ContextFrame`/`Edge.guard`/`Edge.migrate`/`frameFormatter` 签名不变；`executeGraph()` 保留为高级低层 API。
-- 验证：`npm test -- --run` 通过（13 文件、206 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
+- **Phase 13（内测加固 Phase 0-1）**：冻结 CURRENT/skill/retry/dead/incomplete/completion tool 默认行为；新增 root/child/agent timeout limits；同 extension instance 的并发 root `executeGraph()` 在覆盖活动状态前 fail-fast。
+- **Phase 14（模型上下文定制 Phase 2）**：新增 Extension 级 `contextRenderer`。node-enter 时加载 skill 并冻结 renderer 结果；正常 scope、scope missing 与 compaction recovery 共用同一载荷；renderer 不接管 GraphCallScope/NodeScope/compaction/frame baseline。`null` 仍保留空 NodeScope 锚点。
+- 验证：`npm test -- --run` 通过（14 文件、227 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节为准。
 
@@ -494,13 +496,16 @@ DelegateGraphInvoker.invoke(graph, request)
 | 失败边处理             | `selectEdge` 返回 null 时优雅结束（不 throw），可通过 edge guard 语义覆盖                                       |
 | 自定义 compaction 策略 | SDK 不生成 LLM summary、不主动调用 compact；root 使用 pi 原生策略，嵌套 call/compose 期间为保证边界安全而取消压缩 |
 | session 续跑           | 帧栈未持久化到磁盘                                                                                                |
+| 单节点多 skill         | 当前类型为 `node.skill?: string`，一次只支持一个 skill 引用；原生资源发现不等于节点多 skill 编排                 |
+| renderer 分层覆盖      | 当前已实现 Extension 级；Node/Graph/调用点覆盖优先级留待 Phase 3                                                   |
+| 恢复消息 renderer      | validation retry、dead/incomplete、graph failure 和 completion tool result 留待 Phase 4                          |
 | 发布说明写作           | 正式发布前需完成版本发布文档                                                                                      |
 
 ### 已关闭的缺口
 
 | 缺口                                            | 说明                                                                                                                         | 关闭版本        |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| 多 skill                                        | 当前单`node.skill?: string`；已通过 `resources_discover` + 运行时追加实现原生 skill 集成                                 | v0.1.0+stage3   |
+| skill 原生发现与单引用加载                      | 已通过 `resources_discover` 注册路径，并在节点进入时加载单个 `node.skill`；不代表单节点多 skill 已实现                    | v0.1.0+stage3   |
 | defaultTools 流入 skill 节点                    | 证实为观测造假（debug log 未包含 defaultTools）。`resolveNodeTools` + `getActiveTools()` 真值日志已修复                  | v0.1.0+stage1   |
 | `createAgentExecute(options).tools` 误导      | 已 deprecated，不消费                                                                                                        | v0.1.0+stage1   |
 | `defaultTools` + `node.tools` 无去重 → 400 | `resolveNodeTools` name-based dedup + 注册期校验                                                                           | v0.1.0+stage1/2 |

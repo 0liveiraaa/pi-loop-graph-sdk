@@ -3,8 +3,12 @@
 // ============================================================
 
 import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createLoopGraphExtension } from "./loop-graph-extension.js";
 import type { LoopGraphExtension } from "./loop-graph-extension.js";
+import { debugLog } from "./debug-log.js";
 import type { Graph, Edge, Entry, Node } from "../type.js";
 import { END } from "../type.js";
 
@@ -162,6 +166,357 @@ function terminalGraph(id: string, node: Node): Graph {
 // ── 测试 ──
 
 describe("createLoopGraphExtension", () => {
+  describe("Phase 2 contextRenderer", () => {
+    it("可完全隐藏默认 CURRENT 控制字段，并接收已加载 skill 与完成协议", async () => {
+      const pi = fakePi();
+      const skillBasePath = mkdtempSync(join(tmpdir(), "loop-graph-renderer-skill-"));
+      const skillDir = join(skillBasePath, "private-skill");
+      mkdirSync(skillDir);
+      writeFileSync(join(skillDir, "SKILL.md"), "PRIVATE_SKILL_BODY", "utf8");
+      const renderer = vi.fn((input: any) => ({
+        anchor: {
+          kind: "current" as const,
+          content: `业务任务：${input.node.subGoal}\n完成工具：${input.completion.toolName}`,
+        },
+      }));
+      const loop = createLoopGraphExtension(pi, { skillBasePath, contextRenderer: renderer });
+      let projected: any;
+      const node: Node = {
+        kind: "code",
+        id: "internal_validate_v2",
+        subGoal: "检查业务答案",
+        skill: "private-skill",
+        tools: ["internal_tool"],
+        async execute() {
+          projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          return { nodeId: "internal_validate_v2", status: "ok", result: {} };
+        },
+      };
+      pi.getAllTools.mockReturnValue([
+        { name: "read" }, { name: "__graph_complete__" }, { name: "internal_tool" },
+      ]);
+      try {
+        await loop.executeGraph(terminalGraph("renderer_hidden", node), { source: "command", args: "" });
+      } finally {
+        rmSync(skillBasePath, { recursive: true, force: true });
+      }
+
+      expect(renderer).toHaveBeenCalledTimes(1);
+      expect(renderer.mock.calls[0][0]).toMatchObject({
+        skill: { ref: "private-skill", content: "PRIVATE_SKILL_BODY" },
+        completion: { toolName: "__graph_complete__", statuses: ["ok", "failed", "cancelled"] },
+        reason: "node-enter",
+      });
+      const text = projected.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).toContain("业务任务：检查业务答案");
+      expect(text).not.toContain("internal_validate_v2");
+      expect(text).not.toContain("internal_tool");
+      expect(text).not.toContain("private-skill");
+      expect(text).not.toContain("=== CURRENT ===");
+    });
+
+    it("scope 缺失和 compaction recovery 复用冻结结果，不重新调用 renderer", async () => {
+      const pi = fakePi();
+      const renderer = vi.fn(() => ({ anchor: { content: "FROZEN BUSINESS CONTEXT" } }));
+      const loop = createLoopGraphExtension(pi, { contextRenderer: renderer });
+      let scopeRecovery: any;
+      let compactionRecovery: any;
+      const node: Node = {
+        kind: "code",
+        id: "recover",
+        subGoal: "recover",
+        async execute() {
+          scopeRecovery = pi.emit("context", {
+            messages: [{ role: "user", content: "RAW OUTER SECRET" }],
+          });
+          pi.emit("session_compact", { reason: "manual", willRetry: false });
+          compactionRecovery = pi.emit("context", {
+            messages: [
+              { role: "compactionSummary", summary: "SAFE SUMMARY" },
+              { role: "assistant", content: "recent work" },
+            ],
+          });
+          return { nodeId: "recover", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(terminalGraph("renderer_recovery", node), { source: "command", args: "" });
+
+      expect(renderer).toHaveBeenCalledTimes(1);
+      const scopeText = scopeRecovery.messages.map((message: any) => String(message.content)).join("\n");
+      expect(scopeText).toContain("FROZEN BUSINESS CONTEXT");
+      expect(scopeText).not.toContain("RAW OUTER SECRET");
+      expect(compactionRecovery.messages[0].role).toBe("compactionSummary");
+      expect(compactionRecovery.messages.some((message: any) => message.content === "FROZEN BUSINESS CONTEXT")).toBe(true);
+      expect(compactionRecovery.messages.some((message: any) => message.content === "recent work")).toBe(true);
+    });
+
+    it("renderer 返回 null 时保留空 NodeScope 锚点并继续 fail-closed", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, { contextRenderer: () => null });
+      let projected: any;
+      const node: Node = {
+        kind: "code",
+        id: "silent",
+        subGoal: "silent",
+        async execute() {
+          projected = pi.emit("context", { messages: [{ role: "user", content: "DO NOT LEAK" }] });
+          return { nodeId: "silent", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(terminalGraph("renderer_null", node), { source: "command", args: "" });
+
+      expect(projected.messages).toHaveLength(1);
+      expect(projected.messages[0]).toMatchObject({
+        customType: "loop_graph_node_scope",
+        content: "",
+        display: false,
+      });
+    });
+
+    it("自定义 renderer 与现有 frameFormatter 可以共同工作", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderer: (input) => ({ anchor: { content: `NOW:${input.node.subGoal}` } }),
+        frameFormatter: (frames) => `MEMORY:${frames.map((frame: any) => frame.summary).join(",")}`,
+      });
+      let projected: any;
+      const first: Node = {
+        kind: "code", id: "first", subGoal: "first", async execute() {
+          return { nodeId: "first", status: "ok", result: {} };
+        },
+      };
+      const second: Node = {
+        kind: "code", id: "second", subGoal: "second", async execute() {
+          projected = pi.emit("context", { messages: [...pi._sentMessages] });
+          return { nodeId: "second", status: "ok", result: {} };
+        },
+      };
+      const graph: Graph = {
+        id: "renderer_frames", goal: "renderer frames",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "first" }],
+        nodes: { first, second },
+        routing: {
+          first: { nodeId: "first", router: { kind: "first-match" }, edges: [edgeToNext("first", "second")] },
+          second: { nodeId: "second", router: { kind: "first-match" }, edges: [edgeToEnd("second")] },
+        },
+      };
+
+      await loop.executeGraph(graph, { source: "command", args: "" });
+      const text = projected.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).toContain("MEMORY:first done");
+      expect(text).toContain("NOW:second");
+    });
+
+    it("嵌套 compose 返回父节点时，scope recovery 使用父 renderer 而不是子节点载荷", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderer: (input) => ({ anchor: { content: `CTX:${input.node.id}` } }),
+      });
+      const child = minimalGraph("renderer_nested_child");
+      let parentRecovery: any;
+      const graphNode: Node = {
+        kind: "graph",
+        id: "parent_graph_node",
+        subGoal: "parent",
+        graph: child,
+        boundary: "compose",
+        fold({ finalResult }) {
+          parentRecovery = pi.emit("context", {
+            messages: [{ role: "user", content: "RAW SHOULD DROP" }],
+          });
+          return { status: finalResult.status, result: finalResult.result };
+        },
+      };
+
+      await loop.executeGraph(terminalGraph("renderer_nested_parent", graphNode), { source: "command", args: "" });
+
+      const text = parentRecovery.messages.map((message: any) => String(message.content)).join("\n");
+      expect(text).toContain("CTX:parent_graph_node");
+      expect(text).not.toContain("CTX:start");
+      expect(text).not.toContain("RAW SHOULD DROP");
+    });
+
+    it("renderer 输入与输出均无 Runtime 别名，外部变异不会改变运行状态或恢复正文", async () => {
+      const pi = fakePi();
+      const outputBlocks = [{ type: "text" as const, text: "ORIGINAL RENDERED" }];
+      let projected: any;
+      let runtimeFrameValue: unknown;
+      const second: Node = {
+        kind: "code", id: "second_snapshot", subGoal: "second original",
+        async execute(instance) {
+          outputBlocks[0].text = "MUTATED AFTER RENDER";
+          runtimeFrameValue = (instance.frames[0] as any).result.nested.value;
+          projected = pi.emit("context", { messages: [{ role: "user", content: "raw" }] });
+          return { nodeId: "second_snapshot", status: "ok", result: {} };
+        },
+      };
+      const first: Node = {
+        kind: "code", id: "first_snapshot", subGoal: "first",
+        async execute() {
+          return { nodeId: "first_snapshot", status: "ok", result: { nested: { value: "runtime-original" } } };
+        },
+      };
+      const graph: Graph = {
+        id: "renderer_snapshot", goal: "snapshot",
+        entries: [{ id: "entry", guard: () => true, startNodeId: "first_snapshot" }],
+        nodes: { first_snapshot: first, second_snapshot: second },
+        routing: {
+          first_snapshot: {
+            nodeId: "first_snapshot", router: { kind: "first-match" }, edges: [{
+              id: "next", from: "first_snapshot", to: "second_snapshot", priority: 1, guard: () => true,
+              migrate(_instance, completion) {
+                return { frame: { summary: "snapshot", result: completion.result } };
+              },
+            }],
+          },
+          second_snapshot: { nodeId: "second_snapshot", router: { kind: "first-match" }, edges: [edgeToEnd("second_snapshot")] },
+        },
+      };
+      const renderer = vi.fn((input: any) => {
+        if (input.node.id === "second_snapshot") {
+          expect(Object.isFrozen(input)).toBe(true);
+          expect(Object.isFrozen(input.node)).toBe(true);
+          expect(Object.isFrozen(input.frames)).toBe(true);
+          expect(Object.isFrozen(input.frames[0])).toBe(true);
+          expect(Object.isFrozen(input.frames[0].result.nested)).toBe(true);
+          expect(() => { input.node.subGoal = "renderer-mutated"; }).toThrow();
+          expect(() => { input.frames[0].result.nested.value = "renderer-mutated"; }).toThrow();
+          return { anchor: { content: outputBlocks } };
+        }
+        return { anchor: { content: "FIRST" } };
+      });
+      const loop = createLoopGraphExtension(pi, { contextRenderer: renderer });
+
+      await loop.executeGraph(graph, { source: "command", args: "" });
+
+      expect(second.subGoal).toBe("second original");
+      expect(runtimeFrameValue).toBe("runtime-original");
+      const scopeMessage = projected.messages.find((message: any) => message.customType === "loop_graph_node_scope");
+      expect(scopeMessage.content).toEqual([{ type: "text", text: "ORIGINAL RENDERED" }]);
+      expect(Object.isFrozen(scopeMessage.content)).toBe(true);
+      expect(Object.isFrozen(scopeMessage.content[0])).toBe(true);
+    });
+  });
+
+  describe("运行限制配置", () => {
+    it.each([
+      { rootMaxSteps: 0 },
+      { childMaxSteps: -1 },
+      { agentRunTimeoutMs: Number.NaN },
+      { rootMaxSteps: 1.5 },
+    ])("拒绝非法 limits: %o", (limits) => {
+      expect(() => createLoopGraphExtension(fakePi(), { limits }))
+        .toThrow(/必须是有限正整数/);
+    });
+
+    it("rootMaxSteps 控制顶层图循环上限", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, { limits: { rootMaxSteps: 2 } });
+      const graph = minimalGraph("root_limit");
+      graph.routing.start.edges = [{
+        id: "again",
+        from: "start",
+        to: "start",
+        priority: 1,
+        guard: () => true,
+        migrate(_instance, completion) {
+          return {
+            frame: { nodeId: completion.nodeId, status: completion.status, summary: "again", result: {} },
+          };
+        },
+      }];
+
+      await expect(loop.executeGraph(graph, { source: "command", args: "" }))
+        .resolves.toMatchObject({
+          status: "failed",
+          steps: 2,
+          result: { reason: "Max steps (2) exceeded" },
+        });
+    });
+
+    it("childMaxSteps 控制 call 子图循环上限", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi, { limits: { childMaxSteps: 1 } });
+      const child = minimalGraph("child_limit");
+      child.routing.start.edges = [{
+        id: "again",
+        from: "start",
+        to: "start",
+        priority: 1,
+        guard: () => true,
+        migrate(_instance, completion) {
+          return {
+            frame: { nodeId: completion.nodeId, status: completion.status, summary: "again", result: {} },
+          };
+        },
+      }];
+      const parentNode: Node = {
+        kind: "graph",
+        id: "child",
+        subGoal: "run child",
+        graph: child,
+        boundary: "call",
+      };
+      const parent = terminalGraph("parent_limit", parentNode);
+
+      await expect(loop.executeGraph(parent, { source: "command", args: "" }))
+        .resolves.toMatchObject({
+          status: "failed",
+          result: { reason: "Max steps (1) exceeded" },
+        });
+    });
+  });
+
+  describe("同实例并发保护", () => {
+    it("第二个 root executeGraph 在覆盖 active runtime 前 fail-fast，结束后可再次运行", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let release!: () => void;
+      let entered!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+      const blocker = new Promise<void>((resolve) => { release = resolve; });
+      const blockingNode: Node = {
+        kind: "code",
+        id: "blocking",
+        subGoal: "block",
+        async execute() {
+          entered();
+          await blocker;
+          return { nodeId: "blocking", status: "ok", result: {} };
+        },
+      };
+      const graph = terminalGraph("concurrent_root", blockingNode);
+
+      const first = loop.executeGraph(graph, { source: "command", args: "first" });
+      await enteredPromise;
+
+      await expect(loop.executeGraph(graph, { source: "command", args: "second" }))
+        .rejects.toThrow(/独立 AgentSession 或 delegate host/);
+
+      release();
+      await expect(first).resolves.toMatchObject({ status: "ok" });
+      await expect(loop.executeGraph(minimalGraph("after_release"), { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "ok" });
+    });
+
+    it("启动日志抛错时也会释放 root busy 状态", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const graphStart = vi.spyOn(debugLog, "graphStart")
+        .mockImplementationOnce(() => { throw new Error("log unavailable"); });
+      try {
+        await expect(loop.executeGraph(minimalGraph("log_failure"), { source: "command", args: "" }))
+          .resolves.toMatchObject({ status: "failed", result: { reason: "log unavailable" } });
+        await expect(loop.executeGraph(minimalGraph("after_log_failure"), { source: "command", args: "" }))
+          .resolves.toMatchObject({ status: "ok" });
+      } finally {
+        graphStart.mockRestore();
+      }
+    });
+  });
+
   describe("基础创建", () => {
     it("无需全局初始化即可创建实例", () => {
       const pi = fakePi();

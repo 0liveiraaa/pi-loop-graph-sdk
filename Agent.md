@@ -109,8 +109,8 @@ AgentInstance 持有一个有序帧栈，模仿内存调用栈的工作方式。
 
 - **版本**：v0.1.0，单 agent MVP
 - **已验证**：帧栈折叠、子图隔离、NodeScope v2 严格投影、完成度验证、工厂实例隔离、包边界分离
-- **已知缺口**（详见 `docs/形态/implementation-status.md` 第五节）：agent-choice 路由、callTool、多 skill、schema helper、session 续跑、defaultTools 不流入 skill 节点
-- **能力债优先级**：先保障单 agent 编排完整性（callTool → 多 skill → agent-choice → schema helper）。多 agent 通讯（`docs/设计/communication-design.md`）为核心远期愿景，单 agent MVP 是第一步。
+- **已知缺口**（详见 `docs/形态/implementation-status.md` 第五节）：callTool、completion schema helper、session 续跑、单节点仅支持一个 skill 引用、模型可见 CURRENT/skill/retry 文案尚未统一开放 renderer
+- **能力债优先级**：先保障单 agent 内测完整性（模型上下文 renderer → completion schema → skill provider/renderer）。多 agent 通讯（`docs/设计/communication-design.md`）为核心远期愿景，单 agent MVP 是第一步。
 - **质量承诺**：可靠性优先。已知问题必须修复且必须在文档中声明，才可声称 stable。
 
 ---

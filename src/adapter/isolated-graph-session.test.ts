@@ -386,6 +386,27 @@ describe("frameFormatter", () => {
   });
 });
 
+describe("contextRenderer", () => {
+  it("传播到 runtime-only 隔离 session 并在纯代码节点进入时执行", async () => {
+    const renderer = vi.fn((input: any) => ({
+      anchor: { content: `ISOLATED:${input.node.id}` },
+    }));
+    const factory = createIsolatedGraphSessionFactory(factoryOptions({ contextRenderer: renderer }));
+    const session = await factory(delegateReq());
+    try {
+      await session.run(pureCodeGraph(), delegateReq({ x: 1 }));
+      expect(renderer).toHaveBeenCalledTimes(1);
+      expect(renderer.mock.calls[0][0]).toMatchObject({
+        graph: { id: "pure_code", goal: "纯代码图" },
+        node: { id: "step1", subGoal: "纯代码节点" },
+        reason: "node-enter",
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+});
+
 describe("agent 节点（需要 LLM）", () => {
   it("agent 节点调用 __graph_complete__ 后返回结果", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());

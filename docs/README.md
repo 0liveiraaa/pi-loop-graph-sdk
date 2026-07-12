@@ -44,5 +44,6 @@
 - 想看术语定义 → [CONTEXT](%E8%AE%BE%E8%AE%A1/CONTEXT.md)
 - 当前实现形态 → [开发者指南](%E5%BD%A2%E6%80%81/developer-guide.md) 和 [实现形态报告](%E5%BD%A2%E6%80%81/implementation-status.md)
 - 架构决策 → [ADR-0001：图调用边界](adr/0001-graph-invocation-boundaries.md)
+- 上下文渲染边界 → [ADR-0002：固定安全边界，只开放模型载荷](adr/0002-scope-safe-context-renderer.md)
 - 当前计划 → [模型上下文定制与内测加固实施计划](%E8%AE%A1%E5%88%92/2026-07-12_model-context-customization-plan.md)
 - 已完成的计划 → [节点作用域投影与图调用隔离重构（已归档）](%E5%BD%92%E6%A1%A3/2026/07/12_node-scope-refactoring-complete/2026-07-11_node-scope-projection-refactor.md)
