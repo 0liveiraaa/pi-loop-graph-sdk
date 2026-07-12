@@ -366,6 +366,29 @@ describe("纯代码节点图", () => {
     expect(result.result).toEqual({ prepared: true });
     session.dispose();
   });
+
+  it("runtime-only delegate session 在节点结束时关闭 mechanism scope", async () => {
+    const graph = pureCodeGraph();
+    let scope: any;
+    let cleanupCount = 0;
+    graph.mechanisms = [{
+      name: "delegate-cleanup",
+      onNodeEnter(ctx) {
+        scope = ctx.scope;
+        ctx.scope.onCleanup(() => { cleanupCount += 1; });
+      },
+    }];
+    const factory = createIsolatedGraphSessionFactory(factoryOptions());
+    const session = await factory(delegateReq());
+
+    const result = await session.run(graph, delegateReq());
+
+    expect(result.status).toBe("ok");
+    expect(cleanupCount).toBe(1);
+    expect(scope.isActive()).toBe(false);
+    expect(scope.signal.aborted).toBe(true);
+    session.dispose();
+  });
 });
 
 describe("frameFormatter", () => {

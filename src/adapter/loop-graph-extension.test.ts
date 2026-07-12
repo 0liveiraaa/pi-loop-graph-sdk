@@ -1764,6 +1764,216 @@ describe("createLoopGraphExtension", () => {
   });
 
   describe("横切机制", () => {
+    it("scope 在节点内活跃，退出时 abort 并按 LIFO 执行 cleanup", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const cleanupOrder: string[] = [];
+      let scope: any;
+
+      const g = minimalGraph("mech_scope_lifecycle");
+      g.mechanisms = [{
+        name: "lifecycle",
+        onNodeEnter(ctx) {
+          scope = ctx.scope;
+          expect(ctx.scope.isActive()).toBe(true);
+          expect(ctx.scope.signal.aborted).toBe(false);
+          ctx.scope.onCleanup(() => { cleanupOrder.push("first"); });
+          ctx.scope.onCleanup(async () => { cleanupOrder.push("second"); });
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "检查 scope",
+        async execute() {
+          expect(scope.isActive()).toBe(true);
+          expect(scope.signal.aborted).toBe(false);
+          return { nodeId: "start", status: "ok", result: {} };
+        },
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(scope.isActive()).toBe(false);
+      expect(scope.signal.aborted).toBe(true);
+      expect(cleanupOrder).toEqual(["second", "first"]);
+    });
+
+    it("旧 visit 的安全 appendContext 在后继 visit 返回 false 且不写消息", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const appends: Array<(content: string) => boolean> = [];
+      const cleanupVisits: number[] = [];
+      let runCount = 0;
+
+      const g = minimalGraph("mech_stale_append");
+      g.mechanisms = [{
+        name: "capture",
+        onNodeEnter(ctx) {
+          appends.push(ctx.appendContext);
+          ctx.scope.onCleanup(() => { cleanupVisits.push(ctx.scope.visit); });
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "循环两次",
+        async execute() {
+          runCount += 1;
+          if (runCount === 2) {
+            expect(appends[0]("旧 scope 不应写入")).toBe(false);
+            expect(appends[1]("当前 scope 可以写入")).toBe(true);
+          }
+          return { nodeId: "start", status: "ok", result: { runCount } };
+        },
+      };
+      g.routing.start = {
+        nodeId: "start",
+        router: { kind: "first-match" },
+        edges: [
+          {
+            id: "again",
+            from: "start",
+            to: "start",
+            priority: 2,
+            guard: (completion) => completion.result.runCount === 1,
+            migrate(_instance, completion) {
+              return { frame: { result: completion.result }, input: {} };
+            },
+          },
+          {
+            ...edgeToEnd("start"),
+            guard: (completion) => completion.result.runCount === 2,
+          },
+        ],
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+
+      const mechanismContents = pi._sentMessages
+        .filter((message: any) => message.customType === "loop_graph_mechanism")
+        .map((message: any) => message.content);
+      expect(mechanismContents).toContain("当前 scope 可以写入");
+      expect(mechanismContents).not.toContain("旧 scope 不应写入");
+      expect(cleanupVisits).toEqual([1, 2]);
+      expect(appends[1]("图结束后也不能写入")).toBe(false);
+    });
+
+    it("execute 抛错时仍执行 cleanup，cleanup 错误不覆盖主错误或阻止剩余清理", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      const cleanupOrder: string[] = [];
+
+      const g = minimalGraph("mech_error_cleanup");
+      g.mechanisms = [{
+        name: "cleanup-on-error",
+        onNodeEnter(ctx) {
+          ctx.scope.onCleanup(() => { cleanupOrder.push("survived"); });
+          ctx.scope.onCleanup(() => {
+            cleanupOrder.push("throws");
+            throw new Error("cleanup failed");
+          });
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "抛错",
+        async execute() {
+          throw new Error("execute failed");
+        },
+      };
+
+      const result = await loop.executeGraph(g, { source: "command", args: "" });
+
+      expect(result.status).toBe("failed");
+      expect(result.result.reason).toContain("execute failed");
+      expect(cleanupOrder).toEqual(["throws", "survived"]);
+    });
+
+    it("裸 ctx.pi.on 保持非托管语义，循环访问会累积原生监听器", async () => {
+      const pi = fakePi();
+      const loop = createLoopGraphExtension(pi);
+      let visits = 0;
+      let observed = 0;
+
+      const g = minimalGraph("mech_unsafe_pi_listener");
+      g.mechanisms = [{
+        name: "unsafe-listener",
+        onNodeEnter(ctx) {
+          ctx.pi.on("turn_start", () => { observed += 1; });
+        },
+      }];
+      g.nodes.start = {
+        kind: "code",
+        id: "start",
+        subGoal: "循环两次",
+        async execute() {
+          visits += 1;
+          return { nodeId: "start", status: "ok", result: { visits } };
+        },
+      };
+      g.routing.start = {
+        nodeId: "start",
+        router: { kind: "first-match" },
+        edges: [
+          {
+            id: "again",
+            from: "start",
+            to: "start",
+            priority: 2,
+            guard: (completion) => completion.result.visits === 1,
+            migrate(_instance, completion) {
+              return { frame: { result: completion.result }, input: {} };
+            },
+          },
+          { ...edgeToEnd("start"), guard: (completion) => completion.result.visits === 2 },
+        ],
+      };
+
+      await loop.executeGraph(g, { source: "command", args: "" });
+      pi.emit("turn_start", { turnIndex: 0, timestamp: Date.now() });
+
+      expect(observed).toBe(2);
+    });
+
+    it("call 与 compose 子图节点都在各自 visit 结束时 cleanup", async () => {
+      for (const boundary of ["call", "compose"] as const) {
+        const pi = fakePi();
+        const loop = createLoopGraphExtension(pi);
+        const cleaned: string[] = [];
+        const scopes: any[] = [];
+
+        const child = minimalGraph(`mech_${boundary}_child`);
+        child.mechanisms = [{
+          name: `${boundary}-child-mechanism`,
+          onNodeEnter(ctx) {
+            scopes.push(ctx.scope);
+            ctx.scope.onCleanup(() => { cleaned.push(`${boundary}:${ctx.scope.visit}`); });
+          },
+        }];
+        const graphNode: Node = {
+          kind: "graph",
+          id: "invoke",
+          subGoal: `通过 ${boundary} 调用子图`,
+          graph: child,
+          boundary,
+          ...(boundary === "compose"
+            ? { fold: ({ finalResult }: any) => ({ status: finalResult.status, result: finalResult.result }) }
+            : {}),
+        };
+        const parent = terminalGraph(`mech_${boundary}_parent`, graphNode);
+
+        const result = await loop.executeGraph(parent, { source: "command", args: "" });
+
+        expect(result.status).toBe("ok");
+        expect(cleaned).toEqual([`${boundary}:1`]);
+        expect(scopes).toHaveLength(1);
+        expect(scopes[0].isActive()).toBe(false);
+        expect(scopes[0].signal.aborted).toBe(true);
+      }
+    });
+
     it("onNodeEnter 在 execute 之前跑，且写入 scratch 对 execute 可见", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);

@@ -47,4 +47,5 @@
 - 上下文渲染边界 → [ADR-0002：固定安全边界，只开放模型载荷](adr/0002-scope-safe-context-renderer.md)
 - 完成校验与 skill 内容 → [ADR-0003：固定 completion ABI，开放业务校验与 skill 来源](adr/0003-completion-validation-and-skill-content.md)
 - 当前计划 → [模型上下文定制与内测加固实施计划](%E8%AE%A1%E5%88%92/2026-07-12_model-context-customization-plan.md)
+- Mechanism 改造计划 → [作用域化 Mechanism 与 Agent Hook Runtime 实施计划](%E8%AE%A1%E5%88%92/2026-07-12_scoped-mechanism-runtime-plan.md)
 - 已完成的计划 → [节点作用域投影与图调用隔离重构（已归档）](%E5%BD%92%E6%A1%A3/2026/07/12_node-scope-refactoring-complete/2026-07-11_node-scope-projection-refactor.md)

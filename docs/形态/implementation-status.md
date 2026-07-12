@@ -22,7 +22,8 @@
 - **Phase 14（模型上下文定制 Phase 2）**：新增 Extension 级 `contextRenderer`。node-enter 时加载 skill 并冻结 renderer 结果；正常 scope、scope missing 与 compaction recovery 共用同一载荷；renderer 不接管 GraphCallScope/NodeScope/compaction/frame baseline。`null` 仍保留空 NodeScope 锚点。
 - **Phase 15（上下文定制 Phase 4-5）**：`outputSchema` 接入 Runtime completion retry；Node validator 和 agent-choice 形成稳定校验链；恢复/失败/completion result 文案可定制。`node.skill` 支持异步 provider、自定义 renderer、missing/error 策略，并传播到 runtime-only delegate session。
 - **Phase 16（上下文定制 Phase 3）**：新增 renderer registry 与直接调用 override，覆盖顺序固定为调用级 > Node > Graph > Extension > 默认。调用级 renderer 沿共享 Session 的 call/compose 传播；delegate Session 使用自身 factory 配置。renderer 抛错时图失败且不回退默认 CURRENT。
-- 验证：`npm test -- --run` 通过（14 文件、241 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
+- **Phase 17（Mechanism Runtime Phase 0-1）**：每个 mechanism 的每次 node visit 获得独立 scope，提供 `signal/isActive/onCleanup`；正常、异常、call、compose 和 runtime-only delegate 路径统一关闭，cleanup 按 LIFO 执行且错误不覆盖主结果。安全 `appendContext` 绑定当前 `scopeId`，失效后返回 false；完整 `ctx.pi` 继续作为非托管能力保留。
+- 验证：`npm test -- --run` 通过（14 文件、247 项，包含真实 LLM spike）；`tsc --noEmit` 与 `git diff --check` 通过。
 
 > 下文部分历史章节仍记录 MVP 演进背景；当前实现以本节为准。
 
@@ -270,25 +271,33 @@ export function createLoopGraphExtension(pi, options?) {
 Runtime 在节点进入后、`execute` 之前自动分派 onNodeEnter：
 
 ```
-enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → execute
+enterNode
+→ AgentInstance.mechanisms.onNodeEnter
+→ CallFrame.localMechanisms.onNodeEnter
+→ Node.mechanisms.onNodeEnter
+→ execute
+→ scope abort + LIFO cleanup
 ```
 
 - `Graph.mechanisms` 在 `pushGraph` 时写入 `AgentInstance.mechanisms`，跨节点持续生效。
+- compose 子图的 `Graph.mechanisms` 保存在当前 `CallFrame.localMechanisms`，退出后撤销。
 - `Node.mechanisms` 只在当前节点叠加。
 - 每个 mechanism 若定义了 `onNodeEnter`，串行 `await onNodeEnter(ctx)`。
 - `onNodeEnter` 抛错统一记 debug log 后继续，不中止节点。
+- 每次 node visit 为每个 mechanism 创建独立 scope；正常或异常退出都会 abort 并执行 cleanup。
 
 `MechanismContext` 提供 pi 全部能力 + 两个显式作用通道：
 
 | 成员                           | 用途                                                                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctx.pi`                     | 全部 pi 能力：注册`tool_result`、`turn_start`、`before_provider_request` 等原生事件；改工具集；发消息                             |
+| `ctx.pi`                     | 全部 pi 非托管能力：注册原生事件、改工具集、发消息；副作用和清理由使用者负责                                                        |
 | `ctx.instance`               | 当前 AgentInstance（可写`instance.scratch`）                                                                                          |
 | `ctx.node`                   | 当前节点                                                                                                                                |
 | `ctx.input`                  | 代码侧一次性入参                                                                                                                        |
-| `ctx.appendContext(content)` | 向 agent 消息流追加（`sendMessage({ customType: "loop_graph_mechanism", display: false })`），不触发额外 turn，落点在本节点 active 段 |
+| `ctx.scope`                  | 当前 visit 的 `scopeId/visit/signal/isActive/onCleanup`                                                                                |
+| `ctx.appendContext(content)` | 仅在当前 scope 活跃时追加；失效后返回 false，不触发额外 turn                                                                            |
 
-onNodeEnter 是注册钩子的入口——机制在里面用 `ctx.pi.on()` 注册 pi 原生事件，这些事件在 agent 运行期间持续触发。pi 没有 off，回调需自限条件。
+裸 `ctx.pi.on()` 保持完全可用，但 pi 没有 off，监听器属于 Session 级非托管资源；`ctx.scope.isActive()` 可让旧回调静默，却不会移除底层监听器。
 
 ### 2.17 agent-choice 路由
 

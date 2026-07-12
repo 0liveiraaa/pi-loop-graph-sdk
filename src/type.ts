@@ -230,47 +230,58 @@ export type Node =
 
 /**
  * Mechanism 运行时上下文。onNodeEnter 通过它拿到 pi、节点、入参与实例状态，
- * 并可向 agent 消息流追加上下文。
+ * 并可通过与当前 NodeScope 绑定的安全能力追加上下文和注册清理动作。
  *
  *   pi             — 全部 pi 能力（注册原生事件、改工具集、发消息等）
  *   instance       — 当前 AgentInstance（可写 instance.scratch）
  *   node           — 当前节点
  *   input          — 代码侧一次性入参
+ *   scope          — 当前 mechanism invocation 的作用域、取消信号和 cleanup。
  *   appendContext  — 向 agent 消息流追加内容（append-only，不触发 turn）。
  *
- * appendContext 是 mechanism 作用于 agent 上下文的唯一合法通道：
- *   · 追加发生在当前 NodeScope 之后，属于本节点 active 段，离开节点后随
- *     ReAct 一起折叠为帧摘要——天然隔离，不泄漏到下一节点。
+ * appendContext 是 SDK 托管的安全通道：
+ *   · 仅当创建它的 NodeScope 仍为当前活动 scope 时写入；失效后返回 false。
  *   · 遵循原则 7「追加不注入」：不改 system prompt，只在消息流侧追加。
+ * ctx.pi 保留完整 ExtensionAPI，是非托管逃生口；通过它产生的监听、消息和
+ * 后台任务不自动获得 NodeScope 隔离、取消或 cleanup 保证。
  */
+export interface MechanismScope {
+  readonly scopeId: string;
+  readonly visit: number;
+  readonly signal: AbortSignal;
+  isActive(): boolean;
+  onCleanup(cleanup: () => void | Promise<void>): void;
+}
+
 export interface MechanismContext {
   pi: ExtensionAPI;
   instance: AgentInstance;
   node: Node;
   input: NodeInput;
-  appendContext(content: string): void;
+  scope: MechanismScope;
+  appendContext(content: string): boolean;
 }
 
 /**
  * 横切机制。框架在节点进入后、execute 之前自动分派 onNodeEnter。
  *
- * onNodeEnter 是注册 pi 原生事件的入口——机制在里面用 ctx.pi.on() 注册
- * tool_result、turn_start、before_provider_request 等事件，这些事件在
- * agent 运行期间持续触发。pi 没有 off，回调需自限（读 ctx.instance.scratch
- * 或 ctx.node.id 判断是否仍在当前节点）。
+ * ctx.scope 提供与本次 node visit 绑定的 signal、active 检查和 LIFO cleanup。
+ * 直接使用 ctx.pi.on() 仍然允许，但 pi 没有 off，属于非托管高级用法：监听器
+ * 会持续到 Session 结束，开发者必须自行限制回调和处理副作用。
  *
  * 全局机制（Graph.mechanisms → AgentInstance.mechanisms）跨节点持续生效；
  * 局部机制（Node.mechanisms）仅在本阶段叠加到全局之上。
  *
- * 两个合法产出通道：
+ * SDK 托管的产出通道：
  *   · ctx.instance.scratch —— 代码侧横切工作状态（见 AgentInstance.scratch）
  *   · ctx.appendContext()  —— 向 agent 消息流追加上下文（见 MechanismContext）
- * 不得写 frames/background，不得依赖闭包/模块变量传递跨节点状态。
+ * ctx.pi 提供完整非托管定制能力。不得直接写 frames/background，也不得依赖
+ * 闭包/模块变量传递跨节点业务状态。
  * onNodeEnter 抛错统一记日志后继续（不中止节点）。
  */
 export interface Mechanism {
   name: string;
-  onNodeEnter?(ctx: MechanismContext): Promise<void>;
+  onNodeEnter?(ctx: MechanismContext): void | Promise<void>;
 }
 
 // ── 边 ──

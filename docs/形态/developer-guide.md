@@ -364,90 +364,96 @@ type Node =
 
 ### Mechanism（横切机制）
 
-Mechanism 是**代码侧 hooks 的注册入口**。框架在节点进入后自动调用 `onNodeEnter`，机制在里面注册 pi 原生事件——这些事件在 agent 运行期间持续触发。
+Mechanism 是节点执行前运行的代码侧横切能力。每个 mechanism 在每次 node visit 中获得独立 scope；节点正常结束或抛错时，Runtime 都会关闭 scope、触发 abort，并按 LIFO 执行 cleanup。
 
 ```typescript
+interface MechanismScope {
+  readonly scopeId: string;
+  readonly visit: number;
+  readonly signal: AbortSignal;
+  isActive(): boolean;
+  onCleanup(cleanup: () => void | Promise<void>): void;
+}
+
 interface MechanismContext {
-  pi: ExtensionAPI;                              // 全部 pi 能力
+  pi: ExtensionAPI;                              // 完整但非托管的 pi 能力
   instance: AgentInstance;                       // 当前实例（scratch 可写）
   node: Node;                                    // 当前节点
   input: NodeInput;                              // 代码侧入参
-  appendContext(content: string): void;           // 向 agent 消息流追加
+  scope: MechanismScope;                         // 当前 node visit 的托管生命周期
+  appendContext(content: string): boolean;        // 活跃时追加；失效后返回 false
 }
 
 interface Mechanism {
   name: string;
-  onNodeEnter?(ctx: MechanismContext): Promise<void>;
+  onNodeEnter?(ctx: MechanismContext): void | Promise<void>;
 }
 ```
 
 执行顺序：
 
 ```text
-enterNode → Graph.mechanisms.onNodeEnter → Node.mechanisms.onNodeEnter → execute
+enterNode
+→ AgentInstance.mechanisms
+→ 当前 CallFrame.localMechanisms
+→ Node.mechanisms
+→ execute
+→ scope abort + cleanup
 ```
 
 规则：
 
 - 全局机制写在 `Graph.mechanisms`，跨节点持续生效。
+- compose 子图的 Graph mechanisms 作为当前 CallFrame 的局部机制，退出子图后撤销。
 - 局部机制写在 `Node.mechanisms`，只在当前节点叠加。
 - `onNodeEnter` 串行 await；抛错记日志后继续，不中止节点。
 - 未定义 `onNodeEnter` 的 mechanism 被跳过。
+- cleanup 逆注册顺序执行；一个 cleanup 抛错不会阻止其他 cleanup，也不会覆盖节点原始错误。
 
-两个合法作用通道：
+两层能力面：
 
-| 通道                           | 作用                                     | 是否进入 agent 上下文        | 生命周期                      |
-| ------------------------------ | ---------------------------------------- | ---------------------------- | ----------------------------- |
-| `ctx.instance.scratch`       | 代码侧横切状态（计时、计数、预处理结果） | 否                           | 当前 AgentInstance；子图独立  |
-| `ctx.appendContext(content)` | 向 agent 消息流追加内容                  | 是，追加到当前节点 active 段 | 当前节点；离开后随 ReAct 折叠 |
+| 通道 | 作用 | Runtime 保证 |
+| --- | --- | --- |
+| `ctx.scope` | signal、active 检查、cleanup | 与当前 node visit 同生共死 |
+| `ctx.appendContext(content)` | 向当前 NodeScope 追加上下文 | 失效后返回 `false`，不会污染后继节点 |
+| `ctx.instance.scratch` | 代码侧共享横切状态 | 随 AgentInstance 生命周期；当前仍是共享命名空间 |
+| `ctx.pi` | 完整 pi ExtensionAPI | 仅保证原生 API 可用；副作用不自动获得 scope/cleanup 保证 |
 
-通过 `ctx.pi.on()` 注册 pi 原生事件，可以 hook 到 agent 运行期间的每一拍：
-
-| 需要 hook 的时刻 | 注册哪个 pi 事件            |
-| ---------------- | --------------------------- |
-| 工具调用后       | `tool_result`             |
-| 每轮 LLM 请求前  | `before_provider_request` |
-| LLM 响应后       | `after_provider_response` |
-| 每轮开始         | `turn_start`              |
-| 每轮结束         | `turn_end`                |
-| 消息追加后       | `message_end`             |
-
-> **注意**：pi 没有 `off`。事件回调需自限——读 `ctx.instance.scratch` 或 `ctx.node.id` 判断是否仍在当前节点，条件不满足时 early return。
-
-示例：计时 + 工具审计 + 动态上下文：
+安全生命周期示例：
 
 ```typescript
 const timingMechanism: Mechanism = {
   name: "timing",
-  async onNodeEnter(ctx) {
+  onNodeEnter(ctx) {
     ctx.instance.scratch[`${ctx.node.id}_started`] = Date.now();
+    const timer = setInterval(() => collectSample(), 1000);
+    ctx.scope.onCleanup(() => clearInterval(timer));
+
+    ctx.scope.signal.addEventListener("abort", () => cancelBackgroundWork(), {
+      once: true,
+    });
+
+    ctx.appendContext("计时与监控已启动");
   },
 };
+```
 
+`ctx.pi` 继续提供完全定制能力，例如直接注册原生事件：
+
+```typescript
 const toolAuditor: Mechanism = {
   name: "tool-auditor",
-  async onNodeEnter(ctx) {
+  onNodeEnter(ctx) {
     const nodeId = ctx.node.id;
     ctx.pi.on("tool_result", (event) => {
-      if (ctx.instance.scratch._done) return;
+      if (!ctx.scope.isActive()) return;
       auditLog.write({ nodeId, tool: event.toolName });
     });
   },
 };
-
-const autoTest: Mechanism = {
-  name: "auto-test",
-  async onNodeEnter(ctx) {
-    ctx.pi.on("tool_result", (event) => {
-      if (event.toolName !== "bash") return;
-      const cmd = (event.details as any)?.command ?? "";
-      if (!cmd.includes("write") && !cmd.includes("edit")) return;
-      const result = execSync("npm test");
-      ctx.appendContext(`[auto-test]\n${result}`);
-    });
-  },
-};
 ```
+
+> `pi.on()` 返回 `void`，没有 `off`。上例的底层监听器会保留到 Session 结束；`isActive()` 只让旧 handler 静默，不会移除它。需要自动取消订阅和稳定 Hook 组合时，应等待/使用后续的 scoped events API。裸 `ctx.pi` 的消息、额外 turn、工具修改和后台任务同样由机制作者自行负责。
 
 ---
 

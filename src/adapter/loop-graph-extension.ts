@@ -80,6 +80,7 @@ import {
   type SkillFailurePolicies,
   type SkillLoadContext,
 } from "./skill-content.js";
+import { MechanismInvocationGroup } from "./mechanism-runtime.js";
 
 const NODE_SCOPE_TYPE = "loop_graph_node_scope";
 const completeToolRegistered = new WeakSet<object>();
@@ -611,6 +612,7 @@ export function createLoopGraphExtension(
         if (!node) throw new Error(`节点未找到: ${nodeId}`);
 
         const previousTools = saveActiveTools(pi);
+        let mechanismInvocations: MechanismInvocationGroup | null = null;
         try {
           setNodeToolsForInstance(pi, node);
           debugLog.toolsChanged(nodeId, pi.getActiveTools());
@@ -644,7 +646,18 @@ export function createLoopGraphExtension(
           );
           nodeContext.setCurrentNodeId(nodeId);
 
-          await applyMechanisms(pi, runtime.topInstance!, node, input, runtime.top?.localMechanisms);
+          mechanismInvocations = new MechanismInvocationGroup(
+            scope,
+            () => runtime.isNodeActive && runtime.currentScope?.scopeId === scope.scopeId,
+          );
+          await applyMechanisms(
+            pi,
+            runtime.topInstance!,
+            node,
+            input,
+            runtime.top?.localMechanisms,
+            mechanismInvocations,
+          );
           runtime.assertNoCompactionBoundaryViolation();
           const effectiveNode = wrapWithAgentChoiceValidator(graph, nodeId, node);
           nodeContext.setNodeCompletionValidator(
@@ -771,6 +784,17 @@ export function createLoopGraphExtension(
             source: { kind: "edge", edgeId: edge.id, fromNodeId: edge.from },
           };
         } finally {
+          if (mechanismInvocations) {
+            const cleanupErrors = await mechanismInvocations.close();
+            for (const cleanupError of cleanupErrors) {
+              debugLog.graphError(
+                `mechanism:${cleanupError.mechanismName}:cleanup`,
+                cleanupError.error instanceof Error
+                  ? cleanupError.error.message
+                  : String(cleanupError.error),
+              );
+            }
+          }
           restoreActiveTools(pi, previousTools);
         }
       }
@@ -1175,12 +1199,12 @@ function getAvailableEdges(graph: Graph, nodeId: string): EdgeChoice[] | undefin
 /**
  * 节点进入后、execute 之前分派横切机制。
  *
- * 顺序：全局机制（instance.mechanisms）→ 局部机制（node.mechanisms）。
+ * 顺序：实例机制（instance.mechanisms）→ 当前调用帧局部机制 → 节点机制。
  * 每个 mechanism 若有 onNodeEnter，则 await 调用，串行保证数据预处理
  * 先于 execute 完成。抛错统一记日志后继续，不中止节点。
  *
- * 必须在 NodeScope 之后调用：appendContext 追加的内容才会落在本节点 active 段，
- * 离开节点后随 ReAct 折叠，不泄漏到下一节点。
+ * 每个 mechanism 获得独立 invocation scope。安全 append 同时核对 invocation
+ * 和 Runtime 当前 scope，节点离开后返回 false；裸 ctx.pi 仍保持非托管能力。
  */
 async function applyMechanisms(
   pi: ExtensionAPI,
@@ -1188,25 +1212,33 @@ async function applyMechanisms(
   node: Node,
   input: NodeInput,
   localMechanisms: readonly Mechanism[] = [],
+  invocationGroup: MechanismInvocationGroup,
 ): Promise<void> {
   const mechanisms: Mechanism[] = [
     ...instance.mechanisms,
     ...localMechanisms,
     ...(node.kind === "code" ? (node.mechanisms ?? []) : []),
   ];
-  if (mechanisms.length === 0) return;
-
-  const appendContext = (content: string): void => {
-    pi.sendMessage({
-      customType: "loop_graph_mechanism",
-      content,
-      display: false,
-    });
-  };
-
-  const ctx: MechanismContext = { pi, instance, node, input, appendContext };
   for (const m of mechanisms) {
     if (!m.onNodeEnter) continue;
+    const scope = invocationGroup.createScope(m.name);
+    const appendContext = (content: string): boolean => {
+      if (!scope.isActive()) return false;
+      pi.sendMessage({
+        customType: "loop_graph_mechanism",
+        content,
+        display: false,
+      });
+      return true;
+    };
+    const ctx: MechanismContext = {
+      pi,
+      instance,
+      node,
+      input,
+      scope,
+      appendContext,
+    };
     try {
       await m.onNodeEnter(ctx);
     } catch (err) {
