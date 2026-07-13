@@ -2,9 +2,9 @@
 
 面向 pi 的单 Agent、串行、可循环图编排 SDK。
 
-> **版本状态：alpha。** 这是首个测试版本，API 仍可能调整，不承诺生产稳定。
+> **版本状态：alpha。** 这是首个测试版本，API 仍可能调整。
 
-Loop Graph SDK 让开发者用代码把复杂任务拆成明确阶段。每个阶段可以运行普通代码、调用 Agent 或调用子图；阶段完成后，由显式路由决定下一步、保留哪些工作记忆以及是否形成循环。
+Loop Graph SDK 让开发者用代码把复杂任务拆成明确阶段,将skill变为可调用的工作流。每个阶段可以运行普通代码、调用 Agent 或调用子图；阶段完成后，由显式路由决定下一步、保留哪些工作记忆以及是否形成循环。
 
 ## 适合什么
 
@@ -144,11 +144,11 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 ## 子图边界
 
-| 边界 | 何时使用 |
-| --- | --- |
-| `call` | 默认选择。复用当前执行会话，但子图使用新的逻辑工作实例和工作记忆。 |
-| `compose` | 子图必须读取父级工作记忆，或作为父节点的内部实现展开。 |
-| `delegate` | 子任务需要独立执行会话和独立上下文生命周期。 |
+| 边界         | 何时使用                                                           |
+| ------------ | ------------------------------------------------------------------ |
+| `call`     | 默认选择。复用当前执行会话，但子图使用新的逻辑工作实例和工作记忆。 |
+| `compose`  | 子图必须读取父级工作记忆，或作为父节点的内部实现展开。             |
+| `delegate` | 子任务需要独立执行会话和独立上下文生命周期。                       |
 
 三种边界当前都会沿单一路径等待子图完成；delegate 不代表并行调度。
 
@@ -162,17 +162,18 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 ## 文档
 
-| 目标 | 入口 |
-| --- | --- |
+| 目标                       | 入口                                      |
+| -------------------------- | ----------------------------------------- |
 | 完成第一个可运行 extension | [Getting Started](docs/getting-started.md) |
-| 理解图、状态和子图边界 | [Concepts](docs/concepts/) |
-| 按任务查找实现方法 | [Guides](docs/guides/) |
-| 查询 API、配置和错误行为 | [API Reference](docs/reference/) |
-| 了解内部设计与维护约束 | [Design](docs/design/core-design.md) |
+| 理解图、状态和子图边界     | [Concepts](docs/concepts/)                 |
+| 按任务查找实现方法         | [Guides](docs/guides/)                     |
+| 查询 API、配置和错误行为   | [API Reference](docs/reference/)           |
+| 了解内部设计与维护约束     | [Design](docs/design/core-design.md)       |
 
 ## 开发检查
 
 ```bash
+npm run build
 npm test
 npm run typecheck
 ```

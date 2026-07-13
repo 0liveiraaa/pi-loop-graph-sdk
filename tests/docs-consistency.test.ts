@@ -30,6 +30,21 @@ function markdownLinks(markdown: string): string[] {
 describe("documentation consistency", () => {
   const publicDocs = [resolve(root, "README.md"), ...markdownFiles(docsRoot)];
 
+  it("package entry points target compiled artifacts", () => {
+    const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+    const entryPoints = [
+      pkg.main,
+      pkg.types,
+      pkg.exports["."].import,
+      pkg.exports["."].types,
+      pkg.exports["./extension"].import,
+      pkg.exports["./extension"].types,
+    ];
+    expect(entryPoints.every((entry) => typeof entry === "string" && entry.startsWith("./dist/"))).toBe(true);
+    expect(entryPoints.every((entry) => existsSync(resolve(root, entry)))).toBe(true);
+    expect(pkg.scripts.prepare).toBe("npm run build");
+  });
+
   it("all local Markdown links in current documentation resolve", () => {
     const broken: string[] = [];
     for (const file of publicDocs) {
