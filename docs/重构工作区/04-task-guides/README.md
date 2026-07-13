@@ -6,7 +6,7 @@
 
 ## 目标目录
 
-创建 `docs/guides/`，至少包含：
+创建 `docs/重构工作区/04-task-guides/guides`，至少包含：
 
 - `build-a-loop.md`：条件路由和跨阶段循环。
 - `mix-code-and-agent.md`：agent-only、code-only、hybrid。
@@ -44,6 +44,6 @@
 
 - 每篇只解决一个任务。
 - 示例之间不依赖隐藏的前置代码；需要共用定义时明确链接快速开始。
+- 不得使用代码内部术语
 - 不出现已经 deprecated 的 `runAgent.tools` 推荐写法。
 - 不使用固定 frame 兼容字段作为最佳实践。
-

@@ -6,7 +6,7 @@
 
 ## 目标目录
 
-创建 `docs/reference/`：
+创建 `docs/重构工作区/05-api-reference/reference/`：
 
 - `api.md`：核心类型和工厂。
 - `configuration.md`：`LoopGraphExtensionOptions`、limits、mechanismRuntime 等配置。
@@ -37,4 +37,3 @@
 - `LoopGraphExtensionOptions` 当前所有字段均有解释。
 - lifecycle 顺序与实际代码一致。
 - 不把 `ExtensionAPI` 上游能力重新复制成本站完整文档，只链接 pi 官方定义。
-
