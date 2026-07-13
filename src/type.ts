@@ -171,13 +171,50 @@ export interface AgentRunRequest {
   /** @deprecated 工具集由 Node.tools 统一声明。此字段不再生效。 */
   tools?: string[];
   skill?: string;
-  outputSchema?: unknown;
+  /** 单次 Agent Run 的模型可见输出契约，同时作为 Runtime validator 的唯一来源。 */
+  outputSchema?: JsonSchema;
   /** 可选：验证 __graph_complete__ 的 result 是否满足节点要求。
-   *  不通过 → inject reason → agent 继续 → 再次调用 __graph_complete__ */
+   *  不通过 → 当前工具结果立即返回拒绝原因，agent 可修正后再次提交。 */
   validateCompletion?: (
     result: Record<string, unknown>,
   ) => CompletionValidationResult | Promise<CompletionValidationResult>;
 }
+
+export type JsonSchema = Readonly<Record<string, unknown>>;
+
+/** Agent 对 __graph_complete__ 的一次候选提交；通过检查前不等于 NodeCompletion。 */
+export interface CompletionSubmission {
+  reportedStatus: "ok" | "failed" | "cancelled";
+  result: Record<string, unknown>;
+}
+
+export type CompletionValidationStage =
+  | "outputSchema"
+  | "agent-run"
+  | "node"
+  | "mechanism"
+  | "agent-choice";
+
+export type CompletionSubmissionDecision =
+  | {
+      readonly decision: "accepted";
+      readonly completionStatus: NodeCompletion["status"];
+      readonly validation: "passed" | "skipped";
+      readonly schemaFingerprint?: string;
+    }
+  | {
+      readonly decision: "rejected";
+      readonly reason: string;
+      readonly validatorStage?: CompletionValidationStage;
+      readonly schemaFingerprint?: string;
+    }
+  | {
+      readonly decision: "failed";
+      readonly scope: "node" | "graph";
+      readonly reason: string;
+      readonly validatorStage?: CompletionValidationStage;
+      readonly schemaFingerprint?: string;
+    };
 
 export type CompletionValidationResult =
   | { isValid: true }
@@ -418,7 +455,7 @@ export interface MechanismErrorContext<TState = Record<string, unknown>>
 export interface MechanismAgentRunRequestView {
   readonly prompt: string;
   readonly skill?: string;
-  readonly outputSchema?: unknown;
+  readonly outputSchema?: JsonSchema;
 }
 
 export interface MechanismAgentRunContext<TState = Record<string, unknown>>

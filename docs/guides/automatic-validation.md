@@ -34,7 +34,9 @@ const questionNode: Node = {
 };
 ```
 
-LLM 调用 `__graph_complete__` 后，Runtime 自动用 `outputSchema` 校验 `result`。不符合时不退出节点，而是向 LLM 发送修正提示让它重试。
+SDK 会在这次 Agent Run 的首个 turn 前把完整 JSON Schema 展示给 LLM；Runtime 再用同一份 schema 校验 `result`。不符合时，本次 `__graph_complete__` 的工具结果直接返回拒绝原因，节点不退出，LLM 可以修正后再次提交。
+
+`outputSchema` 属于一次 `ctx.runAgent()`，不是 Node 的固定结构。同一节点连续调用两次 `runAgent()` 时可以使用不同 schema。schema 默认最多 64 KiB；不可稳定序列化或超限会在 Agent Run 启动前报错，不会悄悄截断。
 
 ### 2. validateCompletion：自定义验证函数
 
@@ -108,14 +110,15 @@ const testGate: Mechanism = {
 outputSchema → 本次 runAgent 的 validateCompletion → Node.validateCompletion → 机制验证门 → agent-choice 校验
 ```
 
-机制层的 `validateCompletion` 在代码侧验证之后运行，多个机制按注册顺序依次判定。最后，`agent-choice` 校验确认 AI 选择了真实存在的边。上述任一步拒绝完成，都会把原因发回 LLM，让当前节点继续工作。
+机制层的 `validateCompletion` 在代码侧验证之后运行，多个机制按注册顺序依次判定。最后，`agent-choice` 校验确认 AI 选择了真实存在的边。上述任一步拒绝完成，都会在当前完成工具结果中把原因发回 LLM，让当前 Agent Run 继续工作。
 
 ## 运行流程
 
 1. LLM 调用 `__graph_complete__({ status: "ok", result: {...} })`。
 2. Runtime 依次运行各层验证。
-3. 任一验证返回 `isValid: false`（或 reject）时，引擎向 LLM 注入修正消息，LLM 继续工作。
-4. 全部验证通过 → 节点进入路由选择。
+3. 任一验证返回 `isValid: false`（或 reject）时，本次工具结果返回 Runtime 的拒绝原因；原始 `status/result` 不会被 SDK 再次回显。
+4. LLM 可在同一次 Agent Run 中修正并再次调用 `__graph_complete__`。
+5. 全部验证通过 → Runtime 接受提交、生成 `NodeCompletion`，节点进入路由选择。
 
 ## 安全边界与常见错误
 

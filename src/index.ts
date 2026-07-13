@@ -8,22 +8,30 @@
 //    （自动加载 ./extension → 注册测试图）
 
 // ── 实例运行时工厂（新 API，推荐）──
-export { createLoopGraphExtension } from "./adapter/loop-graph-extension.js";
+export {
+  createLoopGraphExtension,
+  defaultCompletionFeedbackFormatter,
+} from "./adapter/loop-graph-extension.js";
 export type {
   LoopGraphExtension,
   LoopGraphExtensionOptions,
   LoopGraphLimits,
-  CompletionToolResultFormatter,
-  CompletionToolResultInput,
+  CompletionFeedbackFormatter,
+  CompletionFeedbackInput,
   ContextRendererRegistry,
   LoopGraphExecutionOptions,
 } from "./adapter/loop-graph-extension.js";
+export {
+  DEFAULT_OUTPUT_CONTRACT_MAX_BYTES,
+  OUTPUT_CONTRACT_MESSAGE_TYPE,
+  prepareOutputContract,
+} from "./adapter/output-contract.js";
+export type { PreparedOutputContract } from "./adapter/output-contract.js";
 export type {
   DeadRunMessageInput,
   GraphFailureMessageInput,
   IncompleteNodeMessageInput,
   ModelMessageFormatter,
-  ValidationRetryMessageInput,
 } from "./adapter/model-messages.js";
 export {
   defaultSkillContentProvider,
@@ -48,6 +56,7 @@ export type { ToolResolver, ToolResolverInput } from "./tools-resolve.js";
 // ── 可观测性 ──
 export { createJsonlTraceSink } from "./adapter/observability.js";
 export type {
+  AgentRunLifecycleContext,
   LoopGraphLifecycleEvent,
   LoopGraphLogger,
   LoopGraphTraceSink,

@@ -13,8 +13,8 @@ function fakePi() {
   } as any;
 }
 
-describe("PiNodeContext 模型可见恢复消息 characterization", () => {
-  it("按 outputSchema → request validator → node validator 顺序校验", async () => {
+describe("PiNodeContext completion submission", () => {
+  it("首次 turn 前展示 output contract，并按 schema → request → node 顺序立即校验", async () => {
     const pi = fakePi();
     const ctx = new PiNodeContext(pi, 1000);
     const order: string[] = [];
@@ -37,15 +37,17 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
       },
     });
 
-    ctx.recordCompletion({ status: "ok", result: {} });
-    await ctx.onAgentEnd();
+    const rejected = await ctx.submitCompletion({ status: "ok", result: {} });
+    expect(rejected).toMatchObject({ decision: "rejected", reason: expect.stringContaining("outputSchema") });
     expect(order).toEqual([]);
-    expect(pi.sendMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ content: expect.stringContaining("输出不符合 outputSchema") }),
-      { triggerTurn: true },
-    );
+    expect(pi._sent[0].message).toMatchObject({
+      customType: "loop_graph_output_contract",
+      content: expect.stringContaining('"nodeOk"'),
+    });
+    expect(pi._sent[0].message.content).toContain('"required"');
 
-    ctx.recordCompletion({ status: "ok", result: { value: 1, nodeOk: true } });
+    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1, nodeOk: true } }))
+      .resolves.toMatchObject({ decision: "accepted", validation: "passed" });
     await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok" });
     expect(order).toEqual(["request", "node"]);
@@ -55,7 +57,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     const pi = fakePi();
     const ctx = new PiNodeContext(pi, 1000);
     ctx.setCurrentNodeId("bad-schema");
-    await expect(ctx.runAgent({ prompt: "bad", outputSchema: 42 }))
+    await expect(ctx.runAgent({ prompt: "bad", outputSchema: 42 as any }))
       .rejects.toThrow();
     await ctx.onAgentEnd();
     expect(pi.sendMessage).toHaveBeenLastCalledWith(
@@ -64,23 +66,16 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     );
   });
 
-  it("支持自定义 retry、incomplete 和 dead-run 文案", async () => {
+  it("支持自定义 incomplete 和 dead-run 文案", async () => {
     const pi = fakePi();
     const formatter = {
-      validationRetry: ({ reason }: any) => `RETRY:${reason}`,
       incompleteNode: ({ nodeId }: any) => `INCOMPLETE:${nodeId}`,
       deadRun: ({ nodeId }: any) => `DEAD:${nodeId ?? "none"}`,
       graphFailure: () => "GRAPH",
     };
     const ctx = new PiNodeContext(pi, 1000, formatter);
     ctx.setCurrentNodeId("custom-message");
-    const run = ctx.runAgent({ prompt: "x", validateCompletion: () => ({ isValid: false, reason: "bad" }) });
-    ctx.recordCompletion({ status: "ok", result: {} });
-    await ctx.onAgentEnd();
-    expect(pi.sendMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ content: "RETRY:bad" }),
-      { triggerTurn: true },
-    );
+    const run = ctx.runAgent({ prompt: "x" });
     await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ result: { reason: "INCOMPLETE:custom-message" } });
     await ctx.onAgentEnd();
@@ -90,7 +85,7 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     );
   });
 
-  it("验证失败使用固定 retry 文案并触发下一轮", async () => {
+  it("验证失败直接返回 rejected，不产生完成信号或额外 turn", async () => {
     const pi = fakePi();
     const ctx = new PiNodeContext(pi, 1000);
     ctx.setCurrentNodeId("review");
@@ -101,19 +96,15 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
         : { isValid: false, reason: "缺少 valid" },
     });
 
-    ctx.recordCompletion({ status: "ok", result: {} });
-    await ctx.onAgentEnd();
+    await expect(ctx.submitCompletion({ status: "ok", result: {} })).resolves.toEqual({
+      decision: "rejected",
+      reason: "缺少 valid",
+      validatorStage: "agent-run",
+      schemaFingerprint: undefined,
+    });
+    expect(pi._sent).toHaveLength(1);
 
-    expect(pi.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        customType: "loop_graph_retry",
-        content: "验证未通过: 缺少 valid\n请修正后再次调用 __graph_complete__",
-        display: false,
-      }),
-      { triggerTurn: true },
-    );
-
-    ctx.recordCompletion({ status: "ok", result: { valid: true } });
+    await ctx.submitCompletion({ status: "ok", result: { valid: true } });
     await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok", result: { valid: true } });
   });
@@ -136,8 +127,10 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
     const ctx = new PiNodeContext(pi, 1000);
     ctx.setCurrentNodeId("dedupe");
     const run = ctx.runAgent({ prompt: "dedupe" });
-    ctx.recordCompletion({ status: "ok", result: { value: 1 } });
-    ctx.recordCompletion({ status: "ok", result: { value: 1 } });
+    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1 } }))
+      .resolves.toMatchObject({ decision: "accepted" });
+    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1 } }))
+      .resolves.toMatchObject({ decision: "rejected", reason: "重复提交相同节点结果" });
 
     await ctx.onAgentEnd();
 
@@ -146,6 +139,59 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
       status: "ok",
       result: { value: 1 },
     });
+  });
+
+  it.each(["failed", "cancelled"] as const)("%s 提交跳过成功校验", async (status) => {
+    const pi = fakePi();
+    const ctx = new PiNodeContext(pi, 1000);
+    const validator = vi.fn(() => ({ isValid: false as const, reason: "不应执行" }));
+    ctx.setCurrentNodeId("terminal-report");
+    ctx.setNodeCompletionValidator(validator);
+    const run = ctx.runAgent({
+      prompt: "terminal",
+      outputSchema: {
+        type: "object",
+        required: ["successOnly"],
+        properties: { successOnly: { type: "boolean" } },
+      },
+      validateCompletion: validator,
+    });
+
+    await expect(ctx.submitCompletion({ status, result: { reason: "agent report" } }))
+      .resolves.toMatchObject({ decision: "accepted", completionStatus: status, validation: "skipped" });
+    await ctx.onAgentEnd();
+    await expect(run).resolves.toMatchObject({ status });
+    expect(validator).not.toHaveBeenCalled();
+  });
+
+  it("同一 Node 的连续 Agent Run 使用各自契约且结束后不残留", async () => {
+    const pi = fakePi();
+    const ctx = new PiNodeContext(pi, 1000);
+    ctx.setCurrentNodeId("two-runs");
+
+    const first = ctx.runAgent({
+      prompt: "first",
+      outputSchema: { type: "object", required: ["first"], properties: { first: { type: "boolean" } } },
+    });
+    const firstContract = ctx.getActiveOutputContractMessage();
+    expect(firstContract?.content).toContain('"first"');
+    await ctx.submitCompletion({ status: "ok", result: { first: true } });
+    await ctx.onAgentEnd();
+    await first;
+    expect(ctx.getActiveOutputContractMessage()).toBeNull();
+
+    const second = ctx.runAgent({
+      prompt: "second",
+      outputSchema: { type: "object", required: ["second"], properties: { second: { type: "number" } } },
+    });
+    const secondContract = ctx.getActiveOutputContractMessage();
+    expect(secondContract?.content).toContain('"second"');
+    expect(secondContract?.content).not.toContain('"first"');
+    expect((secondContract?.details as any).schemaFingerprint)
+      .not.toBe((firstContract?.details as any).schemaFingerprint);
+    await ctx.submitCompletion({ status: "ok", result: { second: 2 } });
+    await ctx.onAgentEnd();
+    await second;
   });
 
   it("无活动 run 的 agent_end 追加固定 dead-run 消息", async () => {
@@ -196,8 +242,8 @@ describe("PiNodeContext 模型可见恢复消息 characterization", () => {
   });
 });
 
-describe("completion tool characterization", () => {
-  it("保持固定 ABI 和默认模型反馈文本", async () => {
+describe("completion tool", () => {
+  it("只确认提交，不回显模型填写的 status/result", async () => {
     const tool = createCompleteTool();
     expect(tool.name).toBe("__graph_complete__");
     expect(tool.parameters).toMatchObject({
@@ -206,8 +252,30 @@ describe("completion tool characterization", () => {
     });
     await expect(tool.execute("call", { status: "ok", result: { done: true } } as any, undefined as any, undefined as any, undefined as any))
       .resolves.toEqual({
-        content: [{ type: "text", text: "节点完成: ok" }],
-        details: { status: "ok", result: { done: true } },
+        content: [{ type: "text", text: "节点结果已提交，等待检查。" }],
+        details: undefined,
       });
+  });
+
+  it("UI 只渲染提交动作和 Runtime 决策", () => {
+    const tool = createCompleteTool() as any;
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const callText = tool.renderCall(
+      { status: "ok", result: { secret: "raw" } },
+      theme,
+      {},
+    ).render(100).join("\n");
+    expect(callText.trimEnd()).toBe("提交节点结果");
+    expect(callText).not.toContain("ok");
+    expect(callText).not.toContain("secret");
+
+    const resultText = tool.renderResult({
+      details: { decision: "rejected", reason: "缺少 question_id" },
+    }, {}, theme, {}).render(100).join("\n");
+    expect(resultText).toContain("节点结果未被接受");
+    expect(resultText).toContain("缺少 question_id");
   });
 });

@@ -70,6 +70,7 @@ onNodeError（观察原始错误，不能替换）
 
 ```text
 beforeAgentRun
+  → output contract（配置 outputSchema 时）
   → [LLM turn] × N
       → onTurnStart
       → [工具调用] × N
@@ -77,13 +78,18 @@ beforeAgentRun
           → 工具执行开始 → onToolStart
           → afterToolResult → onToolResult
       → onTurnEnd
-  → __graph_complete__ 调用
+  → __graph_complete__ 完成提交
   → 校验链（outputSchema → runAgent 验证 → Node 验证 → 机制验证 → agent-choice）
+      → rejected：本次工具结果直接说明原因，Agent 可再次提交
+      → accepted：生成 NodeCompletion
   → 返回 NodeCompletion
 ```
 
 - 每次 `runAgent()` 分配独立 `agentRunId`，事件不会串到上一轮。
-- 校验驳回时自动注入重试消息，LLM 继续新一轮 turn。
+- `outputSchema` 的完整、确定性 JSON Schema 在首个 turn 前展示给模型；过大或不可序列化时 Agent Run 在启动前失败，不会截断。
+- 校验驳回原因直接作为本次 `__graph_complete__` 的工具结果返回，不再额外注入一条重试消息。
+- Agent 提交的 `status/result` 不会被 SDK 回显；工具结果和默认 UI 只展示 Runtime 的接受、拒绝或失败决定。
+- `traceSink` 会收到契约准备、提交、各验证阶段开始及最终决定事件；事件只含指纹、大小、阶段、耗时和原因等安全摘要，不含完整 schema 或业务结果。
 - Agent 超时返回 `status: "failed"`；主动取消或其他不可恢复情况的具体状态由完成路径决定。
 
 ---
@@ -121,7 +127,7 @@ outputSchema
   → agent-choice 校验器（机制验证之后执行）
 ```
 
-每层校验失败时后续层不执行。全部通过后节点进入路由选择。
+每层校验失败时后续层不执行。全部通过后节点进入路由选择。Agent 报告 `failed` 或 `cancelled` 时跳过这条成功校验链，并形成相应终态完成信号。
 
 ---
 

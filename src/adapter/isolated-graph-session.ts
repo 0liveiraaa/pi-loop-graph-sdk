@@ -16,7 +16,7 @@ import {
   createLoopGraphExtension,
   type LoopGraphExtension,
   type LoopGraphLimits,
-  type CompletionToolResultFormatter,
+  type CompletionFeedbackFormatter,
   type ContextRendererRegistry,
 } from "./loop-graph-extension.js";
 import type { ModelMessageFormatter } from "./model-messages.js";
@@ -47,7 +47,8 @@ export interface IsolatedGraphSessionFactoryOptions {
   limits?: LoopGraphLimits;
   contextRenderer?: NodeContextRenderer;
   modelMessageFormatter?: Partial<ModelMessageFormatter>;
-  completionToolResultFormatter?: CompletionToolResultFormatter;
+  completionFeedbackFormatter?: CompletionFeedbackFormatter;
+  outputContractMaxBytes?: number;
   skillProvider?: SkillContentProvider;
   skillRenderer?: SkillContentRenderer;
   skillFailure?: SkillFailurePolicies;
@@ -103,7 +104,8 @@ export function createIsolatedGraphSessionFactory(
             limits: options.limits,
             contextRenderer: options.contextRenderer,
             modelMessageFormatter: options.modelMessageFormatter,
-            completionToolResultFormatter: options.completionToolResultFormatter,
+            completionFeedbackFormatter: options.completionFeedbackFormatter,
+            outputContractMaxBytes: options.outputContractMaxBytes,
             skillProvider: options.skillProvider,
             skillRenderer: options.skillRenderer,
             skillFailure: options.skillFailure,

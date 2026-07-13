@@ -8,19 +8,30 @@
 //
 //  如何获取 NodeCompletion：
 //    - agent 调用 __graph_complete__ 工具
-//    - extension.ts 的 tool_result 钩子捕获参数 → recordCompletion()
+//    - extension.ts 的 tool_result 钩子捕获参数 → submitCompletion()
 //    - extension.ts 的 agent_end 钩子 → onAgentEnd() → resolve Promise
 // ============================================================
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { NodeCompletion, NodeContext, NodeInput } from "../type.js";
+import type {
+  CompletionSubmission,
+  CompletionSubmissionDecision,
+  CompletionValidationStage,
+  NodeCompletion,
+  NodeContext,
+  NodeInput,
+} from "../type.js";
 import type { AgentRunRequest } from "../type.js";
 import { debugLog } from "./debug-log.js";
-import Schema from "typebox/schema";
 import {
   defaultModelMessageFormatter,
   type ModelMessageFormatter,
 } from "./model-messages.js";
+import {
+  OUTPUT_CONTRACT_MESSAGE_TYPE,
+  prepareOutputContract,
+  type PreparedOutputContract,
+} from "./output-contract.js";
 
 export interface AgentRunMechanismLifecycle {
   beforeAgentRun(
@@ -36,6 +47,14 @@ export interface AgentRunMechanismLifecycle {
   >;
   afterAgentRun(agentRunId: number): void;
 }
+
+export type AgentRunTelemetryEvent =
+  | { type: "output_contract.prepared"; agentRunId: number; schemaFingerprint: string; schemaBytes: number }
+  | { type: "completion.submitted"; agentRunId: number; reportedStatus: CompletionSubmission["reportedStatus"]; schemaFingerprint?: string }
+  | { type: "completion.validation_started"; agentRunId: number; validatorStage: CompletionValidationStage; schemaFingerprint?: string }
+  | { type: "completion.accepted"; agentRunId: number; completionStatus: NodeCompletion["status"]; schemaFingerprint?: string; durationMs: number }
+  | { type: "completion.rejected"; agentRunId: number; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number }
+  | { type: "completion.failed"; agentRunId: number; scope: "node" | "graph"; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number };
 
 export class PiNodeContext implements NodeContext {
   readonly signal: AbortSignal;
@@ -58,13 +77,17 @@ export class PiNodeContext implements NodeContext {
   private postMechanismValidateFn: AgentRunRequest["validateCompletion"] = undefined;
   private mechanismLifecycle: AgentRunMechanismLifecycle | null = null;
   private validationInFlight: Promise<void> | null = null;
-  private agentEndQueued = false;
+  private activeOutputContract: PreparedOutputContract | null = null;
+  private activeOutputContractMessage: Readonly<Record<string, unknown>> | null = null;
+  private submissionQueue: Promise<void> = Promise.resolve();
 
   constructor(
     pi: ExtensionAPI,
     agentRunTimeoutMs = 5 * 60 * 1000,
     messageFormatter: ModelMessageFormatter = defaultModelMessageFormatter,
     completionValidationTimeoutMs = 60_000,
+    private readonly outputContractMaxBytes = 64 * 1024,
+    private readonly telemetry?: (event: AgentRunTelemetryEvent) => void,
   ) {
     this.pi = pi;
     this.agentRunTimeoutMs = agentRunTimeoutMs;
@@ -94,21 +117,38 @@ export class PiNodeContext implements NodeContext {
 
   // ── NodeContext 接口 ──────────────────────────────────
 
-  private validateFn: AgentRunRequest["validateCompletion"] = undefined;
+  private runValidateFn: AgentRunRequest["validateCompletion"] = undefined;
 
   async runAgent(request: AgentRunRequest): Promise<NodeCompletion> {
     // schema 配置错误必须在占用 active run 之前抛出，避免把 NodeContext
     // 永久留在一个没有 Promise/timeout 可以收尾的运行状态。
-    const validateFn = composeCompletionValidators(
-      createSchemaValidator(request.outputSchema),
-      request.validateCompletion,
-      this.nodeValidateFn,
-    );
+    const outputContract = prepareOutputContract(request.outputSchema, this.outputContractMaxBytes);
     this.pendingCompletions = [];
     this.completionFingerprints.clear();
     const runId = this.nextRunId++;
     this.activeRunId = runId;
-    this.validateFn = validateFn;
+    this.runValidateFn = request.validateCompletion;
+    this.activeOutputContract = outputContract;
+    this.activeOutputContractMessage = outputContract
+      ? Object.freeze({
+          customType: OUTPUT_CONTRACT_MESSAGE_TYPE,
+          content: outputContract.modelText,
+          display: false,
+          details: Object.freeze({
+            protocol: 1,
+            agentRunId: runId,
+            schemaFingerprint: outputContract.fingerprint,
+          }),
+        })
+      : null;
+    if (outputContract) {
+      this.emitTelemetry({
+        type: "output_contract.prepared",
+        agentRunId: runId,
+        schemaFingerprint: outputContract.fingerprint,
+        schemaBytes: outputContract.byteSize,
+      });
+    }
 
     try {
       const start = this.mechanismLifecycle
@@ -116,7 +156,7 @@ export class PiNodeContext implements NodeContext {
         : undefined;
       if (start?.blocked) {
         this.activeRunId = 0;
-        this.validateFn = undefined;
+        this.clearAgentRunArtifacts(runId);
         this.mechanismLifecycle?.afterAgentRun(runId);
         return {
           nodeId: this.currentNodeId ?? "unknown",
@@ -126,7 +166,7 @@ export class PiNodeContext implements NodeContext {
       }
     } catch (error) {
       this.activeRunId = 0;
-      this.validateFn = undefined;
+      this.clearAgentRunArtifacts(runId);
       this.mechanismLifecycle?.afterAgentRun(runId);
       throw error;
     }
@@ -136,6 +176,7 @@ export class PiNodeContext implements NodeContext {
         if (this.activeRunId !== runId) return;
         this.activeRunId = 0;
         this.activeResolve = null;
+        this.clearAgentRunArtifacts(runId);
         res({
           nodeId: this.currentNodeId ?? "unknown",
           status: "failed",
@@ -151,9 +192,14 @@ export class PiNodeContext implements NodeContext {
         clearTimeout(timeout);
         this.activeRunId = 0;
         this.activeResolve = null;
+        this.clearAgentRunArtifacts(runId);
         res(c);
       };
     });
+
+    if (this.activeOutputContractMessage) {
+      this.pi.sendMessage(this.activeOutputContractMessage as any, {});
+    }
 
     // 发送 prompt，触发 agent 运行
     this.pi.sendMessage(
@@ -210,39 +256,72 @@ export class PiNodeContext implements NodeContext {
     return this.pendingCompletions.length;
   }
 
-  recordCompletion(params: {
+  getActiveOutputContractMessage(): Readonly<Record<string, unknown>> | null {
+    return this.activeOutputContractMessage;
+  }
+
+  submitCompletion(params: {
     status: "ok" | "failed" | "cancelled";
     result: Record<string, unknown>;
-  }): void {
-    const fingerprint = createCompletionFingerprint(params);
-    if (this.completionFingerprints.has(fingerprint)) return;
-    this.completionFingerprints.add(fingerprint);
-    this.pendingCompletions.push({
-      nodeId: this.currentNodeId ?? "unknown",
-      status: params.status,
+  }): Promise<CompletionSubmissionDecision> {
+    const runId = this.activeRunId;
+    const schemaFingerprint = this.activeOutputContract?.fingerprint;
+    const startedAt = Date.now();
+    const submission: CompletionSubmission = {
+      reportedStatus: params.status,
       result: params.result,
+    };
+    this.emitTelemetry({
+      type: "completion.submitted",
+      agentRunId: runId,
+      reportedStatus: submission.reportedStatus,
+      schemaFingerprint,
     });
+    const result = this.submissionQueue.then(() =>
+      this.processCompletionSubmission(submission, runId)
+    ).then((decision) => {
+      const durationMs = Date.now() - startedAt;
+      if (decision.decision === "accepted") {
+        this.emitTelemetry({
+          type: "completion.accepted",
+          agentRunId: runId,
+          completionStatus: decision.completionStatus,
+          schemaFingerprint,
+          durationMs,
+        });
+      } else if (decision.decision === "rejected") {
+        this.emitTelemetry({
+          type: "completion.rejected",
+          agentRunId: runId,
+          reason: decision.reason,
+          validatorStage: decision.validatorStage,
+          schemaFingerprint,
+          durationMs,
+        });
+      } else {
+        this.emitTelemetry({
+          type: "completion.failed",
+          agentRunId: runId,
+          scope: decision.scope,
+          reason: decision.reason,
+          validatorStage: decision.validatorStage,
+          schemaFingerprint,
+          durationMs,
+        });
+      }
+      return decision;
+    });
+    this.submissionQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   onAgentEnd(): Promise<void> {
-    if (this.validationInFlight) {
-      this.agentEndQueued = true;
-      return this.validationInFlight;
-    }
-    const work = this.processAgentEnd();
+    if (this.validationInFlight) return this.validationInFlight;
+    const work = this.submissionQueue.then(() => this.processAgentEnd());
     this.validationInFlight = work;
     return work.finally(() => {
       if (this.validationInFlight === work) {
         this.validationInFlight = null;
-        if (
-          this.agentEndQueued && this.activeRunId !== 0 &&
-          this.pendingCompletions.length > 0
-        ) {
-          this.agentEndQueued = false;
-          queueMicrotask(() => { void this.onAgentEnd(); });
-        } else {
-          this.agentEndQueued = false;
-        }
       }
     });
   }
@@ -281,56 +360,6 @@ export class PiNodeContext implements NodeContext {
         },
       };
 
-      // 验证（如果节点声明了 validateCompletion 且 agent 上报 ok）
-      if (this.validateFn && completion.status === "ok") {
-        const vr = await runCompletionValidator(
-          this.validateFn,
-          completion.result,
-          this.completionValidationTimeoutMs,
-        );
-        if (!vr.isValid) {
-          this.rejectCompletion(vr.reason);
-          return;
-        }
-      }
-
-      if (completion.status === "ok" && this.mechanismLifecycle) {
-        const gate = await this.mechanismLifecycle.validateCompletion(
-          this.activeRunId,
-          completion,
-        );
-        if (gate.action === "reject") {
-          this.rejectCompletion(gate.reason);
-          return;
-        }
-        if (gate.action === "fail-node" || gate.action === "fail-graph") {
-          resolve({
-            nodeId: this.currentNodeId ?? "unknown",
-            status: "failed",
-            result: {
-              reason: gate.reason,
-              completionGate: { action: gate.action },
-            },
-          });
-          return;
-        }
-        if (gate.action === "allow" && gate.verifiedResult) {
-          completion.verifiedResult = gate.verifiedResult;
-        }
-      }
-
-      if (this.postMechanismValidateFn && completion.status === "ok") {
-        const vr = await runCompletionValidator(
-          this.postMechanismValidateFn,
-          completion.result,
-          this.completionValidationTimeoutMs,
-        );
-        if (!vr.isValid) {
-          this.rejectCompletion(vr.reason);
-          return;
-        }
-      }
-
       resolve(completion);
     } else {
       resolve({
@@ -347,24 +376,124 @@ export class PiNodeContext implements NodeContext {
 
     this.activeResolve = null;
     this.activeRunId = 0;
-    this.validateFn = undefined;
-    this.postMechanismValidateFn = undefined;
+    this.clearAgentRunArtifacts();
   }
 
-  private rejectCompletion(reason: string): void {
-    this.pi.sendMessage(
-      {
-        customType: "loop_graph_retry",
-        content: this.messageFormatter.validationRetry({
-          nodeId: this.currentNodeId ?? "unknown",
-          reason,
-          completeToolName: "__graph_complete__",
-        }),
-        display: false,
-      },
-      { triggerTurn: true },
-    );
-    debugLog.agentRetry(this.currentNodeId ?? "?", reason);
+  private async processCompletionSubmission(
+    submission: CompletionSubmission,
+    runId: number,
+  ): Promise<CompletionSubmissionDecision> {
+    const schemaFingerprint = this.activeOutputContract?.fingerprint;
+    if (runId === 0 || runId !== this.activeRunId) {
+      return { decision: "rejected", reason: "当前 Agent Run 已结束", schemaFingerprint };
+    }
+    const fingerprint = createCompletionFingerprint({
+      status: submission.reportedStatus,
+      result: submission.result,
+    });
+    if (this.completionFingerprints.has(fingerprint)) {
+      return { decision: "rejected", reason: "重复提交相同节点结果", schemaFingerprint };
+    }
+    const completion: NodeCompletion = {
+      nodeId: this.currentNodeId ?? "unknown",
+      status: submission.reportedStatus,
+      result: { ...submission.result },
+    };
+    if (submission.reportedStatus !== "ok") {
+      this.completionFingerprints.add(fingerprint);
+      this.pendingCompletions.push(completion);
+      return {
+        decision: "accepted",
+        completionStatus: submission.reportedStatus,
+        validation: "skipped",
+        schemaFingerprint,
+      };
+    }
+
+    const validationStages: ReadonlyArray<readonly [CompletionValidationStage, AgentRunRequest["validateCompletion"]]> = [
+      ["outputSchema", this.activeOutputContract?.validate],
+      ["agent-run", this.runValidateFn],
+      ["node", this.nodeValidateFn],
+    ];
+    for (const [stage, validator] of validationStages) {
+      if (!validator) continue;
+      const validation = await this.runValidationStage(
+        stage,
+        validator,
+        completion.result,
+        runId,
+        schemaFingerprint,
+      );
+      if (!validation.isValid) {
+        debugLog.agentRetry(this.currentNodeId ?? "?", validation.reason);
+        return {
+          decision: "rejected",
+          reason: validation.reason,
+          validatorStage: stage,
+          schemaFingerprint,
+        };
+      }
+    }
+
+    if (this.mechanismLifecycle) {
+      this.emitValidationStarted(runId, "mechanism", schemaFingerprint);
+      const gate = await this.mechanismLifecycle.validateCompletion(runId, completion);
+      if (gate.action === "reject") {
+        debugLog.agentRetry(this.currentNodeId ?? "?", gate.reason);
+        return {
+          decision: "rejected",
+          reason: gate.reason,
+          validatorStage: "mechanism",
+          schemaFingerprint,
+        };
+      }
+      if (gate.action === "fail-node" || gate.action === "fail-graph") {
+        this.completionFingerprints.add(fingerprint);
+        this.pendingCompletions.push({
+          nodeId: completion.nodeId,
+          status: "failed",
+          result: { reason: gate.reason, completionGate: { action: gate.action } },
+        });
+        return {
+          decision: "failed",
+          scope: gate.action === "fail-graph" ? "graph" : "node",
+          reason: gate.reason,
+          validatorStage: "mechanism",
+          schemaFingerprint,
+        };
+      }
+      if (gate.action === "allow" && gate.verifiedResult) {
+        completion.verifiedResult = gate.verifiedResult;
+      }
+    }
+
+    if (this.postMechanismValidateFn) {
+      const validation = await this.runValidationStage(
+        "agent-choice",
+        this.postMechanismValidateFn,
+        completion.result,
+        runId,
+        schemaFingerprint,
+      );
+      if (!validation.isValid) {
+        debugLog.agentRetry(this.currentNodeId ?? "?", validation.reason);
+        return {
+          decision: "rejected",
+          reason: validation.reason,
+          validatorStage: "agent-choice",
+          schemaFingerprint,
+        };
+      }
+    }
+
+    this.completionFingerprints.add(fingerprint);
+    this.pendingCompletions.push(completion);
+    return {
+      decision: "accepted",
+      completionStatus: "ok",
+      validation: "passed",
+      schemaFingerprint,
+    };
   }
 
   setCurrentNodeId(nodeId: string): void {
@@ -374,9 +503,11 @@ export class PiNodeContext implements NodeContext {
     // 再次调用本方法，仍可保留其 allCompletions 语义。
     this.pendingCompletions = [];
     this.completionFingerprints.clear();
-    this.validateFn = undefined;
+    this.runValidateFn = undefined;
     this.nodeValidateFn = undefined;
     this.postMechanismValidateFn = undefined;
+    this.activeOutputContract = null;
+    this.activeOutputContractMessage = null;
   }
 
   setNodeCompletionValidator(
@@ -395,40 +526,63 @@ export class PiNodeContext implements NodeContext {
     this.mechanismLifecycle = lifecycle;
   }
 
+  private async runValidationStage(
+    stage: CompletionValidationStage,
+    validator: NonNullable<AgentRunRequest["validateCompletion"]>,
+    result: Record<string, unknown>,
+    runId: number,
+    schemaFingerprint?: string,
+  ): Promise<import("../type.js").CompletionValidationResult> {
+    this.emitValidationStarted(runId, stage, schemaFingerprint);
+    return runCompletionValidator(validator, result, this.completionValidationTimeoutMs);
+  }
+
+  private emitValidationStarted(
+    agentRunId: number,
+    validatorStage: CompletionValidationStage,
+    schemaFingerprint?: string,
+  ): void {
+    this.emitTelemetry({
+      type: "completion.validation_started",
+      agentRunId,
+      validatorStage,
+      schemaFingerprint,
+    });
+  }
+
+  private emitTelemetry(event: AgentRunTelemetryEvent): void {
+    try {
+      this.telemetry?.(Object.freeze(event));
+    } catch {
+      // telemetry 不能改变 Agent Run 控制流
+    }
+  }
+
+  private clearAgentRunArtifacts(expectedRunId?: number): void {
+    const messageRunId = (this.activeOutputContractMessage?.details as any)?.agentRunId;
+    if (expectedRunId !== undefined && messageRunId !== undefined && messageRunId !== expectedRunId) {
+      return;
+    }
+    this.runValidateFn = undefined;
+    this.activeOutputContract = null;
+    this.activeOutputContractMessage = null;
+  }
+
   reset(): void {
     this.currentNodeId = null;
     this.pendingCompletions = [];
     this.completionFingerprints.clear();
     this.activeRunId = 0;
     this.activeResolve = null;
-    this.validateFn = undefined;
+    this.runValidateFn = undefined;
     this.nodeValidateFn = undefined;
     this.postMechanismValidateFn = undefined;
     this.mechanismLifecycle = null;
     this.validationInFlight = null;
-    this.agentEndQueued = false;
+    this.activeOutputContract = null;
+    this.activeOutputContractMessage = null;
+    this.submissionQueue = Promise.resolve();
   }
-}
-
-function composeCompletionValidators(
-  ...validators: Array<AgentRunRequest["validateCompletion"]>
-): AgentRunRequest["validateCompletion"] {
-  const active = validators.filter((validator): validator is NonNullable<typeof validator> => validator != null);
-  if (active.length === 0) return undefined;
-  return async (result) => {
-    for (const validator of active) {
-      try {
-        const validation = await validator(result);
-        if (!validation.isValid) return validation;
-      } catch (error) {
-        return {
-          isValid: false,
-          reason: `completion validator 异常: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    }
-    return { isValid: true };
-  };
 }
 
 async function runCompletionValidator(
@@ -466,20 +620,4 @@ function createCompletionFingerprint(params: {
   } catch {
     return `${params.status}:${String(params.result)}`;
   }
-}
-
-function createSchemaValidator(
-  outputSchema: unknown,
-): AgentRunRequest["validateCompletion"] {
-  if (outputSchema == null) return undefined;
-  const validator = Schema.Compile(outputSchema as any);
-  return (result) => {
-    const [isValid, errors] = validator.Errors(result);
-    if (isValid) return { isValid: true };
-    const summary = errors.slice(0, 3).map((error) => {
-      const path = error.instancePath || "$";
-      return `${path} ${error.message}`;
-    }).join("; ");
-    return { isValid: false, reason: `输出不符合 outputSchema: ${summary}` };
-  };
 }

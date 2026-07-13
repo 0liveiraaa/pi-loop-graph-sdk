@@ -10,7 +10,7 @@ export interface AgentExecuteOptions {
   /** @deprecated 工具集由 Node.tools 统一声明。此字段不再生效。 */
   tools?: string[];
   validateCompletion?: AgentRunRequest["validateCompletion"];
-  outputSchema?: unknown;
+  outputSchema?: AgentRunRequest["outputSchema"];
 }
 
 type CodeNode = Extract<Node, { kind: "code" }>;

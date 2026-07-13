@@ -147,6 +147,12 @@ function agentNodeGraph(): Graph {
     async execute(_instance, _input, ctx) {
       return ctx.runAgent({
         prompt: 'You are in a graph node. Call __graph_complete__ with status="ok" and result={done:true}. Do nothing else.',
+        outputSchema: {
+          type: "object",
+          properties: { done: { type: "boolean" } },
+          required: ["done"],
+          additionalProperties: false,
+        },
       });
     },
   };

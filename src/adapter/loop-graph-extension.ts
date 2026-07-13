@@ -38,6 +38,7 @@ import type {
   Node,
   NodeCompletion,
   NodeInput,
+  CompletionSubmissionDecision,
 } from "../type.js";
 import { END } from "../type.js";
 import { GraphRuntime } from "../runtime.js";
@@ -146,10 +147,12 @@ export interface LoopGraphExtensionOptions {
   /** 自定义 SDK 在 node-enter 时追加给模型的 CURRENT/skill/instruction 载荷。
    * NodeScope、GraphCallScope、compaction 与 frame baseline 仍由 SDK 固定管理。 */
   contextRenderer?: NodeContextRenderer;
-  /** 自定义 validation retry、incomplete、dead-run 和 graph failure 文案。 */
+  /** 自定义 incomplete、dead-run 和 graph failure 文案。 */
   modelMessageFormatter?: Partial<ModelMessageFormatter>;
-  /** 自定义 __graph_complete__ 返回给模型的文本；控制 details/ABI 不变。 */
-  completionToolResultFormatter?: CompletionToolResultFormatter;
+  /** 自定义 Runtime 检查 completion submission 后返回给模型的文本。 */
+  completionFeedbackFormatter?: CompletionFeedbackFormatter;
+  /** 单次 Agent Run 输出契约的最大 UTF-8 字节数。默认 64 KiB。 */
+  outputContractMaxBytes?: number;
   /** 异步解析 node.skill 引用。默认读取 skillBasePath/{ref}/SKILL.md。 */
   skillProvider?: SkillContentProvider;
   /** 控制默认 context renderer 如何展示 skill；返回 null 可隐藏正文。 */
@@ -173,14 +176,26 @@ export interface LoopGraphExecutionOptions {
   contextRenderer?: NodeContextRenderer;
 }
 
-export interface CompletionToolResultInput {
+export interface CompletionFeedbackInput {
   nodeId: string;
-  status: "ok" | "failed" | "cancelled";
-  result: Readonly<Record<string, unknown>>;
+  decision: CompletionSubmissionDecision;
 }
 
-export type CompletionToolResultFormatter =
-  (input: CompletionToolResultInput) => string;
+export type CompletionFeedbackFormatter =
+  (input: CompletionFeedbackInput) => string;
+
+export const defaultCompletionFeedbackFormatter: CompletionFeedbackFormatter = ({ decision }) => {
+  if (decision.decision === "accepted") {
+    if (decision.validation === "passed") return "节点结果已通过检查并接受。";
+    return decision.completionStatus === "failed"
+      ? "Agent 报告当前节点失败。"
+      : "Agent 报告当前节点取消。";
+  }
+  if (decision.decision === "rejected") {
+    return `节点结果未被接受：${decision.reason}`;
+  }
+  return `${decision.scope === "graph" ? "图" : "节点"}验收失败：${decision.reason}`;
+};
 
 export interface LoopGraphLimits {
   /** 顶层 root 图最大节点步数。默认 100。 */
@@ -220,8 +235,6 @@ export function createLoopGraphExtension(
   const emit = (event: import("./observability.js").LoopGraphLifecycleEvent) =>
     emitLifecycleEvent(event, traceSink, options.logger);
   const modelMessageFormatter: ModelMessageFormatter = {
-    validationRetry: options.modelMessageFormatter?.validationRetry
-      ?? defaultModelMessageFormatter.validationRetry,
     incompleteNode: options.modelMessageFormatter?.incompleteNode
       ?? defaultModelMessageFormatter.incompleteNode,
     deadRun: options.modelMessageFormatter?.deadRun
@@ -326,6 +339,13 @@ export function createLoopGraphExtension(
         : [],
     };
     const projected = projectMessages(input);
+    const contract = activeNodeContext?.getActiveOutputContractMessage() as MessageEntry | null;
+    if (contract && !projected.some((message) =>
+      message.customType === contract.customType &&
+      (message.details as any)?.agentRunId === (contract.details as any)?.agentRunId
+    )) {
+      projected.push(contract);
+    }
     debugLog.projection(input, projected as any[]);
     return { messages: projected };
   });
@@ -394,29 +414,43 @@ export function createLoopGraphExtension(
   });
 
   // 捕获 __graph_complete__ 调用
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", async (event) => {
     if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;
-    const params = event.details as any;
-    if (params?.status) {
-      const nodeId = activeRuntime?.currentNodeId ?? "?";
-      debugLog.agentComplete(nodeId, {
-        nodeId,
-        status: params.status,
-        result: params.result ?? {},
-      });
-      activeNodeContext.recordCompletion({
-        status: params.status,
-        result: params.result ?? {},
-      });
-      if (options.completionToolResultFormatter) {
-        const text = options.completionToolResultFormatter(Object.freeze({
-          nodeId,
-          status: params.status,
-          result: snapshotRendererValue(params.result ?? {}) as Readonly<Record<string, unknown>>,
-        }));
-        return { content: [{ type: "text", text }] };
-      }
+    const params = event.input as any;
+    const nodeId = activeRuntime?.currentNodeId ?? "?";
+    if (
+      !params ||
+      !["ok", "failed", "cancelled"].includes(params.status) ||
+      !params.result ||
+      typeof params.result !== "object" ||
+      Array.isArray(params.result)
+    ) {
+      const decision: CompletionSubmissionDecision = {
+        decision: "rejected",
+        reason: "完成提交必须包含合法的 status 和对象类型 result",
+      };
+      const text = (options.completionFeedbackFormatter ?? defaultCompletionFeedbackFormatter)(
+        Object.freeze({ nodeId, decision }),
+      );
+      return { content: [{ type: "text", text }], details: decision, isError: true };
     }
+    debugLog.agentComplete(nodeId, {
+      nodeId,
+      status: params.status,
+      result: params.result,
+    });
+    const decision = await activeNodeContext.submitCompletion({
+      status: params.status,
+      result: params.result,
+    });
+    const text = (options.completionFeedbackFormatter ?? defaultCompletionFeedbackFormatter)(
+      Object.freeze({ nodeId, decision }),
+    );
+    return {
+      content: [{ type: "text", text }],
+      details: decision,
+      isError: decision.decision !== "accepted",
+    };
   });
 
   // agent 结束 → resolve Promise
@@ -517,6 +551,21 @@ export function createLoopGraphExtension(
       limits.agentRunTimeoutMs,
       modelMessageFormatter,
       limits.completionValidationTimeoutMs,
+      options.outputContractMaxBytes,
+      (agentRunEvent) => {
+        const scope = runtime.currentScope;
+        const activeGraph = runtime.topGraph;
+        const nodeId = runtime.currentNodeId;
+        if (!scope || !activeGraph || !nodeId) return;
+        emit(Object.freeze({
+          ...agentRunEvent,
+          timestamp: Date.now(),
+          graphRunId: runtime.graphRunId,
+          graphId: activeGraph.id,
+          nodeId,
+          scopeId: scope.scopeId,
+        }));
+      },
     );
     rootRunActive = true;
 

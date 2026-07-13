@@ -58,10 +58,16 @@ tail -f loop-graph-debug.log
 | `node_enter` | 节点进入 | graphId、nodeId、执行周期标识、嵌套深度 |
 | `node_exit` | 节点退出 | graphId、nodeId、状态、嵌套深度 |
 | `compaction` | 上下文压缩 | graphId、nodeId、压缩代次、原因 |
+| `output_contract.prepared` | 单次 Agent Run 的输出契约准备完成 | graphRunId、scopeId、agentRunId、schemaFingerprint、schemaBytes |
+| `completion.submitted` | Agent 提交候选结果 | Agent Run 关联信息、自报状态；不含业务 result |
+| `completion.validation_started` | 某一层完成验证开始 | validatorStage、schemaFingerprint |
+| `completion.rejected` | 候选结果被拒绝 | validatorStage、原因、总耗时 |
+| `completion.accepted` | 候选结果通过并形成完成信号 | completionStatus、总耗时 |
+| `completion.failed` | 验收触发节点或图失败 | scope、validatorStage、原因、总耗时 |
 | `graph_end` | 图正常结束 | graphId、状态、总步数 |
 | `graph_error` | 图异常终止 | graphId、错误文本 |
 
-所有事件都包含时间戳和 `graphId`。节点事件还包含当前执行周期标识，可用于关联一次节点进入、退出和压缩。
+所有事件都包含时间戳和 `graphId`。Agent Run 事件还包含 `graphRunId`、`scopeId` 和 `agentRunId`，可直接形成图运行 → 节点访问 → Agent Run 的关联关系。完成事件默认不记录完整 schema 或业务 result。
 
 ## 运行规则
 
@@ -81,7 +87,7 @@ tail -f loop-graph-debug.log
 
 ### 排查“Agent 不退出”
 
-公开生命周期事件目前不包含每次 Agent 完成或验证驳回的详情。先用 `node_enter` 确认卡住的节点，再结合 pi 自身的会话日志检查 `__graph_complete__` 返回的修正原因。若需要长期采集验证详情，应在验证函数或机制中显式记录。
+先用 `node_enter` 定位节点，再按 `scopeId`、`agentRunId` 查看最后一条 `completion.submitted`。若随后出现 `completion.rejected`，可直接读取 `validatorStage` 和拒绝原因；只有 submitted 而没有后续决定，说明验证仍在执行或运行被外部中断。
 
 ### 排查“图莫名终止”
 

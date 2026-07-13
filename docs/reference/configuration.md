@@ -16,7 +16,8 @@ interface LoopGraphExtensionOptions {
   contextRenderer?: NodeContextRenderer;
   contextRenderers?: ContextRendererRegistry;
   modelMessageFormatter?: Partial<ModelMessageFormatter>;
-  completionToolResultFormatter?: CompletionToolResultFormatter;
+  completionFeedbackFormatter?: CompletionFeedbackFormatter;
+  outputContractMaxBytes?: number;
   skillProvider?: SkillContentProvider;
   skillRenderer?: SkillContentRenderer;
   skillFailure?: SkillFailurePolicies;
@@ -80,10 +81,11 @@ interface LoopGraphExtensionOptions {
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `modelMessageFormatter` | `Partial<ModelMessageFormatter>` | 自定义验证驳回、节点未完成、dead-run、图失败时的文案。 |
-| `completionToolResultFormatter` | `CompletionToolResultFormatter` | 自定义 `__graph_complete__` 返回给模型的文本格式。 |
+| `modelMessageFormatter` | `Partial<ModelMessageFormatter>` | 自定义节点未完成、dead-run、图失败时的文案。完成提交的检查反馈由 `completionFeedbackFormatter` 负责。 |
+| `completionFeedbackFormatter` | `CompletionFeedbackFormatter` | 自定义 Runtime 检查完成提交后返回给模型的文本；输入只含节点 ID 与检查决定，不暴露原始提交参数。 |
+| `outputContractMaxBytes` | `number` | 单次 Agent Run 输出契约的最大 UTF-8 字节数，默认 64 KiB。超限时在 Agent Run 开始前失败，不截断。 |
 
-只改变 LLM 看到的文字，不影响 `__graph_complete__` 的名称、状态或 Runtime 退出规则。
+formatter 只改变 LLM 看到的检查反馈，不影响 `__graph_complete__` 的名称或 Runtime 决策，也不能把未检查的提交伪装为已接受。
 
 ### Delegate 配置
 

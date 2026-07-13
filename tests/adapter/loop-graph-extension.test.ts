@@ -44,15 +44,18 @@ function fakePi() {
       sentMessages.push({ ...message, _options: options });
       if (!options?.triggerTurn) return;
       queueMicrotask(() => {
-        for (const handler of handlers.get("tool_result") ?? []) {
-          handler({
-            toolName: "__graph_complete__",
-            details: { status: "ok", result: { fromAgent: true } },
-          });
-        }
-        for (const handler of handlers.get("agent_end") ?? []) {
-          handler({});
-        }
+        void (async () => {
+          for (const handler of handlers.get("tool_result") ?? []) {
+            await handler({
+              toolName: "__graph_complete__",
+              input: { status: "ok", result: { fromAgent: true } },
+              details: undefined,
+            });
+          }
+          for (const handler of handlers.get("agent_end") ?? []) {
+            await handler({});
+          }
+        })();
       });
     }),
     sendUserMessage: vi.fn(),
@@ -312,25 +315,31 @@ describe("createLoopGraphExtension", () => {
       expect(pi.sendUserMessage).toHaveBeenCalledWith("GRAPH_FAIL:failure_format:broken");
     });
 
-    it("自定义 completion tool result 文本但保留 details", async () => {
+    it("自定义检查反馈文本，并以 Runtime 决策替换模型提交参数", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi, {
-        completionToolResultFormatter: ({ nodeId, status, result }) =>
-          `DONE:${nodeId}:${status}:${String(result.answer)}`,
+        completionFeedbackFormatter: ({ nodeId, decision }) =>
+          `CHECKED:${nodeId}:${decision.decision}`,
       });
       let toolPatch: any;
       const node: Node = {
         kind: "code", id: "complete_format", subGoal: "complete",
         async execute() {
-          toolPatch = pi.emit("tool_result", {
+          [toolPatch] = await pi.emitAsync("tool_result", {
             toolName: "__graph_complete__",
-            details: { status: "ok", result: { answer: 42 } },
+            input: { status: "ok", result: { answer: 42 } },
+            details: undefined,
           });
           return { nodeId: "complete_format", status: "ok", result: {} };
         },
       };
       await loop.executeGraph(terminalGraph("completion_format", node), { source: "command", args: "" });
-      expect(toolPatch).toEqual({ content: [{ type: "text", text: "DONE:complete_format:ok:42" }] });
+      expect(toolPatch).toMatchObject({
+        content: [{ type: "text", text: "CHECKED:complete_format:rejected" }],
+        details: { decision: "rejected" },
+        isError: true,
+      });
+      expect(JSON.stringify(toolPatch)).not.toContain("answer");
     });
   });
 
@@ -554,6 +563,76 @@ describe("createLoopGraphExtension", () => {
       });
     });
 
+    it("自定义 renderer 不能移除活动 Agent Run 的输出契约", async () => {
+      const pi = fakePi();
+      let projected: any;
+      const lifecycle: any[] = [];
+      pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+        if (!options?.triggerTurn) return;
+        queueMicrotask(() => {
+          void (async () => {
+            pi.emit("session_compact", { reason: "contract-test", willRetry: false });
+            projected = pi.emit("context", { messages: [] });
+            await pi.emitAsync("tool_result", {
+              toolName: "__graph_complete__",
+              input: { status: "ok", result: { opaque_id: "id-1" } },
+              details: undefined,
+            });
+            await pi.emitAsync("agent_end", {});
+          })();
+        });
+      });
+      const loop = createLoopGraphExtension(pi, {
+        contextRenderer: () => null,
+        traceSink: (event) => { lifecycle.push(event); },
+      });
+      const node: Node = {
+        kind: "code",
+        id: "contract",
+        subGoal: "contract",
+        execute(_instance, _input, ctx) {
+          return ctx.runAgent({
+            prompt: "produce",
+            outputSchema: {
+              type: "object",
+              properties: { opaque_id: { type: "string" } },
+              required: ["opaque_id"],
+              additionalProperties: false,
+            },
+          });
+        },
+      };
+
+      const result = await loop.executeGraph(terminalGraph("contract_renderer", node), {
+        source: "command",
+        args: "",
+      });
+
+      expect(result.status).toBe("ok");
+      const contracts = projected.messages.filter((message: any) =>
+        message.customType === "loop_graph_output_contract"
+      );
+      expect(contracts).toHaveLength(1);
+      expect(contracts[0].content).toContain('"opaque_id"');
+      expect(contracts[0].content).toContain('"additionalProperties": false');
+      expect(lifecycle).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "output_contract.prepared",
+          graphId: "contract_renderer",
+          nodeId: "contract",
+          graphRunId: expect.any(String),
+          scopeId: expect.any(String),
+          agentRunId: 1,
+          schemaFingerprint: expect.any(String),
+          schemaBytes: expect.any(Number),
+        }),
+        expect.objectContaining({ type: "completion.submitted", reportedStatus: "ok" }),
+        expect.objectContaining({ type: "completion.validation_started", validatorStage: "outputSchema" }),
+        expect.objectContaining({ type: "completion.accepted", completionStatus: "ok" }),
+      ]));
+      expect(JSON.stringify(lifecycle)).not.toContain("opaque_id\":\"id-1");
+    });
+
     it("自定义 renderer 与现有 frameFormatter 可以共同工作", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi, {
@@ -586,6 +665,72 @@ describe("createLoopGraphExtension", () => {
       const text = projected.messages.map((message: any) => String(message.content)).join("\n");
       expect(text).toContain("MEMORY:first done");
       expect(text).toContain("NOW:second");
+    });
+
+    it("连续两个 Agent 节点只看到各自的输出契约", async () => {
+      const pi = fakePi();
+      const contracts: string[] = [];
+      let activeResult: Record<string, unknown> = {};
+      pi.sendMessage.mockImplementation((message: any, options?: { triggerTurn?: boolean }) => {
+        if (message.customType === "loop_graph_output_contract") {
+          contracts.push(String(message.content));
+          activeResult = String(message.content).includes('"first_value"')
+            ? { first_value: true }
+            : { second_value: 2 };
+        }
+        if (!options?.triggerTurn) return;
+        queueMicrotask(() => {
+          void (async () => {
+            await pi.emitAsync("tool_result", {
+              toolName: "__graph_complete__",
+              input: { status: "ok", result: activeResult },
+              details: undefined,
+            });
+            await pi.emitAsync("agent_end", {});
+          })();
+        });
+      });
+      const loop = createLoopGraphExtension(pi);
+      const first: Node = {
+        kind: "code", id: "first_contract", subGoal: "first",
+        execute: (_instance, _input, ctx) => ctx.runAgent({
+          prompt: "first",
+          outputSchema: {
+            type: "object",
+            properties: { first_value: { type: "boolean" } },
+            required: ["first_value"],
+          },
+        }),
+      };
+      const second: Node = {
+        kind: "code", id: "second_contract", subGoal: "second",
+        execute: (_instance, _input, ctx) => ctx.runAgent({
+          prompt: "second",
+          outputSchema: {
+            type: "object",
+            properties: { second_value: { type: "number" } },
+            required: ["second_value"],
+          },
+        }),
+      };
+      const graph: Graph = {
+        id: "two_contract_nodes",
+        goal: "contract isolation",
+        entries: [{ id: "entry", guard: () => true, startNodeId: first.id }],
+        nodes: { [first.id]: first, [second.id]: second },
+        routing: {
+          [first.id]: { nodeId: first.id, router: { kind: "first-match" }, edges: [edgeToNext(first.id, second.id)] },
+          [second.id]: { nodeId: second.id, router: { kind: "first-match" }, edges: [edgeToEnd(second.id)] },
+        },
+      };
+
+      await expect(loop.executeGraph(graph, { source: "command", args: "" }))
+        .resolves.toMatchObject({ status: "ok", result: { second_value: 2 } });
+      expect(contracts).toHaveLength(2);
+      expect(contracts[0]).toContain('"first_value"');
+      expect(contracts[0]).not.toContain('"second_value"');
+      expect(contracts[1]).toContain('"second_value"');
+      expect(contracts[1]).not.toContain('"first_value"');
     });
 
     it("嵌套 compose 返回父节点时，scope recovery 使用父 renderer 而不是子节点载荷", async () => {
@@ -1183,7 +1328,15 @@ describe("createLoopGraphExtension", () => {
         id: "child_agent",
         subGoal: "子图 agent 节点",
         async execute(_instance, _input, ctx) {
-          return ctx.runAgent({ prompt: "run child agent" });
+          return ctx.runAgent({
+            prompt: "run child agent",
+            outputSchema: {
+              type: "object",
+              properties: { fromAgent: { type: "boolean" } },
+              required: ["fromAgent"],
+              additionalProperties: false,
+            },
+          });
         },
       };
 
@@ -1263,6 +1416,11 @@ describe("createLoopGraphExtension", () => {
         result: { fromAgent: true },
         steps: 1,
       });
+      const contracts = pi._sentMessages.filter((message: any) =>
+        message.customType === "loop_graph_output_contract"
+      );
+      expect(contracts).toHaveLength(1);
+      expect(contracts[0].content).toContain('"fromAgent"');
     });
 
     it("call 子图复用同一 Runtime callStack，子 Instance 与父 Instance 仍隔离", async () => {
@@ -1348,11 +1506,19 @@ describe("createLoopGraphExtension", () => {
 
       const child = terminalGraph("compose_child", {
         kind: "code", id: "child_work", subGoal: "child",
-        async execute(instance) {
+        async execute(instance, _input, ctx) {
           childInstanceId = instance.id;
           childSawParentFrame = instance.frames.some((frame) => frame.nodeId === "prepare");
           instance.scratch.child = "shared";
-          return { nodeId: "child_work", status: "ok", result: { child: true } };
+          return ctx.runAgent({
+            prompt: "compose child",
+            outputSchema: {
+              type: "object",
+              properties: { fromAgent: { type: "boolean" } },
+              required: ["fromAgent"],
+              additionalProperties: false,
+            },
+          });
         },
       });
       const parent: Graph = {
@@ -1397,6 +1563,11 @@ describe("createLoopGraphExtension", () => {
         ["prepare", 1], ["compose", 1], ["child_work", 2], ["finish", 1],
       ]);
       expect(scopes[2].instanceId).toBe(scopes[0].instanceId);
+      const contracts = pi._sentMessages.filter((message: any) =>
+        message.customType === "loop_graph_output_contract"
+      );
+      expect(contracts).toHaveLength(1);
+      expect(contracts[0].content).toContain('"fromAgent"');
     });
 
     it("custom fold 仅接收冻结快照，并可显式传出完整 segment", async () => {
@@ -2924,9 +3095,9 @@ describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
           type: "tool_result",
           toolCallId: `complete-${sequence}`,
           toolName: "__graph_complete__",
-          input: {},
+          input: { status: "ok", result: { sequence } },
           content: [{ type: "text", text: "done" }],
-          details: { status: "ok", result: { sequence } },
+          details: undefined,
           isError: false,
         });
         await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
@@ -2998,9 +3169,9 @@ describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
           type: "tool_result",
           toolCallId: "complete-1",
           toolName: "__graph_complete__",
-          input: {},
+          input: { status: "ok", result: {} },
           content: [{ type: "text", text: "done" }],
-          details: { status: "ok", result: {} },
+          details: undefined,
           isError: false,
         });
         await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
@@ -3060,8 +3231,8 @@ describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
           else readExecuted = true;
         }
         await pi.emitAsync("tool_result", {
-          type: "tool_result", toolCallId: "complete", toolName: "__graph_complete__", input: {},
-          content: [], details: { status: "ok", result: {} }, isError: false,
+          type: "tool_result", toolCallId: "complete", toolName: "__graph_complete__",
+          input: { status: "ok", result: {} }, content: [], details: undefined, isError: false,
         });
         await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
       });
@@ -3126,6 +3297,7 @@ describe("Mechanism Phase 5-6 lifecycle 与安全能力", () => {
 describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
   it("异步真实验收可 reject 后重试，并把可信结果与 AI result 分离", async () => {
     const pi = fakePi();
+    const lifecycle: any[] = [];
     let turn = 0;
     let execCount = 0;
     let activeValidations = 0;
@@ -3139,24 +3311,26 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
     }));
     pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
       if (!options?.triggerTurn) return;
-      const currentTurn = ++turn;
       queueMicrotask(async () => {
-        await pi.emitAsync("tool_result", {
-          type: "tool_result",
-          toolCallId: `complete-${currentTurn}`,
-          toolName: "__graph_complete__",
-          input: {},
-          content: [],
-          details: {
-            status: "ok",
-            result: { testsPassed: 999, verifiedResult: { forged: true } },
-          },
-          isError: false,
-        });
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          turn += 1;
+          const [patch] = await pi.emitAsync("tool_result", {
+            type: "tool_result",
+            toolCallId: `complete-${attempt}`,
+            toolName: "__graph_complete__",
+            input: { status: "ok", result: { testsPassed: 999, verifiedResult: { forged: true } } },
+            content: [],
+            details: undefined,
+            isError: false,
+          });
+          if ((patch as any)?.details?.decision === "accepted") break;
+        }
         await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
       });
     });
-    const loop = createLoopGraphExtension(pi);
+    const loop = createLoopGraphExtension(pi, {
+      traceSink: (event) => { lifecycle.push(event); },
+    });
     const graph = minimalGraph("phase7_async_gate");
     graph.mechanisms = [{
       name: "real-tests",
@@ -3198,6 +3372,19 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
         result: { exitCode: 0, output: "8 tests passed" },
       }],
     });
+    expect(lifecycle).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "completion.rejected",
+        validatorStage: "mechanism",
+        reason: "真实测试未通过",
+        durationMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        type: "completion.accepted",
+        completionStatus: "ok",
+        durationMs: expect.any(Number),
+      }),
+    ]));
   });
 
   it("completion gate 的 fail-graph 进入 Runtime 控制路径", async () => {
@@ -3250,8 +3437,9 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
       if (!options?.triggerTurn) return;
       queueMicrotask(async () => {
         await pi.emitAsync("tool_result", {
-          type: "tool_result", toolCallId: "failed", toolName: "__graph_complete__", input: {},
-          content: [], details: { status: "failed", result: { reason: "agent failed" } }, isError: true,
+          type: "tool_result", toolCallId: "failed", toolName: "__graph_complete__",
+          input: { status: "failed", result: { reason: "agent failed" } },
+          content: [], details: undefined, isError: true,
         });
         await pi.emitAsync("agent_end", { type: "agent_end", messages: [] });
       });

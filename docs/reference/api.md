@@ -41,7 +41,7 @@ function createAgentExecute(
 | `prompt` | `string \| (input: NodeInput) => string` | 可选。构造传给 LLM 的 prompt；省略时使用 SDK 默认提示。`input.data` 不会自动注入，必须显式传递。 |
 | `skill` | `string` | 关联的 skill 名称。 |
 | `tools` | `string[]` | **已废弃且不生效**。使用 `Node.tools` 声明。 |
-| `outputSchema` | `object` | JSON Schema，LLM 结果不符时自动驳回重试。 |
+| `outputSchema` | `object` | 单次 Agent Run 的 JSON Schema；首个 turn 前对模型可见，结果不符时即时驳回。 |
 | `validateCompletion` | `(result) => CompletionValidationResult` | 自定义验证函数。 |
 
 ---
@@ -243,10 +243,12 @@ interface NodeContext {
 interface AgentRunRequest {
   prompt: string;
   skill?: string;
-  outputSchema?: unknown;
+  outputSchema?: JsonSchema;
   validateCompletion?: (result) => CompletionValidationResult;
 }
 ```
+
+`outputSchema` 是单次 Agent Run 的输出契约。SDK 在首个 turn 前让模型看到完整 schema，并在完成提交时用同一份 schema 校验；它不是 Node 级固定工具 schema。
 
 > `tools` 字段已废弃，工具集由 `Node.tools` 统一声明。
 
@@ -404,9 +406,11 @@ interface MechanismExec {
 | `EdgeChoice` | agent-choice 渲染上下文中的只读候选边摘要。 |
 | `NodeContextRenderInput` / `NodeContextRenderer` | 节点上下文渲染器输入与函数类型。 |
 | `RenderedContextContentBlock` / `RenderedContextMessage` / `RenderedNodeContext` | renderer 可返回的文本、图片和锚点结构。 |
-| `ModelMessageFormatter` | validation retry、节点未完成、dead-run 和图失败文案集合。 |
-| `ValidationRetryMessageInput` / `IncompleteNodeMessageInput` / `DeadRunMessageInput` / `GraphFailureMessageInput` | 上述四种 formatter 的只读输入。 |
-| `CompletionToolResultFormatter` / `CompletionToolResultInput` | `__graph_complete__` 工具结果文本 formatter 及输入。 |
+| `ModelMessageFormatter` | 节点未完成、dead-run 和图失败文案集合。 |
+| `IncompleteNodeMessageInput` / `DeadRunMessageInput` / `GraphFailureMessageInput` | 上述三种 formatter 的只读输入。 |
+| `CompletionFeedbackFormatter` / `CompletionFeedbackInput` | Runtime 检查完成提交后的模型反馈 formatter；输入不包含 Agent 原始参数。 |
+| `CompletionSubmission` / `CompletionSubmissionDecision` | Agent 的不可信候选提交，以及 Runtime 的接受、拒绝或验收失败决定。 |
+| `JsonSchema` / `PreparedOutputContract` | Agent Run 输出契约类型及规范化后的内部契约。 |
 
 ### Skill、工具解析与观测类型
 
@@ -416,7 +420,8 @@ interface MechanismExec {
 | `SkillContentRenderer` | 把已加载正文转换为模型可见内容。 |
 | `SkillFailurePolicy` / `SkillFailurePolicies` | skill 缺失或加载错误的处理策略。 |
 | `ToolResolver` / `ToolResolverInput` | 接收默认、节点、框架工具及图/节点身份，返回候选工具名。 |
-| `LoopGraphLifecycleEvent` | `graph_start/end/error`、`node_enter/exit`、`compaction` 的只读联合类型。 |
+| `LoopGraphLifecycleEvent` | graph、node、compaction、输出契约和完成验收事件的只读联合类型。 |
+| `AgentRunLifecycleContext` | Agent Run 事件共有的 graphRunId、scopeId、agentRunId 等关联字段。 |
 | `LoopGraphTraceSink` / `LoopGraphLogger` | 结构化事件 sink 与 debug/error logger。 |
 
 ### 校验与独立执行类型

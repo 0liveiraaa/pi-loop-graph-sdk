@@ -325,15 +325,16 @@ describe("compaction 事件形态模拟", () => {
         sentMessages.push({ ...message, _opts: options });
         if (!options?.triggerTurn) return;
         queueMicrotask(() => {
-          for (const handler of handlers.get("tool_result") ?? []) {
-            handler({
-              toolName: "__graph_complete__",
-              details: { status: "ok", result: { fromAgent: true } },
-            });
-          }
-          for (const handler of handlers.get("agent_end") ?? []) {
-            handler({});
-          }
+          void (async () => {
+            for (const handler of handlers.get("tool_result") ?? []) {
+              await handler({
+                toolName: "__graph_complete__",
+                input: { status: "ok", result: { fromAgent: true } },
+                details: undefined,
+              });
+            }
+            for (const handler of handlers.get("agent_end") ?? []) await handler({});
+          })();
         });
       }),
       sendUserMessage: vi.fn((content: string) => {
