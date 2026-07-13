@@ -10,7 +10,7 @@
   },
   "pi": {},
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run"
   },
   "devDependencies": {
