@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { selectEdge } from "./router.js";
-import type { AgentInstance, Edge, NodeCompletion, NodeRouting } from "./type.js";
-import { END } from "./type.js";
+import { selectEdge } from "../src/router.js";
+import type { AgentInstance, Edge, NodeCompletion, NodeRouting } from "../src/type.js";
+import { END } from "../src/type.js";
 
 const completion: NodeCompletion = {
   nodeId: "start",

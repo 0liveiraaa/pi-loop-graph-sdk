@@ -6,11 +6,11 @@ import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLoopGraphExtension } from "./loop-graph-extension.js";
-import type { LoopGraphExtension } from "./loop-graph-extension.js";
-import { debugLog } from "./debug-log.js";
-import type { Graph, Edge, Entry, Mechanism, Node } from "../type.js";
-import { END } from "../type.js";
+import { createLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import type { LoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import { debugLog } from "../../src/adapter/debug-log.js";
+import type { Graph, Edge, Entry, Mechanism, Node } from "../../src/type.js";
+import { END } from "../../src/type.js";
 
 // ── 帮助函数：构造最小 fake pi 对象 ──
 

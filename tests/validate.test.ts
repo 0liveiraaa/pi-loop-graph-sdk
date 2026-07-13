@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { assertValidGraph, validateGraph, validateGraphTools } from "./validate.js";
-import type { Edge, Entry, Graph, Node } from "./type.js";
-import { END } from "./type.js";
+import { assertValidGraph, validateGraph, validateGraphTools } from "../src/validate.js";
+import type { Edge, Entry, Graph, Node } from "../src/type.js";
+import { END } from "../src/type.js";
 
 function node(id: string): Node {
   return {

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Graph, GraphRunRequest, GraphRunResult } from "../type.js";
+import type { Graph, GraphRunRequest, GraphRunResult } from "../../src/type.js";
 import {
   IsolatedSessionGraphHost,
   normalizeGraphRunRequest,
   type IsolatedGraphSession,
-} from "./graph-execution-host.js";
+} from "../../src/adapter/graph-execution-host.js";
 
 const graph = { id: "g" } as Graph;
 const request = (): GraphRunRequest => ({

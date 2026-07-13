@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { GraphRegistry } from "./registry.js";
-import type { Edge, Entry, Graph, Node } from "./type.js";
-import { END } from "./type.js";
+import { GraphRegistry } from "../src/registry.js";
+import type { Edge, Entry, Graph, Node } from "../src/type.js";
+import { END } from "../src/type.js";
 
 function fakePi() {
   return {

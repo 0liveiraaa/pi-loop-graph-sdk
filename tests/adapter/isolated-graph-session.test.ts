@@ -4,10 +4,10 @@
 
 import { describe, expect, it, beforeAll, vi } from "vitest";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Mechanism, Node, NodeCompletion, NodeInput } from "../type.js";
-import { END } from "../type.js";
-import { createIsolatedGraphSessionFactory } from "./isolated-graph-session.js";
-import type { IsolatedGraphSessionFactoryOptions } from "./isolated-graph-session.js";
+import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Mechanism, Node, NodeCompletion, NodeInput } from "../../src/type.js";
+import { END } from "../../src/type.js";
+import { createIsolatedGraphSessionFactory } from "../../src/adapter/isolated-graph-session.js";
+import type { IsolatedGraphSessionFactoryOptions } from "../../src/adapter/isolated-graph-session.js";
 
 // ── 共享基础设施 ──
 

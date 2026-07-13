@@ -23,11 +23,11 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLoopGraphExtension } from "./loop-graph-extension.js";
-import type { Edge, Entry, Graph, Node } from "../type.js";
-import { END } from "../type.js";
-import { projectMessages } from "./projection.js";
-import type { MessageEntry } from "./projection.js";
+import { createLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import type { Edge, Entry, Graph, Node } from "../../src/type.js";
+import { END } from "../../src/type.js";
+import { projectMessages } from "../../src/adapter/projection.js";
+import type { MessageEntry } from "../../src/adapter/projection.js";
 
 // ── 帮助函数 ──
 

@@ -7,7 +7,7 @@
 // ============================================================
 
 import { describe, expect, it } from "vitest";
-import { resolveNodeTools } from "./tools-resolve.js";
+import { resolveNodeTools } from "../src/tools-resolve.js";
 
 describe("resolveNodeTools", () => {
   // ── 基本合并 ──

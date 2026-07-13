@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCompleteTool } from "./complete-tool.js";
-import { PiNodeContext } from "./pi-node-context.js";
+import { createCompleteTool } from "../../src/adapter/complete-tool.js";
+import { PiNodeContext } from "../../src/adapter/pi-node-context.js";
 
 function fakePi() {
   const sent: Array<{ message: any; options: any }> = [];

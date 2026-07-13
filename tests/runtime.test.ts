@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { GraphRuntime } from "./runtime.js";
-import type { ContextFrame, Edge, Entry, Graph, Node } from "./type.js";
-import { END } from "./type.js";
+import { GraphRuntime } from "../src/runtime.js";
+import type { ContextFrame, Edge, Entry, Graph, Node } from "../src/type.js";
+import { END } from "../src/type.js";
 
 function minimalGraph(): Graph {
   const node: Node = {

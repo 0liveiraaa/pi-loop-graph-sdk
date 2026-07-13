@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { projectMessages, stripClosedGraphCalls, type MessageEntry } from "./projection.js";
-import type { ContextFrame, Node } from "../type.js";
-import type { NodeScopeDescriptor } from "../runtime.js";
+import { projectMessages, stripClosedGraphCalls, type MessageEntry } from "../../src/adapter/projection.js";
+import type { ContextFrame, Node } from "../../src/type.js";
+import type { NodeScopeDescriptor } from "../../src/runtime.js";
 
 const agentNode = (id: string): Node => ({
   kind: "code", id, subGoal: `子目标-${id}`, tools: ["some_tool"],
