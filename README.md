@@ -1,39 +1,66 @@
-# Loop Graph SDK — 基于 pi 的 Agent 编排框架
+# Loop Graph SDK
 
-Loop Graph SDK 是一个基于 [pi](https://github.com/earendil-works/pi-mono) 的**单 Agent 串行图编排框架**，将多步骤 agent 工作流建模为可执行的回路图。
+面向 pi 的单 Agent、串行、可循环图编排 SDK。
 
----
+> **版本状态：alpha。** 这是首个测试版本，API 仍可能调整，不承诺生产稳定。
 
-## 当前定位
+Loop Graph SDK 让开发者用代码把复杂任务拆成明确阶段。每个阶段可以运行普通代码、调用 Agent 或调用子图；阶段完成后，由显式路由决定下一步、保留哪些工作记忆以及是否形成循环。
 
-本 SDK **只做一件事**：让开发者用代码定义一张有向图，agent 按图一步步执行，每步可以调 LLM、跑代码或调用子图。
+## 适合什么
 
-它适用于所有**串行多步骤**场景：复习助手、文档审查、代码审查、数据流水线等。
+- 多阶段生成、检查、修改和再次检查；
+- 代码处理与 Agent 推理混合的串行流程；
+- 根据完成结果选择下一阶段或返回重试；
+- 为不同节点声明工具，并增加工具门禁、自动验收和审计；
+- 通过子图复用一组阶段，同时明确控制上下文共享边界。
 
+## 核心能力
 
----
+- **两类节点**：code node 执行代码或 Agent，graph node 调用子图。
+- **条件路由和循环**：根据阶段完成结果选择边，也可以返回先前节点。
+- **代码与 Agent 混合**：同一 code node 内可以准备数据、调用 Agent、再处理结果。
+- **自动验证**：输出格式、自定义验证和外部可信验收可以阻止不合格结果放行。
+- **工具控制**：节点声明可用工具，横切扩展可以拒绝、修改或脱敏工具调用。
+- **上下文定制**：控制当前任务说明和已完成工作记忆如何呈现给 Agent。
+- **三种子图边界**：call、compose 和 delegate 提供不同程度的共享与隔离。
 
-## 最小可运行示例
+## 安装
 
-以下是一个两节点图：接收输入 → 复述 → 结束。**复制后即可运行。**
+作为 library 依赖安装：
+
+```bash
+npm install git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1
+```
+
+如果只想体验 SDK 自带的测试图，也可以作为 pi extension 安装：
+
+```bash
+pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
+```
+
+## 最小示例
+
+下面是一张单节点图：接收 `/hello` 的参数，让 Agent 打招呼，然后通过 `END` 返回结果。
 
 ### 1. 定义图
 
+创建 `hello-graph.ts`：
+
 ```typescript
-// hello-graph.ts
-import { createAgentExecute, END } from "pi-loop-graph-sdk";
+import { END, createAgentExecute } from "pi-loop-graph-sdk";
 import type { Edge, Entry, Graph, Node } from "pi-loop-graph-sdk";
 
-// 节点：接收用户输入并复述
 const greetNode: Node = {
   kind: "code",
   id: "greet",
-  subGoal: "接收用户输入并复述",
-  execute: createAgentExecute(),
+  subGoal: "根据用户提供的名字打招呼",
+  execute: createAgentExecute({
+    prompt: (input) =>
+      `请用一句简短的话向 ${String(input.data.name ?? "世界")} 打招呼。`,
+  }),
 };
 
-// 边：完成后结束
-const doneEdge: Edge = {
+const done: Edge = {
   id: "done",
   from: "greet",
   to: END,
@@ -42,218 +69,115 @@ const doneEdge: Edge = {
   migrate(_instance, completion) {
     return {
       frame: {
-        nodeId: completion.nodeId,
+        greetingOutcome: completion.result,
+      },
+      output: {
         status: completion.status,
-        summary: "问候完成",
         result: completion.result,
       },
     };
   },
 };
 
-// 入口
 const entry: Entry = {
   id: "main",
   guard: () => true,
   startNodeId: "greet",
+  mapInput: (background) => ({
+    name: String(background.name ?? "世界"),
+  }),
 };
 
-// 导出图定义
 export const helloGraph: Graph = {
   id: "hello_world",
-  goal: "简单的问候图",
+  goal: "向用户指定的人打招呼",
   invocation: {
     name: "hello",
-    description: "问候测试",
-    inputSchema: { type: "object", properties: { name: { type: "string" } } },
-    parseArgs: (a) => ({ name: a || "世界" }),
+    description: "生成一句问候",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+      },
+      required: ["name"],
+    },
+    parseArgs: (args) => ({ name: args.trim() || "世界" }),
   },
   entries: [entry],
-  nodes: { greet: greetNode },
+  nodes: {
+    greet: greetNode,
+  },
   routing: {
     greet: {
       nodeId: "greet",
-      edges: [doneEdge],
+      edges: [done],
       router: { kind: "first-match" },
     },
   },
 };
 ```
 
+`frame` 是留给后续阶段的业务工作记忆，结构由图作者定义。`output` 明确声明整张图返回的状态和结果。
+
 ### 2. 注册到 pi extension
 
-```typescript
-// my-extension.ts
-import { createLoopGraphExtension } from "pi-loop-graph-sdk";
-import { helloGraph } from "./hello-graph";
+创建 `my-extension.ts`：
 
-export default function myExtension(pi) {
+```typescript
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLoopGraphExtension } from "pi-loop-graph-sdk";
+import { helloGraph } from "./hello-graph.js";
+
+export default function myExtension(pi: ExtensionAPI): void {
   const loop = createLoopGraphExtension(pi);
   loop.registerGraph(helloGraph);
 }
 ```
 
-### 3. 运行
+将这个入口加入你的 pi extension 配置，启动 pi 后运行：
 
-```bash
-# pi 中直接调用
+```text
 /hello 世界
-# → agent 复述：你好，世界！
 ```
 
----
+完整的项目配置和执行过程见[十分钟快速开始](docs/getting-started.md)。
 
-## 当前能力
+## 子图边界
 
-### 图定义
+| 边界 | 何时使用 |
+| --- | --- |
+| `call` | 默认选择。复用当前执行会话，但子图使用新的逻辑工作实例和工作记忆。 |
+| `compose` | 子图必须读取父级工作记忆，或作为父节点的内部实现展开。 |
+| `delegate` | 子任务需要独立执行会话和独立上下文生命周期。 |
 
-| 能力           | 说明                                                                     |
-| -------------- | ------------------------------------------------------------------------ |
-| **节点** | `code` 节点（LLM 推理 + 任意 JavaScript）和 `graph` 节点（引用子图） |
-| **边**   | 条件守卫（`guard`）+ 历史折叠（`migrate`）+ 目标指向                 |
-| **路由** | 优先级优先、首匹配、Agent 自主选择、自定义函数                           |
-| **入口** | 多入口，按入参条件匹配                                                   |
-| **出口** | `END` 标记终止，可声明对外返回结果                                     |
+三种边界当前都会沿单一路径等待子图完成；delegate 不代表并行调度。
 
-### 节点执行
+## 当前限制
 
-| 能力               | 说明                                                                        |
-| ------------------ | --------------------------------------------------------------------------- |
-| **LLM 推理** | `createAgentExecute()` 工厂，可选 skill、prompt 模板、输出 schema         |
-| **纯代码**   | execute 内可直接使用任意 Node.js API（fs、fetch、child_process）            |
-| **混合**     | 一次 execute 内多次调用`runAgent()` 与代码穿插                            |
-| **完成验证** | 输出 schema 校验 → 自定义 validateCompletion → Mechanism gate → 路由校验 |
+- 同一图运行始终只推进一条节点路径，不支持 fork/join 并行分支。
+- 不提供多个独立 Agent 之间的通讯和协作协议。
+- 不提供进程或会话结束后的图运行恢复。
+- 同一 `LoopGraphExtension` 实例不支持并发顶层执行。
+- 当前是 alpha 版本；在生产使用前，应自行完成安全评估、故障处理和稳定性验证。
 
-### 子图组合
+## 文档
 
-| 方式         | 隔离级别                           | 适用场景               |
-| ------------ | ---------------------------------- | ---------------------- |
-| `call`     | 独立工作区（历史不可见）           | 通用子任务             |
-| `compose`  | 共享工作区（历史可见，退出时压缩） | 以图代点的代码组织     |
-| `delegate` | 完全隔离的独立对话                 | 长任务、独立上下文管理 |
+| 目标 | 入口 |
+| --- | --- |
+| 完成第一个可运行 extension | [Getting Started](docs/getting-started.md) |
+| 理解图、状态和子图边界 | [Concepts](docs/concepts/) |
+| 按任务查找实现方法 | [Guides](docs/guides/) |
+| 查询 API、配置和错误行为 | [API Reference](docs/reference/) |
+| 了解内部设计与维护约束 | [Design](docs/design/core-design.md) |
 
-### 横切能力
-
-| 能力                       | 说明                                                                              |
-| -------------------------- | --------------------------------------------------------------------------------- |
-| **节点生命周期钩子** | `onNodeEnter`（进入前）、`onNodeExit`（完成后）、`onNodeError`（出错时）    |
-| **作用域生命周期**   | 每次节点执行获得独立 scope，包含取消信号、活跃检查、自动清理                      |
-| **失败策略**         | `continue`（继续）、`fail-node`（标记节点失败）、`fail-graph`（终止整张图） |
-| **私有状态**         | 按工作区 + 机制身份隔离，跨节点访问保留，不入 LLM 上下文                          |
-| **工具决策**         | 允许/拒绝/修改工具参数，按机制顺序组合，自动重验参数                              |
-| **完成验收**         | 异步 Gate 支持 allow/reject/fail-node/fail-graph，可信结果与 AI 结果分离          |
-| **事件订阅**         | `onToolResult`、`onTurnStart`、`onTurnEnd`，作用域关闭时自动取消            |
-| **外部命令**         | `exec.run()` 绑定取消信号、超时、工作目录和输出限制                             |
-
-### 上下文定制
-
-| 能力                   | 说明                                              |
-| ---------------------- | ------------------------------------------------- |
-| **节点指引渲染** | `contextRenderer` 自定义 LLM 看到的当前任务描述 |
-| **历史摘要格式** | `frameFormatter` 自定义已完成节点的展示格式     |
-| **Skill 加载**   | 异步 provider、自定义 renderer、缺失/错误策略     |
-| **LLM 消息文案** | 重试提示、恢复消息、完成消息均可定制              |
-
-### 运行控制
-
-| 能力                 | 说明                                                  |
-| -------------------- | ----------------------------------------------------- |
-| **步骤上限**   | `rootMaxSteps`（顶层图）、`childMaxSteps`（子图） |
-| **超时控制**   | `agentRunTimeoutMs` 单次 LLM 推理超时               |
-| **并发保护**   | 同一实例不允许并发顶层调用                            |
-| **debug 日志** | 自动生成 JSONL 日志文件                               |
-
----
-
-## 明确不支持的能力
-
-以下能力**不在当前范围内**，也不会在短期内添加：
-
-| 能力                           | 原因                                                             |
-| ------------------------------ | ---------------------------------------------------------------- |
-| **多 Agent 并行/通信**   | SDK 定位于单 Agent 串行编排。多 Agent 需要独立的通信协议和调度层 |
-| **Session 持久化**       | 所有状态存在于内存中。需要持久化的项目应自行实现存储层           |
-| **图拓扑的运行时热更新** | 图在注册期固化。运行时修改需要重新注册                           |
-| **fork/join 并行节点**   | 单 Agent 串行模型不支持同时进入多条后继边                        |
-
----
-
-## 安装
+## 开发检查
 
 ```bash
-# 作为 pi 扩展安装（用于测试和体验）
-pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
-
-# 作为 library 依赖（推荐用于业务项目）
-npm install git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1
-# 或在 package.json 中添加：
-# "dependencies": { "pi-loop-graph-sdk": "git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1" }
+npm test
+npm run typecheck
 ```
 
-## 测试
-
-```bash
-git clone https://github.com/0liveiraaa/pi-loop-graph-sdk
-cd pi-loop-graph-sdk
-npm install
-npm test -- --run
-```
-
-当前 277 项测试（14 个测试文件），包含真实 LLM 调用验证。
-
-```bash
-# 类型检查
-npx tsc --noEmit
-```
-
-## 文件结构
-
-```
-src/
-├── index.ts                       # 公开 API 导出入口
-├── type.ts                        # 核心类型定义
-│                                  # （Graph, Node, Edge, Entry, Router,
-│                                  #  Mechanism, AgentInstance, ...）
-├── runtime.ts                     # 运行时状态机（帧栈管理）
-├── registry.ts                    # 图注册表
-├── router.ts                      # 路由选择
-├── validate.ts                    # 图结构与工具校验
-├── agent-execute.ts               # execute 工厂函数
-├── tools-resolve.ts               # 工具列表合并与去重
-├── adapter/
-│   ├── loop-graph-extension.ts    # ★ 运行时工厂 createLoopGraphExtension()
-│   ├── mechanism-runtime.ts       #   Mechanism 生命周期、事件总线、状态管理
-│   ├── pi-node-context.ts         #   LLM 调用桥接（Promise + 验证）
-│   ├── complete-tool.ts           #   完成工具 __graph_complete__
-│   ├── projection.ts              #   上下文消息组装
-│   ├── model-messages.ts          #   LLM 消息文案定制
-│   ├── skill-content.ts           #   Skill 异步加载与渲染
-│   ├── graph-execution-host.ts    #   隔离执行宿主（delegate）
-│   ├── isolated-graph-session.ts  #   隔离会话工厂
-│   └── debug-log.ts               #   调试日志
-├── graphs/                        # 内置测试图
-│   ├── review-graph.ts
-│   ├── chain-graph.ts
-│   ├── subgraph-graph.ts
-│   └── ...
-docs/
-├── 设计/CONTEXT.md                # 术语表
-├── 设计/loop-graph-sdk-design.md  # 设计文档
-├── 形态/developer-guide.md        # 开发者指南
-├── 形态/implementation-status.md  # 实现状态
-└── adr/                           # 架构决策记录
-```
-
-## 下一步
-
-| 目标                    | 入口                                                                                     |
-| ----------------------- | ---------------------------------------------------------------------------------------- |
-| **理解核心概念**  | [术语表](docs/设计/CONTEXT.md)                                                            |
-| **阅读设计理念**  | [设计文档](docs/设计/loop-graph-sdk-design.md)                                            |
-| **学习 SDk 使用** | [开发者指南](docs/形态/developer-guide.md)                                                |
-| **查看实现状态**  | [实现形态](docs/形态/implementation-status.md)                                            |
-| **架构决策**      | [ADR 目录](docs/adr/)                                                                     |
-| **真实用例**      | [pi-review-agent](https://github.com/0liveiraaa/pi-review-agent)（基于本 SDK 的复习助手） |
+默认不会写调试日志文件。只有显式设置 `debug: true` 时，SDK 才启用 JSONL 生命周期日志。
 
 ## License
 
