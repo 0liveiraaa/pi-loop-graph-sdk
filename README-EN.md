@@ -25,7 +25,8 @@ Loop Graph SDK lets developers break complex tasks into explicit stages using a 
 - **Three subgraph boundaries**: `call`, `compose`, and `delegate` provide different levels of sharing and isolation.
 
 The entire SDK is built around a **stack frame** mental model: each node visit is a function call — accept arguments, execute, return results — and each Edge decides what to retain in the caller's persistent memory. See [Stack Frame](docs/concepts/stack-frame.md) for details.
-
+## The reference project
+[pi-study-helper](https://github.com/0liveiraaa/pi-study-helper) uses this SDK to accomplish internal workflow orchestration.
 ## Installation
 
 As a library dependency:
