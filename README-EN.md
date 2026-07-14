@@ -24,6 +24,8 @@ Loop Graph SDK lets developers break complex tasks into explicit stages using a 
 - **Context customization**: Control how task instructions and completed working memory are presented to agents.
 - **Three subgraph boundaries**: `call`, `compose`, and `delegate` provide different levels of sharing and isolation.
 
+The entire SDK is built around a **stack frame** mental model: each node visit is a function call — accept arguments, execute, return results — and each Edge decides what to retain in the caller's persistent memory. See [Stack Frame](docs/concepts/stack-frame.md) for details.
+
 ## Installation
 
 As a library dependency:
@@ -156,6 +158,7 @@ All three boundaries currently wait for the subgraph to complete along a single 
 | Goal                            | Entry                                       |
 | ------------------------------- | ------------------------------------------- |
 | First runnable extension        | [Getting Started](docs/getting-started.md)  |
+| Stack frame mental model        | [Stack Frame](docs/concepts/stack-frame.md) |
 | Graph model, state, boundaries  | [Concepts](docs/concepts/)                  |
 | Task-oriented guides            | [Guides](docs/guides/)                      |
 | API reference, config, errors   | [Reference](docs/reference/)                |

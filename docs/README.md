@@ -7,6 +7,7 @@
 ## 理解系统
 
 - [图模型](concepts/graph-model.md)
+- [栈帧：统一心智模型](concepts/stack-frame.md)
 - [上下文与状态](concepts/context-and-state.md)
 - [子图调用边界](concepts/subgraph-boundaries.md)
 - [Mechanism](concepts/mechanisms.md)
