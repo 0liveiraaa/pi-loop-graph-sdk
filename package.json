@@ -1,6 +1,7 @@
 {
   "name": "pi-loop-graph-sdk",
   "version": "0.1.1",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -19,6 +20,14 @@
     "dist/",
     "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0liveiraaa/pi-loop-graph-sdk.git"
+  },
+  "homepage": "https://github.com/0liveiraaa/pi-loop-graph-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/0liveiraaa/pi-loop-graph-sdk/issues"
+  },
   "pi": {},
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

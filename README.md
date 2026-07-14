@@ -1,5 +1,13 @@
 # Loop Graph SDK
 
+> **🌐 English:** This SDK is developed primarily by a Chinese-speaking developer, so the detailed documentation is currently in Chinese. If you're not familiar with Chinese, you can use AI assistants (such as the pi agent, ChatGPT, or Claude) to help translate or interpret the docs. The code examples and API signatures are in TypeScript and are language-agnostic.
+>
+> **Install:** `npm install git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1` or `pi install git:github.com/0liveiraaa/pi-loop-graph-sdk`
+>
+> See [README-EN.md](README-EN.md) for an English overview.
+
+---
+
 面向 pi 的单 Agent、串行、可循环图编排 SDK。
 
 > **版本状态：alpha。** 这是首个测试版本，API 仍可能调整。
