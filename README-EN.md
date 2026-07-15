@@ -1,6 +1,6 @@
 # Loop Graph SDK
 
-A single-agent, serial, loopable graph orchestration SDK for [pi](https://pi.dev).
+A serial, loopable graph orchestration SDK for [pi](https://pi.dev).
 
 > **Status: alpha.** This is the first test release; the API may still change.
 
