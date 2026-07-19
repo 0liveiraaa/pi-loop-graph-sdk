@@ -425,7 +425,7 @@ export interface MechanismContextAppender {
   append(content: MechanismContextContent): boolean;
 }
 
-export type MechanismFailurePolicy = "continue" | "fail-node" | "fail-graph";
+export type MechanismFailurePolicy = "continue" | "fail-node" | "fail-graph";//开发者注释:添加一个custom实现自己实现错误处理机制
 
 export interface MechanismCompletionView {
   readonly nodeId: string;
@@ -598,7 +598,7 @@ export interface MigrationResult {
  * Edge 独占三件事：
  *   1. guard   — 什么时候走这条边（只看 NodeCompletion）
  *   2. migrate — 栈顶层怎么折叠进历史，并可生成下一节点入参
- *   3. to      — 指向哪个节点（或 END 终止）
+ *   3. to      — 指向哪个节点（或 END 终止） //开发者注释:边不应该去管理from和to应该交给rout去做,node,edge应该被独立定义,然后用rout串起来,最后输入给图的只有rout和entry,保持代码高复用
  *
  * description 是边的可读描述，由开发者定义。
  * 当路由策略为 agent-choice 时 description 必填——
@@ -718,5 +718,6 @@ export interface Graph {
   nodes: Record<string, Node>;
   routing: Record<string, NodeRouting>;
   /** 全局横切机制。Runtime 压帧时赋给 AgentInstance.mechanisms，跨节点持续生效。 */
-  mechanisms?: Mechanism[];
+  mechanisms?: Mechanism[];//开发者注释:缺少全局的工具声明,该声明散落在register上,不合理
+  //开发者注释:存在有些类型已经被定义且固定,但是目前仍然使用unknow代替,需要清理完善
 }

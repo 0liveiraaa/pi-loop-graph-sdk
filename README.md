@@ -8,7 +8,7 @@
 
 ---
 
-面向 pi 的单 Agent、串行、可循环图编排 SDK。
+面向 pi 的串行、可循环图编排 SDK。
 
 > **版本状态：alpha。** 这是首个测试版本，API 仍可能调整。
 
@@ -172,14 +172,14 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 ## 文档
 
-| 目标                       | 入口                                      |
-| -------------------------- | ----------------------------------------- |
-| 完成第一个可运行 extension | [Getting Started](docs/getting-started.md) |
-| 理解图、状态和子图边界     | [Concepts](docs/concepts/)                 |
+| 目标                       | 入口                                       |
+| -------------------------- | ------------------------------------------ |
+| 完成第一个可运行 extension | [Getting Started](docs/getting-started.md)  |
+| 理解图、状态和子图边界     | [Concepts](docs/concepts/)                  |
 | 统一心智模型：栈帧         | [Stack Frame](docs/concepts/stack-frame.md) |
-| 按任务查找实现方法         | [Guides](docs/guides/)                     |
-| 查询 API、配置和错误行为   | [API Reference](docs/reference/)           |
-| 了解内部设计与维护约束     | [Design](docs/design/core-design.md)       |
+| 按任务查找实现方法         | [Guides](docs/guides/)                      |
+| 查询 API、配置和错误行为   | [API Reference](docs/reference/)            |
+| 了解内部设计与维护约束     | [Design](docs/design/core-design.md)        |
 
 ## 开发检查
 

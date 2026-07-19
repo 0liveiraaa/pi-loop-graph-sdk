@@ -1,6 +1,6 @@
 # Loop Graph SDK
 
-A single-agent, serial, loopable graph orchestration SDK for [pi](https://pi.dev).
+A serial, loopable graph orchestration SDK for [pi](https://pi.dev).
 
 > **Status: alpha.** This is the first test release; the API may still change.
 
@@ -135,11 +135,11 @@ For a complete project setup and walkthrough, see [Getting Started](docs/getting
 
 ## Subgraph Boundaries
 
-| Boundary   | When to Use                                                                      |
-| ---------- | -------------------------------------------------------------------------------- |
-| `call`     | Default. Reuses the current execution session with a fresh logical work instance. |
+| Boundary     | When to Use                                                                        |
+| ------------ | ---------------------------------------------------------------------------------- |
+| `call`     | Default. Reuses the current execution session with a fresh logical work instance.  |
 | `compose`  | Subgraph must read parent working memory, or is an internal implementation detail. |
-| `delegate` | Sub-task requires its own execution session and independent context lifecycle.    |
+| `delegate` | Sub-task requires its own execution session and independent context lifecycle.     |
 
 All three boundaries currently wait for the subgraph to complete along a single path; `delegate` does not imply parallel execution.
 
@@ -155,8 +155,8 @@ All three boundaries currently wait for the subgraph to complete along a single 
 
 > **Note:** The detailed developer documentation is currently written in Chinese, as the project is primarily developed by a Chinese-speaking developer. If you are not familiar with Chinese, you can use AI assistants (such as the pi agent itself, ChatGPT, or Claude) to help translate or interpret the documentation. The code examples and API signatures are in TypeScript and are language-agnostic.
 
-| Goal                            | Entry                                       |
-| ------------------------------- | ------------------------------------------- |
+| Goal                            | Entry                                      |
+| ------------------------------- | ------------------------------------------ |
 | First runnable extension        | [Getting Started](docs/getting-started.md)  |
 | Stack frame mental model        | [Stack Frame](docs/concepts/stack-frame.md) |
 | Graph model, state, boundaries  | [Concepts](docs/concepts/)                  |
