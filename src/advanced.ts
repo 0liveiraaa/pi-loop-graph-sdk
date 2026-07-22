@@ -27,6 +27,7 @@ export { ToolCatalog } from "./host/tool-catalog.js";
 export type { ToolImplementation } from "./host/tool-catalog.js";
 export { SkillCatalog } from "./host/skill-catalog.js";
 export type { SkillResolver } from "./host/skill-catalog.js";
+export { GraphCatalog } from "./host/graph-catalog.js";
 export { createJsonlTraceSink } from "./adapter/observability.js";
 export type {
   AgentRunLifecycleContext,
