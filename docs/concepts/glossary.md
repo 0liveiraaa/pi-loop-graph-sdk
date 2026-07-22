@@ -1,175 +1,103 @@
-# Loop Graph SDK 领域语言
+# Loop Graph SDK 术语表
 
-本文件只定义项目中的稳定术语和概念边界。使用方法、公共类型、实现协议和未来设想分别属于指南、参考文档、内部文档和研究文档。
+本文定义项目稳定的术语和概念边界。使用方法和类型签名分别属于指南和参考文档。
 
-每个词条后的“避免混称”列出不应与该术语混用的名称。
+## 图与执行
 
-## 图与执行流程
+**图定义（Graph Definition）**：一套可独立调用和复用的工作流定义，拥有目标、入口、阶段装配、工具权限和版本。通过 `defineGraph()` 创建。
 
-**回路图（Loop Graph / Graph）**：
-由入口、节点、边和路由规则组成的可执行任务流程；它允许通过边返回先前阶段，以显式表达跨阶段迭代。
-_避免混称_：工作流链、DAG、Skill 文档、ReAct 循环
+**图版本（Graph Version）**：同一 Graph ID 下的不可变修订身份，用于注册、调用和回放。表达先后关系，不承诺 SemVer 兼容。通过 `id` + `version` 唯一定位。
 
-**图调用（Graph Invocation）**：
-使用一组明确输入启动一张图并取得稳定业务结果的一次请求。
-_避免混称_：节点进入、工具调用、会话启动
+**图引用（GraphRef）**：`{ id: string; version: string }`，用于在图节点中引用子图。由 `graphRef(id, version)` 创建，由 Graph Catalog 解析。
 
-**入口（Entry）**：
-图对一次调用输入的匹配规则，以及匹配成功后选择的第一个节点。
-_避免混称_：START 节点、起始边、虚拟完成信号
+**元图（Meta-Graph）**：以生成或迭代其他 Graph Definition 为目标的图。SDK 尚未提供一等 API，但 Core 基础设施（Agent 推理、图验证、Catalog 注册）已可用于实验。
 
-**节点（Node）**：
-图中的一个可执行工作阶段；它可以运行普通代码、驱动 Agent，或调用另一张图。
-_避免混称_：节点会话、Prompt 模板、路由器
+**图输入（Graph Input）**：调用图时提供并经过 `input` schema 校验的完整结构化数据。Entry、Code Node 和 Transition 可读取。**不会整体自动进入模型上下文**。
 
-**节点访问（Node Visit）**：
-工作实例从进入某个节点到离开该节点的一次完整经历；同一节点可以因图上的循环被访问多次。
-_避免混称_：AgentSession、永久节点状态
+**背景上下文（Background）**：从 Graph Input 中通过 `background.select` 显式提取的模型可见投影。在一次 Graph Invocation 内保持不变。必填，必须写 `"all"`、`"none"` 或 selector 函数。
 
-**栈帧（Stack Frame）**：
-把一次图运行理解为调用栈的心智模型。每次节点访问压入一个栈帧（NodeInput 为入参、Completion 为返回值），Edge 选择保留什么写入调用者的持久 Frame，节点离开时弹出栈帧。详见[栈帧文档](stack-frame.md)。
-_避免混称_：NodeVisit 的物理实现、DeepTrack Frame、底层调用栈
+**图调用（Graph Invocation）**：一次使用明确输入启动图并取得结果的过程。拥有独立的目标投影和背景上下文。
 
-**进入序号（Visit）**：
-同一图运行中某个节点访问的顺序编号，主要用于区分重复进入和辅助诊断。
-_避免混称_：重试次数、Agent turn、图步骤总数
+**入口（Entry）**：图对调用输入的匹配规则及起始阶段。`entry.guard` 按数组顺序 first-match；`entry.mapInput` 为第一个节点构造输入。
 
-**Agent 运行（Agent Run）**：
-节点在一次访问中发起的一段 Agent 工作；一次节点访问可以依次发起多次 Agent 运行。
-_避免混称_：节点访问、图调用、单个 turn
+**阶段（Stage）**：图中把一个 Node Definition 与其出口 Route 装配在一起的位置。Stage ID 是图内唯一运行身份，使用 `Record<StageId, Stage>`。
 
-**完成提交（Completion Submission）**：
-Agent 调用 `__graph_complete__` 时提交的候选状态与结果；它是不可信输入，只有通过 Runtime 检查后才会形成节点完成信号。
-_避免混称_：Node Completion、可信验收结果、工具调用成功
+**节点定义（Node Definition）**：描述节点内部工作及可用能力的可复用定义。不持有图内位置或连接关系。分为 `agentNode`、`codeNode`、`graphNode` 三种。
 
-**完成信号（Node Completion）**：
-Runtime 接受节点产出后形成的状态和业务结果，供路由与迁移判断当前阶段如何结束。
-_避免混称_：Completion Submission、工作记忆帧、图返回、Agent 自由文本
+**Agent 节点（Agent Node）**：声明一次标准 Agent 工作（调用 LLM）的节点。由 Runtime 完成 Agent Run 和结果提交。通过 `agentNode({ subGoal, prompt, input, output, tools, skills, context })` 定义。
 
-**边（Edge）**：
-从一个节点到下一节点或图终点的迁移规则；它判断完成信号是否适用，并声明要留下的工作记忆和后继输入。
-_避免混称_：普通连线、路由器、节点执行逻辑
+**代码节点（Code Node）**：运行确定性代码或混合逻辑的节点。通过 `codeNode({ execute })` 定义。内部可通过 `runAgent()` 发起零次或多次 Agent Run。
 
-**路由器（Router）**：
-在一个节点可用的边中选择至多一条迁移路径的规则。
-_避免混称_：调度器、节点、Edge guard
+**图节点（Graph Node）**：通过 call、compose 或 delegate 调用另一张图的节点。通过 `graphNode({ graph: graphRef(...), boundary })` 定义。
 
-**图终点（END）**：
-表示图合法结束的专用目标，不是一个可执行节点。
-_避免混称_：结束节点、失败状态、无匹配边
+**节点子目标（Node Subgoal）**：当前节点在整张图目标下的局部目标。是 Node Definition 的稳定内容，会出现在模型上下文投影中。
 
-**图结果（Graph Run Result）**：
-一次图调用对外返回的图身份、状态、业务结果和步骤数；它不包含内部工作记忆或 Agent 对话轨迹。
-_避免混称_：Node Completion、ContextFrame、执行日志
+**节点输入（Node Input）**：Entry 或上一条 Connection 为一次 Node Visit 构造的完整结构化输入。生命周期只到当前访问结束。
 
-## 工作身份、会话与数据
+**节点焦点（Node Focus）**：从 Node Input 中通过 `focus.select` 显式提取的模型可见投影。Agent Node 默认 `"all"`，Code Node 默认 `"none"`。
 
-**逻辑工作实例（Agent Instance）**：
-在图中移动的一份逻辑工作身份，持有总体目标、已完成工作记忆和横切扩展状态。
-_避免混称_：AgentSession、模型客户端、全局单例
+**调用边界（Invocation Boundary）**：Graph Node 调用子图时选择的 call、compose 或 delegate 运行方式。属于调用位置，不属于被调用图定义。
 
-**执行会话（Execution Session / AgentSession）**：
-承载模型、消息流、工具和上下文压缩的物理运行环境；它与逻辑工作实例是两个不同边界。
-_避免混称_：Agent Instance、图运行结果、节点访问
+## 路由与迁移
 
-**图背景（Background）**：
-图调用开始时提供给整张图的稳定输入背景。
-_避免混称_：节点输入、工作记忆、Mechanism state
+**路由（Route）**：阶段出口的规则集合。`firstMatch` 按顺序取首个 guard 匹配的 Connection。
 
-**节点输入（Node Input）**：
-某次节点访问收到的一次性业务输入，来自图入口或上一条边。
-_避免混称_：图背景、跨节点持久状态、模型对话历史
+**连接（Connection）**：阶段出口到另一阶段或 `__graph_finish__` 的拓扑关系。持有目标 ID 和 Transition。
 
-**工作记忆帧（Context Frame）**：
-一个已完成阶段明确留给后续阶段的业务记忆；其内容由图作者定义，不具有固定业务字段。
-_避免混称_：Node Completion、完整 ReAct 轨迹、固定 summary/result 结构
+**迁移（Transition）**：Connection 的迁移策略。包含可选的 guard（条件）、frame（工作记忆）、map（下一节点输入映射）和 output（finish 时的图输出）。
 
-**模型上下文（Model Context）**：
-当前 Agent 运行实际可见的信息集合，包括当前任务说明和仍需保留的工作记忆。
-_避免混称_：AgentInstance 的全部字段、Runtime 内部状态、原始完整 transcript
+**`finish()`**：指向图终点的特殊 Connection。必须提供 `output` 函数显式产生符合 Graph output 契约的值。
 
-**横切状态（Mechanism State）**：
-某个横切扩展在同一逻辑工作实例内保留的私有代码侧状态；它不属于模型上下文，也不用于迁移业务数据。
-_避免混称_：Context Frame、Node Input、共享业务数据库
+## 数据与投影
 
-**可信验收结果（Verified Result）**：
-由受控验收过程产生、与 Agent 自报业务结果分离保存的可信检查结论。
-_避免混称_：Agent 自报 result、Node Completion 状态、日志摘要
+**上下文投影（Context Projection）**：`{ select, render }` 协议。`select` 决定哪些业务数据允许进入该层上下文，`render` 决定如何展示。三层投影：
 
-## 图调用边界
+- `Graph.context.background`：从 Graph Input 投影稳定图级信息
+- `Graph.context.memory`：从 Frames（已完成工作记忆）投影历史
+- `Node.context.focus`：从 Node Input 投影当前节点焦点
 
-**图调用边界（Graph Invocation Boundary）**：
-调用另一张图时，对执行会话、逻辑工作实例和工作记忆共享关系的明确选择。
-_避免混称_：图入口来源、命令模式、工具模式
+每一层 renderer 只能读取自己的 selected 数据和 meta，不能访问其他层。
 
-| 边界 | 执行会话 | 逻辑工作实例 | 父级工作记忆 |
-| --- | --- | --- | --- |
-| call | 复用 | 新建 | 不可见 |
-| compose | 复用 | 复用 | 可见；新增部分在退出时归约 |
-| delegate | 新建 | 新建 | 不可见 |
+**工作记忆（Frame）**：Transition 中通过 `frame()` 写入的持久数据。在整个 Graph Invocation 的后续节点中通过 Memory 投影可见。compose 子图共享父图 Frames。
 
-**组合（Compose）**：
-被调用图复用当前执行会话和逻辑工作实例，并在返回前把其临时工作记忆归约为调用方的一次阶段结果。
-_避免混称_：Call、Delegate、无边界内联
+**输出契约（Output Contract）**：Agent Node 的 `output` schema 同时驱动单次 Agent Run 的契约和 Node Completion 的校验来源。只在所属 Agent Run 中 sticky，run 结束立即删除。
 
-**调用（Call）**：
-被调用图复用当前执行会话，但使用新的逻辑工作实例；双方只通过明确输入和最终结果交换业务数据。
-_避免混称_：Compose、共享工作记忆子图
+## 工具与技能
 
-**委托（Delegate）**：
-被调用图使用新的执行会话和新的逻辑工作实例，形成最强的运行隔离。
-_避免混称_：普通子图、同会话调用、并行分支本身
+**Host 工具目录（Host Tool Catalog）**：真实工具实现的注册中心，构成最终能力边界。
 
-**帧段（Frame Segment）**：
-组合调用期间形成的一段临时工作记忆；组合结束时由自定义 `fold` 或默认规则整体归约，失败时回滚。
-_避免混称_：永久父级历史、子 AgentInstance、普通数组切片
+**图工具权限（Graph Tool Policy）**：图声明的业务工具可选全集。节点只能从中选择。通过 `tools: toolSet("read", "write")` 声明。
 
-## 横切扩展
+**节点工具集（Node Tool Set）**：节点从图权限中实际启用的工具集合。省略时无业务工具；`tools: "all"` 选择图声明的全部。
 
-**横切扩展（Mechanism）**：
-围绕节点工作过程提供观察、约束、验收或受控外部能力的可复用定义；它不选择下一节点，也不迁移业务状态。
-_避免混称_：Router、Node executor、中间件总线、隐式业务流程
+**协议工具（Protocol Tool）**：Runtime 强制提供的工具。当前仅 `__graph_complete__`。
 
-**横切扩展调用（Mechanism Invocation）**：
-某个横切扩展在一次节点访问中的临时运行身份，其资源随该次访问结束。
-_避免混称_：Mechanism 定义、跨节点后台任务、永久事件监听器
+**SkillRef**：对 Skill 的结构化引用（name、version、required）。Graph 和 Node 可声明 `skills: [skillRef(...)]`。由 Host Skill Catalog 解析。
 
-**节点执行周期（Mechanism Scope / Scope）**：
-某个横切扩展在一次节点访问中可以安全产生作用的有效生命周期；每个生效的 Mechanism 都有自己的 scope，节点访问结束后，其中的订阅、取消和清理关系同时失效。
-_避免混称_：AgentSession、GraphCallScope、业务权限范围
+## Mechanism
 
-**观察 Hook（Observation Hook）**：
-读取节点、Agent、turn 或工具生命周期信息，但不直接改变被观察行为结果的接入点。
-_避免混称_：决策 Hook、裸事件监听器、Router guard
+**Mechanism**：作用于图运行过程的横切扩展。三层安装：
 
-**决策 Hook（Decision Hook）**：
-通过有限、明确的决定允许、拒绝或受控修改某个 Agent 行为的接入点。
-_避免混称_：任意对象修改、完整 Runtime 控制、Edge 迁移
+- **Host Mechanism**：作用于整个 Root Run 及所有子调用，不可被调用边界绕过
+- **Graph Mechanism**：作用于当前图，进入子图后由子图自身的 Graph Mechanism 接管
+- **Node Mechanism**：作用于当前 Node Visit，同一次访问的多次 Agent Run 共享状态
 
-**托管能力（Managed Capability）**：
-由 SDK 约束生命周期、取消、输出边界或组合顺序的 Mechanism 能力。
-_避免混称_：裸 pi 能力、全局副作用、无所有者后台任务
+每个 Mechanism 的生命周期和 state 由安装位置决定。
 
-**非托管能力（Unmanaged Capability / `ctx.pi`）**：
-横切扩展直接使用底层 pi API 的完整能力；其副作用、资源所有权和冲突处理由扩展作者承担。
-_避免混称_：自动获得节点周期安全保证的 API
+Hook 顺序：进入 Host→Graph→Node，退出 Node→Graph→Host。Host 拥有最终否决权。
 
-## 当前范围边界
+## 执行与结果
 
-**串行 Agent 编排（Serial Agent Orchestration）**：
-同一图运行在任一时刻只推进一条节点路径，节点及其 Agent 运行按确定顺序完成。
-_避免混称_：fork/join、并行分支、多 Agent 调度
+**执行 Host（Execution Host）**：承载图运行所需模型会话、工具实现、限制、持久化和生命周期的运行环境。通过 `createGraphHost()` 创建。一个 Host 同时只允许一个 Root Run。
 
-**多 Agent 通讯（Multi-Agent Communication）**：
-多个独立 Agent 之间的寻址、消息交换和共享协作模型；当前 SDK 不提供此能力。
-_避免混称_：Mechanism events、子图调用、delegate 隔离
+**GraphRunResult**：`completed | failed | cancelled` 判别联合。成功分支使用 `output`，失败分支使用 `failure`（包含稳定 code、phase、retryable、stageId）。
 
-**会话恢复（Session Resume）**：
-在进程或会话结束后恢复未完成图运行及其工作记忆的能力；它不属于当前 SDK 的能力承诺。
-_避免混称_：compaction、同一运行内的子图返回、节点循环
+**稳定 failure code**：`invalid-graph`、`invalid-input`、`entry-not-found`、`tool-unavailable`、`host-unavailable`、`agent-timeout`、`agent-ended-without-completion`、`validation-exhausted`、`max-steps-exceeded`、`no-route`、`transition-failed`、`mechanism-failed`、`persistence-failed`、`resume-incompatible`、`runtime-error`、`cancelled`。
 
-### 当前不支持
+## 回放与恢复
 
-- 并行分支与 fork/join 调度：同一图运行始终只推进一条节点路径。
-- 多 Agent 通讯：不提供 Agent 间寻址、消息交换或共享协作协议。
-- 会话恢复：进程或会话结束后，不能恢复未完成的图运行。
+**工作回放（Work Replay）**：一次图运行中可供人类复盘的工作记录。默认模式 `"replay"`，包含模型可见上下文、Assistant 正文、工具交互、验证和迁移。默认不含隐藏推理，密钥已脱敏。
+
+**持久回放（Durable Replay）**：跨进程保存的运行记录。journal JSONL → finalize → replay JSON → parse → Replay Model → HTML。默认存储于 `.loop-graph/runs/<runId>`。
+
+**运行恢复（Run Resume）**：从 checkpoint 继续未完成的图运行。只承诺 Node 边界恢复（Transition 完成、下一 Node 未开始）。不序列化模型 turn 或正在执行的工具调用。

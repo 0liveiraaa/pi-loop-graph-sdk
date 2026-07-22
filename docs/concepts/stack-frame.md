@@ -1,127 +1,59 @@
 # 栈帧：图运行的心智模型
 
-图模型描述了有哪些零件（Node、Edge、Router），上下文文档讲了每种数据的生命周期。但要把它们统一理解，需要一层更直觉的类比：**把一次图运行看成调用栈**。
+图模型描述了零件（Stage、Node、Route），上下文文档讲了每种数据的生命周期。把它们统一理解的最简单方式是：**把一次图运行看成调用栈**。
 
-## 先忘掉所有细节，只看一次调用
+## 类比：函数调用
 
-```text
+```
 函数调用     ──────→     节点访问
 ──────────              ──────────
-传入参数                NodeInput
-执行函数体              节点 execute
-返回结果                NodeCompletion
-调用者决定保留什么       Edge.migrate
-写入调用者的局部变量     ContextFrame
+传入参数                Node Input
+执行函数体              Node 的 execute / Agent Run
+返回结果                Node Completion
+调用者决定保留什么       Transition.frame
+写入调用者的局部变量     Frame（后续节点可通过 Memory 看到）
 ```
 
-每一次节点访问就是一次"调用"：接收参数、做事、返回结果，然后由调用者（Edge + Router）决定保留什么状态并调用下一个函数。
+每次节点访问就是一次"调用"：接收参数、做事、返回结果，然后由 Connection + Transition 决定保留什么状态并调用下一个节点。
 
 ## 栈帧长什么样
 
 ```
 图调用开始
   │
-  ├─ [节点A 的栈帧]        ← NodeInput(A), 压入
-  │   执行 A
-  │   Completion(A)         ← 返回
-  │   Edge 折叠 → Frame     ← 写入调用者的持久帧
-  │   [栈帧A 弹出]
+  ├─ [Stage "analyze"]
+  │    NodeInput: { question: "..." }
+  │    执行：Agent 分析
+  │    Completion: { analysis: "..." }
+  │    Transition.frame → 追加到 Frames: { stage: "analyze", ... }
+  │    Transition.map → 构造下一个 NodeInput
+  │    [节点结束]
   │
-  ├─ [节点B 的栈帧]        ← NodeInput(B), 压入
-  │   执行 B
-  │   Completion(B)
-  │   Edge 折叠 → Frame
-  │   [栈帧B 弹出]
+  ├─ [Stage "answer"]
+  │    NodeInput: { analysis: "..." }
+  │    Memory 可见：[{ stage: "analyze", ... }]  ← Frame 中持久化的数据
+  │    执行：Agent 回答
+  │    Completion: { answer: "..." }
+  │    finish().output → Graph Output
+  │    [节点结束]
   │
-  ▼
-图结束 → 折叠所有 Frame 为 output
+  └─ 图返回
 ```
 
-栈帧不嵌套在内存里，而是在图中**按时间顺序逐个压入、执行、弹出**。前一个帧的 Frame 是后一个帧的"上下文背景"。
+**注意**：Node Visit 本身不 push/pop Frame。Frame 是 Transition.frame() 向有序数组追加的持久工作记忆。后续节点通过 Memory 投影看到 Frame 中的数据。
 
-## 图上循环也是栈帧
+## 关键推论
 
-图上的循环看起来像"回到同一节点"，但从栈帧角度看很清晰：
+**Node Input ≠ Memory**。Node Input 是一次性的——上一条 Connection 为当前访问准备的数据，访问结束后消失。Memory 是持久化的——Transition.frame 写入的 Frame 对后续所有节点可见。两者不互相替代。
 
-```text
-generate[帧1] → review[帧1] → 不通过 → revise[帧1] → review[帧2]
-                                                          ↑
-                                                    这是新的栈帧
-```
+**Background ≠ Node Input**。即使第一个 Node Input 和 Background 内容相同，Background 仍是 Graph Invocation scope（图级稳定），Node Input 仍是 Node Visit scope（一次性传递）。
 
-`review` 被调用了两次，每次有独立的 NodeInput、独立的 Completion、独立的 Edge 决策。第一次不通过不代表第二次不通过。Frame 在两次调用之间**累积**了修订的信息，所以第二次的 NodeInput 和上下文已经不同了。
+**compose 共享 Frame**。compose 子图的 Transition.frame 写入的 Frame 对父图的后续节点可见，就像子函数修改了调用者的局部变量。call 和 delegate 不共享。
 
-## 三种子图边界：三种栈
+**循环就是重新调用**。当 analyze → analyze 形成自环时，每个循环迭代都是新的 Node Visit：新的 NodeInput，上一轮通过 frame 保存的数据出现在 Memory 中，上一轮的 NodeInput 已消失。
 
-| 边界 | 栈的关系 |
-|------|---------|
-| `call` | 子图有自己的**独立栈**。父栈暂停，子栈执行完毕弹出，父栈继续 |
-| `compose` | 子图**共享父栈的 Frame**。子图的新 Frame 在返回前归约回父栈 |
-| `delegate` | 子图创建**全新的调用栈**（新 Session），与父栈完全隔离 |
+## 相关文档
 
-```
-call:              compose:           delegate:
-┌─父栈────────┐   ┌─父栈────────┐    ┌─父栈────────┐
-│ frame A     │   │ frame A     │    │ frame A     │
-│ frame B     │   │ frame B     │    └─────────────┘
-│ 暂停 ═══╗   │   │ 子图读写   │
-│     ┌─子栈─┐ │   │  Frame     │    ┌─子栈────────┐
-│     │frame1│ │   │ 归约回父   │    │ frame1      │
-│     │frame2│ │   └────────────┘    │ frame2      │
-│     └──────┘ │                     └─────────────┘
-│ 弹出,父栈续  │
-└──────────────┘
-```
-
-这和函数调用一模一样：`call` = 普通函数调用，`compose` = 闭包捕获外部变量，`delegate` = 新进程。
-
-## Frame 在栈上的生命周期
-
-栈帧弹出时，Edge 决定哪些东西留到调用者的持久状态里：
-
-```text
-NodeCompletion(A)
-  ├─ "草稿路径: draft.md"     → Edge 保留 ──→ Frame
-  ├─ "审查通过"               → Edge 保留 ──→ Frame
-  ├─ "本次访问耗时 2.3s"      → 丢弃（这不是业务状态）
-  └─ "工具调用日志"           → 丢弃（太详细，后续不需要）
-```
-
-Frame 不是全量日志，是**有选择地保留的业务记忆**。这和函数返回值的语义相同——你不需要把函数内部每个 `console.log` 都返回给调用者。
-
-## Frame baseline：栈的不可变前缀
-
-图跑久了之后，前面的 Frame 已经确定不会再变。这些"已固定"的 Frame 形成栈的**不可变前缀**，后续节点只追加新帧。
-
-当上下文窗口不够用时，SDK 把不可变前缀压缩成摘要，释放空间。这就等于：**只保留"我们是怎么走到这一步的"梗概，而新节点继续在最新的栈帧上工作。**
-
-compaction 不会影响还在栈上的活动帧；它只压缩已经被所有活动节点"看过并确认"的前缀。
-
-## 用栈帧解释读文档的顺序
-
-如果你刚接触这个 SDK，建议按这个顺序理解：
-
-1. **先看[图模型](graph-model.md)** —— 认识零件：Node、Edge、Router、END
-2. **再看本文** —— 用栈帧把零件串成一次运行
-3. **再看[上下文与状态](context-and-state.md)** —— 精细理解每种数据放在哪个帧上
-4. **最后看[子图边界](subgraph-boundaries.md)** —— 栈之间的关系
-
-这样零件、流程、数据和隔离都有了统一的心智锚点。
-
-## 常见误区
-
-### "Frame 就是输出"
-
-不是。NodeCompletion 是输出，Frame 是从输出里**挑选的、写在调用者栈上的持久记忆**。你可以产出一大堆 Completion，但每个 Edge 只折叠少量 Frame。
-
-### "循环就是 while(true)"
-
-不是。每次循环是**一次新的栈帧调用**，有独立的输入、执行和完成。循环条件由 Edge guard 显式判断，SDK 不会"自动循环"。
-
-### "Graph 等于函数"
-
-更准确地说：Graph 是函数的**类型定义**，一次 `executeGraph()` 才是**一次调用**。和 `function foo()` vs `foo()` 的关系一样。
-
-### "多节点等于多线程"
-
-SDK 始终串行。一次只推进一个栈帧。没有并行、没有 fork/join。
+- [图模型](graph-model.md) — Stage、Node、Route
+- [上下文与状态](context-and-state.md) — Background、Focus、Frame、Memory
+- [构建条件路由与循环](../guides/build-a-loop.md) — 实操

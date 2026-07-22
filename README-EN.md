@@ -9,6 +9,7 @@ const Input = Type.Object({ name: Type.String() });
 const Output = Type.Object({ message: Type.String() });
 const graph = defineGraph({
   id: "hello", version: "1", goal: "greet", input: Input, output: Output,
+  context: { background: { select: "all" } },
   entries: [entry("main", { to: "greet" })],
   stages: { greet: { node: codeNode({ subGoal: "greet", input: Input, output: Output,
     execute: ({ input, complete }) => complete({ message: `Hello, ${input.name}` }), }),
@@ -17,4 +18,4 @@ const graph = defineGraph({
 const result = await createGraphHost().execute(graph, { name: "World" });
 ```
 
-Model completion is strictly `graph_complete({ result })`; Runtime owns status and failures are returned as `GraphRunResult.failure`. Phase 10 currently supports reliable single-layer Root checkpoint/resume only. Nested continuation recovery remains fail-closed. Set `PI_LIVE_TESTS=1` for live LLM tests.
+Model completion is strictly `__graph_complete__({ result })`; Runtime owns status and failures are returned as `GraphRunResult.failure`. Phase 10 currently supports reliable single-layer Root checkpoint/resume only. Nested continuation recovery remains fail-closed. Set `PI_LIVE_TESTS=1` for live LLM tests.

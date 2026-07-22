@@ -1,134 +1,167 @@
 # 图模型：用阶段和迁移表达 Agent 工作流
 
-Loop Graph SDK 把一个复杂任务拆成若干可执行阶段，并让阶段之间的迁移显式可见。它适合生成、检查、修改、再次检查这类需要循环但仍希望保持结构清晰的 Agent 工作流。
+Loop Graph SDK 把复杂任务拆成若干阶段，让阶段之间的迁移显式可见。它适合"生成 → 检查 → 修改 → 再次检查"这类需要循环但仍希望保持结构清晰的 Agent 工作流。
 
-术语的简短定义见[领域语言](glossary.md)。本文解释这些概念如何共同组成一次图运行。
+术语定义见[术语表](glossary.md)。
 
 ## 一张图包含什么
 
-```text
-图调用输入
+```
+Graph Input（调用方传入的完整数据）
    ↓
- Entry
+ Entry（匹配规则 → 选起始阶段）
    ↓
- Node ──NodeCompletion──→ Router ──选择 Edge──→ 下一个 Node
-   ↑                                              │
-   └────────────────────── 可形成循环 ────────────┘
-                                                  ↓
-                                                 END
+ Stage（Node + Route）
+   │
+   ├─ Node 执行 → Completion
+   │
+   └─ Route 选 Connection → Transition
+       │
+       ├─ 下一 Stage（循环）
+       │
+       └─ finish() → Graph Output
 ```
 
-### Graph：整个任务流程
+### Graph：任务边界
 
-Graph 是任务的整体边界，声明目标、入口、节点和每个节点的出口规则。它可以被用户命令、Agent 工具、代码 API 或另一张图调用。
+Graph 是任务的整体边界，声明：
 
-Graph 允许存在回路，因此它不等同于 DAG。是否继续循环由节点完成信号和边的条件共同决定。
+| 字段 | 说明 |
+|------|------|
+| `id` + `version` | 唯一标识，用于注册、调用和回放 |
+| `goal` | 图的总目标，会出现在模型上下文中 |
+| `input` | 完整运行输入的数据契约（TypeBox schema） |
+| `output` | finish() 产出的数据契约 |
+| `context` | 模型上下文策略：background、memory 的 select/render |
+| `entries` | 入口列表，按数组顺序 first-match |
+| `stages` | `Record<StageId, Stage>`，图内唯一装配结构 |
+| `tools` | 图工具权限（`toolSet("read", "write")`） |
+| `skills` | 图级 Skill 引用 |
+| `mechanisms` | 图级 Mechanism |
+
+### Stage：装配位置
+
+Stage 是图内的装配结构，把一个 Node Definition 和它的出口 Route 放在一起。Stage ID 是图内唯一运行身份——在事件、回放和结果中用作标识。
+
+```typescript
+stages: {
+  analyze: {          // ← Stage ID，图内唯一
+    node: 分析节点,    // ← Node Definition（可跨图复用）
+    route: firstMatch({ ... }),
+  },
+}
+```
+
+### Node Definition：可复用工作阶段
+
+Node Definition 不持有图内位置。同一个 `agentNode({...})` 可以放进多张图的 stages 中。
+
+三种类型：
+
+- **`agentNode`**：让模型完成一个子目标。Runtime 自动处理 Agent Run、工具调用和结果提交。
+- **`codeNode`**：运行确定代码。内部可通过 `runAgent()` 任意次数调用模型。
+- **`graphNode`**：把另一张图作为阶段实现。通过 `graphRef(id, version)` 引用。
 
 ### Entry：从哪里开始
 
-Entry 根据图调用输入判断是否适合处理这次请求，并选择第一个节点。一张图可以有多个 Entry，例如让同一张图根据输入进入“新建任务”或“继续处理”两条起始路径。
+Entry 根据 Graph Input 判断是否匹配，匹配后选择起始阶段及初始 Node Input：
 
-Entry 只负责开始，不代表一个虚拟节点，也不会制造假的节点完成结果。
-
-### Node：一个工作阶段
-
-Node 是图中真正执行工作的地方。当前有两类节点：
-
-- code node：运行开发者提供的异步代码；代码内部可以不调用 Agent，也可以调用一次或多次 Agent。
-- graph node：调用另一张 Graph，并选择明确的子图边界。
-
-一个 Node 应围绕单一阶段目标设计，例如“生成草稿”“检查事实”“修改失败项”。节点内部可以使用工具和多轮 Agent 推理，但不应把跨阶段的流程选择隐藏在内部。
-
-### NodeCompletion：阶段的完成信号
-
-节点结束时返回 NodeCompletion。它表达两件事：
-
-- 当前阶段以 `ok`、`failed` 或 `cancelled` 中的哪种状态结束。
-- 当前阶段产出了哪些业务结果。
-
-NodeCompletion 是 Router 和 Edge 判断下一步的依据。它不是给后续模型保存的工作记忆；需要保留的内容由 Edge 另行折叠为 ContextFrame。
-
-### Edge：迁移和记忆折叠
-
-Edge 连接当前节点与下一个节点或 END。它承担三项职责：
-
-1. 判断当前 NodeCompletion 是否满足这条迁移路径。
-2. 把当前阶段需要保留的信息整理成工作记忆帧。
-3. 可选地为下一个节点生成一次性输入。
-
-Edge 不执行节点工作，也不替代 Router 选择路径。
-
-### Router：从可用路径中选择一条
-
-Router 在满足条件的边中选择至多一条。SDK 提供按优先级、首个匹配、Agent 选择以及自定义函数等策略。
-
-如果没有边匹配，当前图会以节点的完成状态和结果结束；它不会自动创建隐藏的诊断节点或重试路径。需要重试或诊断时，应显式建模为边和节点。
-
-### END：合法结束
-
-END 是图的终点标记，不是一个节点。指向 END 的 Edge 仍然可以保存最后一帧工作记忆，并通过显式 output 定义整张图对外返回的状态和结果。
-
-## 节点内循环与图上循环
-
-Agent 自身的 ReAct 循环和图上的阶段循环解决不同问题。
-
-### 节点内 ReAct
-
-适合完成一个阶段目标：
-
-```text
-思考 → 调工具 → 观察结果 → 再思考 → 完成当前阶段
+```typescript
+entries: [
+  entry("create", {
+    guard: (input) => input.mode === "create",
+    to: "draft",
+    mapInput: (input) => ({ topic: input.topic }),
+  }),
+  entry("review", {
+    guard: (input) => input.mode === "review",
+    to: "check",
+  }),
+],
 ```
 
-这些中间步骤由 Agent 工作过程管理，不需要变成 Graph 中的节点。
+### Route 和 Connection：去哪里
 
-### 图上阶段循环
+节点的出口由 Route 管理。`firstMatch` 按数组顺序取首个 guard 匹配的 Connection：
 
-适合表达业务阶段之间的迭代：
-
-```text
-生成草稿 → 审查草稿 → 不通过 → 修改草稿 → 再次审查
+```typescript
+route: firstMatch({
+  retry: connect("analyze", {           // guard 匹配 → 回到 analyze
+    guard: (result) => result.needsRevision,
+  }),
+  next: connect("answer", {             // 默认 → 继续到 answer
+    map: ({ completion }) => completion.result,
+  }),
+  done: finish({                        // guard 匹配 → 结束
+    guard: (result) => result.isComplete,
+    output: ({ completion }) => completion.result,
+  }),
+}),
 ```
 
-图上循环的每个阶段都有独立目标、完成信号和可观察迁移。它比把整个流程塞进一个超长 Prompt 更容易测试、替换和审计。
+### Transition：如何迁移
 
-判断原则是：如果一次循环只是在完成同一个阶段，应留在节点内部；如果循环跨越不同职责，应使用图上的边。
+Transition 是 Connection 的迁移策略：
 
-## 一次图运行如何推进
+| 函数 | 说明 | 用于 |
+|------|------|------|
+| `guard` | 条件：是否走这条连接 | Connection 选择 |
+| `frame` | 保存工作记忆，后续节点可通过 Memory 投影看到 | 跨阶段共享 |
+| `map` | 构造下一个节点的 Node Input | 阶段间传数据 |
+| `output` | **仅 finish()**：产生 Graph Output | 图返回值 |
 
-一次普通运行遵循以下顺序：
+`frame` 写入的数据在整个 Graph Invocation 的后续节点中可见。
 
-1. 图调用提供 background。
-2. Runtime 找到匹配的 Entry。
-3. Entry 为第一个 Node 创建 NodeInput。
-4. Node 完成工作并返回 NodeCompletion。
-5. Router 根据 Completion 和 Edge 条件选择路径。
-6. 选中的 Edge 保存 ContextFrame，并可生成后继 NodeInput。
-7. 进入下一个 Node，或通过 END 返回 GraphRunResult。
+### finish()：图终点
 
-同一时刻只推进一条节点路径。当前 SDK 不提供 fork/join 式并行分支。
+`finish()` 是指向 `__graph_finish__` 的特殊 Connection。**必须提供 `output` 函数显式产生符合 Graph output 契约的值。** 不再从工作记忆或 completion 猜测返回值。
 
-## 示例：生成和审查
-
-假设任务需要生成文章并保证测试通过，可以建模为：
-
-```text
-generate
-   ↓
-review ──通过──→ END
-   │
-   └──不通过──→ revise ──→ review
+```typescript
+done: finish({
+  output: ({ completion }) => ({
+    answer: completion.result.answer,
+    sources: completion.result.sources,
+  }),
+}),
 ```
 
-- `generate` 只负责初稿。
-- `review` 只负责判断是否满足要求，并在 Completion 中报告问题。
-- `revise` 根据上一个 Edge 生成的 NodeInput 修改内容。
-- Edge 决定哪些审查结论进入后续工作记忆。
+## Builder：简化常见模式
 
-这样，循环条件、阶段职责和保留信息都在图上明确表达。
+### defineSingleAgentGraph
 
-## 继续阅读
+单节点图：
 
-- 数据应该放在哪里：[上下文与状态](context-and-state.md)
-- 子图如何隔离或共享工作区：[子图调用边界](subgraph-boundaries.md)
-- 如何给节点增加工具门禁和自动验收：[Mechanism](mechanisms.md)
+```typescript
+const graph = defineSingleAgentGraph({
+  id: "echo", version: "1", goal: "...",
+  input: InputSchema, output: OutputSchema,
+  context: { background: { select: "all" } },
+  node: agentNode({ subGoal: "...", prompt: "...", input: InputSchema, output: OutputSchema }),
+});
+```
+
+### defineLinearGraph
+
+```typescript
+const graph = defineLinearGraph({
+  id: "pipeline", version: "1", goal: "...",
+  input: InputSchema, output: OutputSchema,
+  context: { background: { select: "all" } },
+  nodes: [nodeA, nodeB, nodeC],
+});
+```
+
+上一节点的 `completion.result` 自动映射为下一节点的 Node Input；末节点自动映射到 `finish()` output。
+
+两种 Builder 都只生成 Core Graph，由同一个 Runtime 消费。
+
+## 校验与冻结
+
+`defineGraph()` 构建时校验并浅冻结：
+- 重复 Entry ID → 构建失败
+- 重复 Connection ID → 构建失败
+- Connection 目标 Stage 不存在 → 构建失败
+- `finish()` 缺少 output → 构建失败
+- 非法 `graphRef` → 构建失败
+
+注册时进一步校验 Host 工具、Skill 和 delegate 能力。

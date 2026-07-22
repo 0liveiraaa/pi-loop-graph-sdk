@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: "Phase 7.1 — invocation-scoped child Session; see docs/internals/runtime-boundaries.md"
 ---
 
 # 显式区分组合、调用与委托三种图调用边界

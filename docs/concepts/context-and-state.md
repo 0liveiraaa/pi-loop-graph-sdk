@@ -1,150 +1,145 @@
 # 上下文与状态：数据应该放在哪里
 
-Loop Graph SDK 有多种数据通道，它们的生命周期和可见范围不同。最重要的判断是：这份数据是业务流程的一部分，还是只服务于代码侧基础设施？
+Loop Graph SDK 有多种数据通道，生命周期和可见范围不同。核心判断：这份数据是业务流程的一部分，还是代码侧基础设施？
 
-术语定义见[领域语言](glossary.md)。图的推进方式见[图模型](graph-model.md)。
+术语定义见[术语表](glossary.md)。
 
-## 四类核心数据
+## 数据通道总览
 
-| 数据 | 生命周期 | 后续节点可见 | 默认进入模型上下文 | 适合保存 |
-| --- | --- | --- | --- | --- |
-| background | 一次图调用 | 整张图可读取 | 由上下文渲染策略决定 | 图级输入和稳定背景 |
-| NodeInput | 一次节点访问 | 仅当前节点 | 由当前节点上下文决定 | 上一步传来的临时业务参数 |
-| ContextFrame | AgentInstance 生命周期 | 后续节点可见 | 是，作为已完成工作记忆 | 后续阶段真正需要的业务记忆 |
-| Mechanism state | AgentInstance 中某个 Mechanism 的生命周期 | 仅对应 Mechanism | 否 | 计数、缓存、审计状态、基础设施元数据 |
+| 数据 | 生命周期 | 模型可见 | 适合保存 |
+|------|----------|----------|----------|
+| Graph Input | 一次图调用 | 否（需通过 Background 投影） | 图级输入、配置 |
+| Background | 一次 Graph Invocation | 是（sticky） | 图级稳定背景 |
+| Node Input | 一次 Node Visit | 否（需通过 Focus 投影） | 阶段间临时业务参数 |
+| Node Focus | 一次 Node Visit | 是（sticky） | 当前节点要集中处理的数据 |
+| Frame / Memory | 一次 Graph Invocation | 是（foldable） | 已完成阶段的工作记忆 |
+| Output Contract | 一次 Agent Run | 是（sticky，protected） | 当前 run 的输出格式 |
+| Mechanism state | 安装 scope | 否 | 计数、缓存、审计 |
+| Contribution | 声明 scope | 声明 retention 控制 | Mechanism 追加的上下文 |
 
-此外还有兼容性的 `instance.scratch`。它是同一 AgentInstance 内多个 Mechanism 可见的共享代码侧命名空间，不进入模型上下文。新 Mechanism 优先使用自己的 `ctx.state`，避免键名冲突。
+## 数据与模型上下文分离
 
-## Background：整张图的调用背景
+这是 0.2 最核心的设计原则。完整 Graph Input 和 Node Input 是代码侧数据，不会自动注入模型。只有经过显式投影（`{ select, render }`）的内容才成为模型可见上下文。
 
-background 来自启动图时提供的输入，例如：
-
-```text
-用户目标、仓库路径、任务编号、运行模式
-```
-
-它在一次图调用中保持稳定，适合作为全图共同参考的背景。它不是节点之间逐步演化的工作状态；阶段产生的新结果应通过 Completion、Edge 和 Frame 显式迁移。
-
-## NodeInput：本次进入节点的参数
-
-NodeInput 是一次性的。第一个节点的输入由 Entry 从 background 构造，后续节点的输入由上一条 Edge 生成。
-
-例如审查节点发现三个问题后，进入修改节点时可以传入：
+### 三层投影
 
 ```text
-需要修改的问题列表、目标文件、修改优先级
+Graph Input  ──background.select──→  Background  ──render──→  模型看到
+Node Input   ──focus.select──────→  Node Focus  ──render──→  模型看到
+Frames       ──memory.select─────→  Memory      ──render──→  模型看到
 ```
 
-NodeInput 适合精准地告诉当前节点“这一次要处理什么”。如果下一个节点仍需使用这些信息，必须由当前节点重新产出并经 Edge 继续传递，不能假设 NodeInput 会自动持久化。
+每层 `select` 决定"哪些数据允许进入"，`render` 决定"如何展示"。
 
-## ContextFrame：留给后续阶段的工作记忆
+**约束：**
+- `select` 的参数是该层唯一允许读取的完整业务来源
+- `render` 只能读取 selected 和 meta，不能读 selector 未选择的数据
+- Background 在 Graph Invocation 建立时物化一次并冻结
+- Node Focus 在 Node Visit 建立时物化一次并冻结
+- Memory 在 Frame revision 变化后重新物化并缓存
 
-ContextFrame 是 Edge 在节点离开时写入的业务记忆。它的内容完全由开发者定义，例如：
+### Background
 
-```ts
-{
-  artifact: "draft.md",
-  reviewSummary: "事实正确，但缺少迁移说明",
-  unresolvedIssues: ["missing migration section"],
+```typescript
+context: {
+  background: {
+    select: (graphInput) => ({
+      topic: graphInput.topic,         // ← 选了
+      // sourceFiles 和 internalJobId 没选，模型永远看不到
+    }),
+    render: ({ selected, meta }) => [
+      `=== GRAPH GOAL ===\n${meta.graph.goal}`,
+      `=== BACKGROUND ===\n${JSON.stringify(selected)}`,
+      ...meta.skills.map(s => s.content),
+    ],
+  },
 }
 ```
 
-SDK 不要求 frame 包含 `nodeId`、`status`、`summary` 或 `result`。这些只是早期兼容字段，不应作为新代码的固定结构。
+**必填**，必须显式写 `"all"`、`"none"` 或 selector 函数。
 
-Frame 应满足两个条件：
+### Memory
 
-1. 后续 Agent 确实需要知道。
-2. 内容比完整 ReAct 轨迹更短、更稳定。
+已完成阶段的 Frame 数据对后续节点可见：
 
-不要把日志、临时计时器、事件订阅句柄或大型原始工具输出放进 Frame。
-
-## Mechanism state：代码侧横切状态
-
-Mechanism state 属于某个 Mechanism 和某个 AgentInstance。它可以跨该实例的多个节点访问保留，但不会进入模型上下文。
-
-适合的内容包括：
-
-- 当前实例累计发生了多少次工具拒绝。
-- 一次性能分析的开始时间和统计值。
-- 已执行过哪些审计检查。
-- Mechanism 自己使用的小型缓存。
-
-它不适合保存业务流程需要迁移的草稿、审查结论或用户选择。否则 Router、Edge 和后续节点无法从显式图数据中理解流程状态。
-
-## Frame 还是 state
-
-可以用一个简单问题判断：
-
-> 如果删除这个 Mechanism，后续业务节点是否仍然需要这份数据？
-
-- 如果需要，使用 Completion → Edge → Frame 或 NodeInput。
-- 如果不需要，它只是横切扩展自己的工作数据，使用 Mechanism state。
-
-### 应使用 Frame
-
-- 生成节点产出的文档路径。
-- 审查节点发现的未解决问题。
-- 用户确认的业务选择。
-- 后续 Agent 推理必须引用的事实。
-
-### 应使用 state
-
-- Mechanism 的工具调用计数。
-- 验收命令最近一次耗时。
-- 是否已经发送过某条诊断信息。
-- 不希望模型看到的审计元数据。
-
-## 数据如何向前流动
-
-```text
-Graph background
-       ↓ Entry.mapInput
-第一个 NodeInput
-       ↓ Node.execute
-NodeCompletion
-       ↓ Edge.migrate
-ContextFrame + 下一个 NodeInput
-       ↓
-后续节点
+```typescript
+context: {
+  memory: {
+    select: (frames) => frames.map(f => f),
+    render: ({ selected }) =>
+      selected ? `=== COMPLETED WORK ===\n${JSON.stringify(selected)}` : null,
+  },
+}
 ```
 
-Mechanism state 位于这条业务迁移链旁边：它可以观察和约束执行，但不替代这条链。
+Frame 通过 Transition 的 `frame()` 写入：
 
-## 模型能看到什么
+```typescript
+connect("next", {
+  frame: ({ completion }) => ({ stage: "analyze", result: completion.result }),
+}),
+```
 
-模型上下文不等于 AgentInstance 的完整对象。通常只有以下内容会进入当前 Agent 的可见上下文：
+### Node Focus
 
-- 当前图和节点需要展示的目标或说明。
-- 当前节点的相关输入。
-- 仍需保留的 ContextFrame。
-- skill 或 Mechanism 通过受控上下文通道追加的内容。
+```typescript
+// Agent Node：默认 "all"
+const node = agentNode({
+  context: {
+    focus: {
+      select: (nodeInput) => ({ excerpts: nodeInput.excerpts }),
+      render: ({ selected, meta }) => [
+        `=== NODE SUBGOAL ===\n${meta.node.subGoal}`,
+        `=== NODE FOCUS ===\n${JSON.stringify(selected)}`,
+      ],
+    },
+  },
+});
 
-Mechanism state、scratch、Runtime 控制状态和完整历史对话不会因为存在于代码内就自动暴露给模型。
+// Code Node：默认 "none"（不写模型上下文）
+// 只有显式配置 context.focus 后，内部 runAgent() 才获得 Node Focus
+```
 
-## 子图对数据边界的影响
+## 默认行为汇总
 
-不同子图边界会改变 AgentInstance 和 Frame 是否共享：
+| 配置 | 默认 |
+|------|------|
+| `Graph.context.background.select` | **必填**，无默认值 |
+| `Graph.context.background.render` | 省略时使用 SDK 默认 renderer |
+| `Graph.context.memory` | 省略时投影全部 Frame |
+| Agent Node `context.focus` | `select: "all"` |
+| Code Node `context.focus` | `select: "none"` |
+| Graph Node context | 不建立 Node Context（focus）；子图建立自己的 Graph Context（background + memory） |
+| Output Contract | Runtime protected，不受 renderer 控制 |
 
-- call 创建新的 AgentInstance，因此使用新的 frames 和 Mechanism state。
-- compose 复用当前 AgentInstance，因此共享 frames 和 Mechanism state，但子图新增 frames 在返回前会归约。
-- delegate 创建新的 Session 和 AgentInstance，因此两者都隔离。
+## 一次 Agent Run 的模型实际可见内容
 
-具体选择见[子图调用边界](subgraph-boundaries.md)。
+Context Runtime 在每次 LLM call 前组装：
 
-## 常见错误
+```text
+Host baseline
+→ Graph goal + Background + Graph Skills
+→ Memory（已完成 Frames）
+→ Node subGoal + Node Focus + Connections + Node Skills
+→ Mechanism sticky contributions
+→ Output Contract（protected，Agent Run scope）
+→ prompt
+→ 当前 run 的 Assistant / Tool transcript
+```
 
-### 把 Completion 当成长期记忆
+纯 Code Node（未调用 `runAgent()`）不会向模型写入任何上下文消息。
 
-Completion 只负责报告阶段结果。后续模型要看到什么，由选中的 Edge 折叠成 Frame。
+## Mechanism 上下文追加
 
-### 用 state 绕过 Edge 传递业务状态
+Mechanism 通过 `ctx.context.add(key, content, { lifetime, retention })` 向 Context State 追加内容：
 
-这会让图的迁移无法从节点输入和历史记忆中解释，也使替换 Mechanism 变得危险。
+- `lifetime`：`"agent-run"` | `"node-visit"` | `"graph-invocation"` | `"root-run"`
+- `retention`：`"sticky"`（每次 LLM call 重投影）| `"foldable"`（允许压缩摘要）| `"transient"`（下次 LLM call 后删除）
 
-### 把所有结果都塞进 Frame
+不能创建比安装 scope 更长的 contribution。Host Mechanism 最大 root-run，Graph Mechanism 最大 graph-invocation，Node Mechanism 最大 node-visit。
 
-Frame 会影响后续模型上下文。只保留后续阶段真正需要的信息，避免上下文不断膨胀。
+## 相关文档
 
-### 依赖 scratch 的共享键名
-
-scratch 是兼容通道且没有私有命名空间。新代码优先使用类型化 Mechanism state。
+- [自定义上下文](../guides/customize-context.md) — 实操指南
+- [Mechanism](../concepts/mechanisms.md) — contribution lifetime 详解
+- [图模型](../concepts/graph-model.md) — Frame 和 Transition

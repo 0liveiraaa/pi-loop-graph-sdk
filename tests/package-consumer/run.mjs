@@ -72,6 +72,14 @@ for (const [specifier, expectedPath] of available) {
   await import(specifier);
 }
 
+const { ToolCatalog, SkillCatalog } = await import("pi-loop-graph-sdk/advanced");
+if (new ToolCatalog().constructor.name !== "ToolCatalog") {
+  throw new Error("ToolCatalog is not available as an /advanced value export");
+}
+if (new SkillCatalog().constructor.name !== "SkillCatalog") {
+  throw new Error("SkillCatalog is not available as an /advanced value export");
+}
+
 `);
 
   runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], consumerRoot);

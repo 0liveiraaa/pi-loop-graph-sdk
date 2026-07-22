@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: "Phase 4 — ContextState with { select, render } projection; renderer registry replaced by per-Graph/Node context config"
 ---
 
 # 固定上下文安全边界，只开放模型可见载荷 renderer

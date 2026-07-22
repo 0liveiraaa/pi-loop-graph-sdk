@@ -2,131 +2,77 @@
 
 ## 适用场景
 
-你需要精确控制每个节点中 LLM 能调用哪些 pi 工具。这涉及节点级白名单、全局默认工具、运行时解析以及机制层的工具门禁。
+你需要精确控制每个节点中模型能调用哪些工具。
 
-## 最小代码
+## 三层权限模型
 
-### 1. 节点级工具白名单
+```text
+Host Tool Catalog（真实工具实现，构成最终能力边界）
+  → Graph Tool Policy（图声明允许的工具全集）
+    → Node Tool Set（节点从图权限中选择实际启用的集合）
+      → Runtime Protocol Tool（强制注入 __graph_complete__）
+```
+
+## 声明工具权限
+
+### Graph：toolSet
 
 ```typescript
-import { createAgentExecute } from "pi-loop-graph-sdk";
-import type { Mechanism, Node } from "pi-loop-graph-sdk";
+import { toolSet, defineGraph } from "pi-loop-graph-sdk";
 
-const reviewNode: Node = {
-  kind: "code",
-  id: "review",
+const graph = defineGraph({
+  // ...
+  tools: toolSet("read", "review_chapter", "review_answer"),
+});
+```
+
+### Node：tools 字段
+
+```typescript
+// 选择图声明的部分工具
+const reviewNode = agentNode({
   subGoal: "出题并批改",
-  tools: ["review_chapter", "review_card", "review_answer"],
-  execute: createAgentExecute(),
-};
+  tools: ["review_chapter", "review_answer"],
+});
 
-const summaryNode: Node = {
-  kind: "code",
-  id: "summary",
-  subGoal: "生成总结",
-  // 不声明 tools → 使用默认工具集
-  execute: createAgentExecute(),
-};
-```
+// 选择全部：tools: "all"
+const 全功能节点 = agentNode({
+  tools: "all",
+});
 
-声明 `tools` 的节点，LLM 可用的工具为：`read` + 默认工具 + 该节点声明列表 + `__graph_complete__`（去重，read 强制首位）。
-
-### 2. 全局默认工具
-
-```typescript
-import { createLoopGraphExtension } from "pi-loop-graph-sdk";
-
-const loop = createLoopGraphExtension(pi, {
-  defaultTools: ["review_card", "review_chapter"],
+// 不声明：无业务工具（只有 __graph_complete__）
+const 只提交节点 = agentNode({
+  // tools 省略
 });
 ```
 
-全局默认工具会与节点声明的工具合并，而不是被节点配置覆盖。SDK 还会补上框架运行必需的工具。
+## 工具解析规则
 
-### 3. 按图/节点动态解析工具
+- Node 不能启用 Graph 未声明的业务工具
+- Host 有实现但 Graph 未声明 → 模型拿不到
+- Graph 声明但 Node 未选择 → 模型拿不到
+- `__graph_complete__` 由 Runtime 强制注入，不计入 Graph Policy
+- `read` 是普通业务工具，需 Graph 声明 + Node 选择才能使用
 
-```typescript
-const loop = createLoopGraphExtension(pi, {
-  toolResolver({ defaultTools, nodeTools, graphId, nodeId }) {
-    if (graphId === "admin") {
-      // 管理类图允许所有工具
-      return [...defaultTools, ...nodeTools, "bash", "write"];
-    }
-    if (nodeId === "sensitive") {
-      // 敏感节点只允许只读工具
-      return ["read"];
-    }
-    return [...defaultTools, ...nodeTools];
-  },
-});
-```
+## 子图的工具权限
 
-`toolResolver` 的返回值同样会被 SDK 强制保留 `read` 和 `__graph_complete__`。同一个 resolver 同时用于首次工具校验和实际设置。
+子图使用**自己的 Graph Tool Policy**，不继承父图权限。父图不需要重复声明子图的内部工具。Host 缺失子图需要的工具时在预运行阶段失败。
 
-### 4. 机制层工具门禁（beforeToolCall / afterToolResult）
+## 高级：unsafe resolver
 
-当需要在工具执行前后做拦截或脱敏时，使用机制：
+`advanced` 子路径提供 unsafe tool resolver，可越过 Graph Policy 但记录 warning。协议工具和 Host 实际能力边界仍不可绕过。普通业务不应使用。
 
-```typescript
-const safeGuard: Mechanism = {
-  name: "safe-guard",
+## 运行过程
 
-  // 工具调用前拦截
-  beforeToolCall(ctx) {
-    if (ctx.event.toolName !== "read") return { action: "allow" };
+`registerGraph` 或 `execute` 时自动执行 capability preflight：
+1. 检查 Graph Policy 中的工具是否都在 Host Catalog 中存在
+2. 检查 Node Tool Set 是否都在 Graph Policy 中
+3. 检查子图依赖的工具在 Host Catalog 中是否存在
 
-    // 只允许读取 docs 目录
-    if (!String(ctx.event.input.path).startsWith("docs/")) {
-      return { action: "deny", reason: "只允许读取 docs 目录" };
-    }
-    return { action: "allow" };
-  },
+任一失败 → 注册/执行前报错，不进入执行。
 
-  // 工具结果返回后脱敏
-  afterToolResult(ctx) {
-    if (ctx.event.toolName === "read" && containsSecret(ctx.event.content)) {
-      return {
-        action: "replace",
-        content: [{ type: "text", text: "[内容已脱敏]" }],
-      };
-    }
-    return { action: "keep" };
-  },
-};
-```
+## 相关文档
 
-机制注册到 `Graph.mechanisms`（全局生效）或 `Node.mechanisms`（仅该节点生效）。
-
-### 工具决策一览
-
-| 决策 | 适用 Hook | 效果 |
-| --- | --- | --- |
-| `{ action: "allow" }` | beforeToolCall | 允许调用原参数 |
-| `{ action: "deny", reason: "..." }` | beforeToolCall | 拒绝调用，reason 告知 LLM |
-| `{ action: "patch", input: {...} }` | beforeToolCall | 修改参数后调用（需 schema 校验） |
-| `{ action: "keep" }` | afterToolResult | 保留原始结果 |
-| `{ action: "replace", content: [...] }` | afterToolResult | 替换 LLM 可见的内容 |
-
-## 运行顺序
-
-1. 节点进入时，SDK 调用 `resolveNodeTools(defaultTools, node.tools)`（如有 `toolResolver` 则由其接管）。
-2. 结果强制补上 `read` 和 `__graph_complete__`。
-3. 工具集通过 `setActiveTools()` 生效。
-4. 每次 LLM 调用工具前，按机制注册顺序依次执行 `beforeToolCall`。拒绝或补丁按机制顺序组合。
-5. 工具执行后，按同样顺序执行 `afterToolResult`。
-
-> `__graph_complete__` 不经过 `beforeToolCall` 的一般补丁流程。
-
-## 安全边界与常见错误
-
-- **不要使用已过时的 `runAgent().tools`**：工具白名单必须通过 `Node.tools` 声明。
-- **不要假设 `node.tools` 是完整工具集**：`read` 和 `__graph_complete__` 始终存在。
-- **`beforeToolCall` 的 patch 受 schema 约束**：如果工具的参数 JSON Schema 无法验证补丁后的参数，patch 会被拒绝。
-- **`afterToolResult` 只能替换 `content` 和 `isError`**：不能修改工具的元数据字段。
-- **工具门禁中的异步操作要及时完成**：长时间阻塞可能触发 agent run 超时。
-
-## 相关概念
-
-- [混合代码与 Agent](mix-code-and-agent.md) — Node 声明与 execute 模式
-- [机制 Hooks](mechanism-hooks.md) — beforeToolCall/afterToolResult 的完整生命周期
-- [自动验证](automatic-validation.md) — 配合工具控制做完成度校验
+- [API 参考](../reference/api.md) — toolSet 签名
+- [子图调用边界](../concepts/subgraph-boundaries.md) — 子图权限隔离
+- [配置项](../reference/configuration.md) — Host Tool Catalog

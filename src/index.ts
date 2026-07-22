@@ -46,17 +46,10 @@ export type {
   SkillLoadContext,
 } from "./adapter/skill-content.js";
 
-// ── 可观测性 ──
-export { createJsonlTraceSink } from "./adapter/observability.js";
-export type {
-  AgentRunLifecycleContext,
-  LoopGraphLifecycleEvent,
-  LoopGraphLogger,
-  LoopGraphTraceSink,
-} from "./adapter/observability.js";
+// ── 可观测性（旧版，不推荐）──
+// 已移至 /advanced。新代码使用 createGraphHost({ recording: "replay" }) + /replay 子路径。}
 
 // ── 核心类型 ──
-export * from "./type.js";
 export { Type } from "typebox";
 export type {
   AgentNodeDefinition,
@@ -102,6 +95,7 @@ export type {
   MechanismScope,
   MechanismCompletionDecision,
 } from "./core/mechanism.js";
+export type { NodeCompletion } from "./core/graph.js";
 export type { ToolSet } from "./builders/refs.js";
 export {
   DEFAULT_HOST_BASELINE,

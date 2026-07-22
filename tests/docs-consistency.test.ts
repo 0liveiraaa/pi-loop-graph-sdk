@@ -28,7 +28,7 @@ function markdownLinks(markdown: string): string[] {
 }
 
 describe("documentation consistency", () => {
-  const publicDocs = [resolve(root, "README.md"), ...markdownFiles(docsRoot)];
+  const publicDocs = [resolve(root, "README.md"), resolve(root, "README-EN.md"), ...markdownFiles(docsRoot)];
 
   it("package entry points target compiled artifacts", () => {
     const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
@@ -77,24 +77,39 @@ describe("documentation consistency", () => {
   });
 
   it("lifecycle reference contains only the public lifecycle event names", () => {
-    const lifecycle = readFileSync(resolve(docsRoot, "guides/observability.md"), "utf8");
-    for (const event of ["graph_start", "graph_end", "graph_error", "node_enter", "node_exit", "compaction"]) {
+    const lifecycle = readFileSync(resolve(docsRoot, "reference/lifecycle.md"), "utf8");
+    for (const event of ["root_started", "root_finished", "graph_entered", "graph_exited", "node_entered", "node_exited", "beforeAgentRun", "model_turn_started"]) {
       expect(lifecycle).toContain(event);
     }
-    expect(lifecycle).not.toMatch(/`(?:agent_retry|agent_complete|context)`/);
   });
 
   it("documents the completion validation order used by PiNodeContext", () => {
     const lifecycle = readFileSync(resolve(docsRoot, "reference/lifecycle.md"), "utf8");
+    const section = lifecycle.indexOf("## 验证链顺序");
     const positions = [
-      lifecycle.indexOf("outputSchema", lifecycle.indexOf("## 校验链顺序")),
-      lifecycle.indexOf("runAgent 级 validateCompletion", lifecycle.indexOf("## 校验链顺序")),
-      lifecycle.indexOf("Node.validateCompletion", lifecycle.indexOf("## 校验链顺序")),
-      lifecycle.indexOf("机制 validateCompletion", lifecycle.indexOf("## 校验链顺序")),
-      lifecycle.indexOf("agent-choice 校验器", lifecycle.indexOf("## 校验链顺序")),
+      lifecycle.indexOf("outputSchema", section),
+      lifecycle.indexOf("Agent Run validator", section),
+      lifecycle.indexOf("Node validator", section),
+      lifecycle.indexOf("Route structure", section),
+      lifecycle.indexOf("Mechanism validateCompletion", section),
+      lifecycle.indexOf("agent-choice", lifecycle.indexOf("Mechanism validateCompletion", section)),
     ];
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
+  it("does not expose internal Pi host or superseded completion and renderer conventions", () => {
+    const currentGuides = [
+      resolve(root, "README.md"),
+      resolve(root, "README-EN.md"),
+      resolve(docsRoot, "getting-started.md"),
+      ...markdownFiles(resolve(docsRoot, "guides")),
+      ...markdownFiles(resolve(docsRoot, "reference")),
+      ...markdownFiles(resolve(docsRoot, "concepts")),
+    ].map((file) => readFileSync(file, "utf8")).join("\n");
+    expect(currentGuides).not.toContain("createPiGraphHost");
+    expect(currentGuides).not.toContain("Host 默认 renderer");
+    expect(currentGuides).not.toMatch(/ctx\.completion(?:\?\.)?\.result/);
   });
 
   it("does not claim that debug logging is enabled by default", () => {

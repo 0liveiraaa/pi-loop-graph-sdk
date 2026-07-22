@@ -1,102 +1,83 @@
-# 可观测性：logger、traceSink、生命周期事件与调试日志
+# 可观测性：回放、事件与日志
 
 ## 适用场景
 
-你需要观察图运行过程中发生了什么——哪个节点在何时进入、Agent 何时完成推理、是否发生压缩。SDK 默认不写任何日志文件，你需要显式注入观测手段。
+你需要观察图运行过程中发生了什么、排查问题、或生成运行报告。
 
-## 最小代码
+## 工作回放（Replay）
 
-### 1. traceSink：结构化事件收集
+SDK 默认 recording 模式为 `"replay"`，自动生成可持久化的运行记录。
+
+### 生成 replay HTML
 
 ```typescript
-import { createLoopGraphExtension } from "pi-loop-graph-sdk";
+import { createGraphHost } from "pi-loop-graph-sdk";
+import { FileRunStore } from "pi-loop-graph-sdk/replay";
 
-const loop = createLoopGraphExtension(pi, {
-  traceSink(event) {
-    // 送往外部遥测
-    telemetry.record(event);
+const store = new FileRunStore(".loop-graph/runs");
+const host = createGraphHost({ runStore: store, recording: "replay" });
+
+const result = await host.execute(myGraph, input);
+// replay JSON 自动保存在 .loop-graph/runs/<runId>/replay.json
+```
+
+运行结束后，从 `./replay` 子路径生成 HTML：
+
+```typescript
+import { parseReplay, exportReplayHtml } from "pi-loop-graph-sdk/replay";
+import { readFile, writeFile } from "node:fs/promises";
+
+const replayJson = await readFile(`.loop-graph/runs/${result.rootRunId}/replay.json`, "utf8");
+const model = parseReplay(replayJson);
+await writeFile(`report.html`, exportReplayHtml(model), "utf8");
+```
+
+### HTML 报告内容
+
+- **模型视角**：每个节点模型看到了什么上下文、产出了哪些文本
+- **工具调用**：每次 `__graph_complete__` 的参数和 Runtime 判定（accepted/rejected）
+- **时间线**：全部事件的时序视图
+- **原始事件**：完整 JSON 事件日志（可折叠）
+
+### Recording 模式
+
+| 模式 | 说明 |
+|------|------|
+| `"off"` | 不记录 |
+| `"events"` | 仅生命周期事件，丢弃大载荷 |
+| `"replay"`（默认） | 完整人类可读记录，脱敏密钥和隐藏推理 |
+| `"forensic"` | 原始载荷，**警告：可能含敏感数据和隐藏推理** |
+
+### 查看 RunStore
+
+```typescript
+import { FileRunStore } from "pi-loop-graph-sdk/replay";
+
+const store = new FileRunStore(".loop-graph/runs");
+// journal.jsonl — 可追加的事件流
+// replay.json — finalize 后的结构化文档
+// checkpoints/ — 运行恢复点（list/prune/delete 管理）
+// artifacts/ — 大载荷的外部引用
+```
+
+## RunStore 管理
+
+```typescript
+import { FileRunStore } from "pi-loop-graph-sdk/replay";
+
+replay HTML 支持通过可注入的 `PricingResolver` 计算费用：
+
+```typescript
+const host = createGraphHost({
+  pricingResolver: ({ provider, model, usage }) => {
+    // 返回该次模型调用的费用（美元）
+    return (usage.inputTokens ?? 0) * 0.000001 + (usage.outputTokens ?? 0) * 0.000002;
   },
 });
 ```
 
-所有公开的生命周期事件都会传给 `traceSink`。sink 抛错或异步拒绝不会影响图执行；应把事件当作只读数据使用。
+## 相关文档
 
-### 2. logger：通用日志输出
-
-```typescript
-const loop = createLoopGraphExtension(pi, {
-  logger: console,
-  traceSink(event) {
-    // 可选：同时送往遥测
-    metrics.push(event);
-  },
-});
-```
-
-logger 接收框架内部的诊断信息，建议指向 `console` 以在开发时实时观察。
-
-### 3. 本地 JSONL 调试日志
-
-```typescript
-const loop = createLoopGraphExtension(pi, {
-  debug: true,
-  debugLogPath: "loop-graph-debug.log",
-});
-```
-
-开启后，框架以 JSONL 格式写入文件，每行一个事件。可以用 `tail -f` 实时观察：
-
-```bash
-tail -f loop-graph-debug.log
-```
-
-## 生命周期事件
-
-| 事件 | 触发时机 | 关键信息 |
-| --- | --- | --- |
-| `graph_start` | 图开始运行 | graphId、调用边界、调用方式 |
-| `node_enter` | 节点进入 | graphId、nodeId、执行周期标识、嵌套深度 |
-| `node_exit` | 节点退出 | graphId、nodeId、状态、嵌套深度 |
-| `compaction` | 上下文压缩 | graphId、nodeId、压缩代次、原因 |
-| `output_contract.prepared` | 单次 Agent Run 的输出契约准备完成 | graphRunId、scopeId、agentRunId、schemaFingerprint、schemaBytes |
-| `completion.submitted` | Agent 提交候选结果 | Agent Run 关联信息、自报状态；不含业务 result |
-| `completion.validation_started` | 某一层完成验证开始 | validatorStage、schemaFingerprint |
-| `completion.rejected` | 候选结果被拒绝 | validatorStage、原因、总耗时 |
-| `completion.accepted` | 候选结果通过并形成完成信号 | completionStatus、总耗时 |
-| `completion.failed` | 验收触发节点或图失败 | scope、validatorStage、原因、总耗时 |
-| `graph_end` | 图正常结束 | graphId、状态、总步数 |
-| `graph_error` | 图异常终止 | graphId、错误文本 |
-
-所有事件都包含时间戳和 `graphId`。Agent Run 事件还包含 `graphRunId`、`scopeId` 和 `agentRunId`，可直接形成图运行 → 节点访问 → Agent Run 的关联关系。完成事件默认不记录完整 schema 或业务 result。
-
-## 运行规则
-
-1. 初始化时传入 `traceSink`、`logger` 或 `debug: true`；三者互不冲突，可同时使用。
-2. 图运行期间，每个生命周期阶段触发对应事件。
-3. sink / logger / JSONL 的失败不影响图执行——框架始终保证 sink 的异常被静默捕获。
-4. debug JSONL 文件使用同步追加写入；SDK 不负责轮转、清理或多进程协调。
-
-## 安全边界与常见错误
-
-- **生产环境不要开启 `debug: true`**：JSONL 文件会持续增长且可能包含敏感的业务数据（如 prompt 和 result 内容）。生产环境应使用 `traceSink` 送往受控的遥测系统。
-- **logger 和 traceSink 是独立的**：logger 不会自动转发到 traceSink，反之亦然。如果你希望统一记录，在 traceSink 中处理即可。
-- **不要依赖 `traceSink` 做业务逻辑**：事件是只读快照，且抛错会被静默处理。不要在 sink 中修改图状态或抛出错误来影响执行。
-- **debug JSONL 使用同步写入**：高频率事件（如每个 turn 的上下文重组）可能产生大量日志行。考虑配合外部工具做按需过滤。
-
-## 常见调试流程
-
-### 排查“Agent 不退出”
-
-先用 `node_enter` 定位节点，再按 `scopeId`、`agentRunId` 查看最后一条 `completion.submitted`。若随后出现 `completion.rejected`，可直接读取 `validatorStage` 和拒绝原因；只有 submitted 而没有后续决定，说明验证仍在执行或运行被外部中断。
-
-### 排查“图莫名终止”
-
-1. 查找 `graph_error` 事件中的错误文本。
-2. 查看最后一个 `node_enter` 或 `node_exit`，定位当时所在节点。
-3. 若收到 `graph_end` 而非 `graph_error`，检查该节点是否没有匹配的边。
-
-## 相关概念
-
-- [自动验证](automatic-validation.md) — 如何记录和排查验证驳回
-- [上下文自定义](customize-context.md) — context 事件与展示的关系
-- [构建循环](build-a-loop.md) — 如何在循环图中使用事件排查死循环
+- [API 参考](../reference/api.md) — createGraphHost、RunStore 签名
+- [配置项](../reference/configuration.md) — recording 配置
+- [`/replay` 子路径](https://www.npmjs.com/package/pi-loop-graph-sdk?activeTab=code) — parseReplay、exportReplayHtml

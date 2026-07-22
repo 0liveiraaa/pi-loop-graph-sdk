@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: "Phase 6 — __graph_complete__ accepts { result } only; old status ABI removed"
 ---
 
 # 固定 completion 控制 ABI，在 Runtime 校验业务结果并开放 skill 内容来源
