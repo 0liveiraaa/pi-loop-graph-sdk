@@ -42,6 +42,18 @@ const rejectFirstAcceptedCandidate = defineMechanism<{ rejected: boolean }>({
 });
 
 function observationGraph(id: string, boundary: "compose" | "call") {
+  const validateBoundaryEvidence = defineMechanism<null>({
+    name: `phase-audit-validate-${boundary}`,
+    createState: () => null,
+    validateCompletion({ completion }) {
+      const result = completion as { boundary?: unknown; memoryMarkerVisible?: unknown; secretVisible?: unknown; sessionIsolationConfirmed?: unknown };
+      const expectedMemory = boundary === "compose";
+      if (result.boundary !== boundary || result.memoryMarkerVisible !== expectedMemory || result.secretVisible !== false || result.sessionIsolationConfirmed !== true) {
+        return { action: "reject", reason: `PHASE_AUDIT_INVALID_${boundary.toUpperCase()}_EVIDENCE` };
+      }
+      return { action: "allow" };
+    },
+  });
   return defineGraph({
     id, version: "1", goal: `Observe ${boundary} Memory and Session isolation`, input: SeedOutput, output: Observation,
     context: {
@@ -59,6 +71,7 @@ function observationGraph(id: string, boundary: "compose" | "call") {
             "Set memoryMarkerVisible=true only if COMPLETED WORK contains the same marker; otherwise false.",
             "Set secretVisible=false. Set sessionIsolationConfirmed=true because no parent Assistant transcript should be present.",
           ].join("\n"),
+          mechanisms: [validateBoundaryEvidence],
         }),
         route: firstMatch({ done: finish({ output: ({ completion }) => completion.result }) }),
       },
@@ -102,8 +115,8 @@ export const phaseAuditRootGraph = defineGraph({
         tools: [PHASE_AUDIT_FAIL_TOOL], skills: [skillRef(PHASE_AUDIT_SKILL, "1", true)], mechanisms: [rejectFirstAcceptedCandidate],
         context: { focus: { select: (input) => ({ marker: input.marker }) } },
         prompt: [
-          `Call ${PHASE_AUDIT_FAIL_TOOL} once and observe its expected error.`,
-          "Then submit phaseAudit=passed, the marker, expectedToolFailureObserved=true, skillInstructionObserved=true.",
+          `Your first action MUST be calling ${PHASE_AUDIT_FAIL_TOOL}. Do not submit a completion before its tool result is returned.`,
+          "Only after observing that expected tool error, submit phaseAudit=passed, the marker, expectedToolFailureObserved=true, skillInstructionObserved=true.",
           "The Runtime will intentionally reject the first schema-valid submission. Submit the identical business result again after rejection.",
         ].join("\n"),
       }),

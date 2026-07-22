@@ -34,7 +34,30 @@ try {
   const modelView = parseReplay(replay);
   const htmlPath = join(outputRoot, result.rootRunId, "report.html");
   await writeFile(htmlPath, exportReplayHtml(modelView), "utf8");
-  process.stdout.write(`${JSON.stringify({ result, replayPath, htmlPath, registeredGraphs: phaseAuditGraphs.map((graph) => `${graph.id}@${graph.version}`) }, null, 2)}\n`);
+  const replayDocument = JSON.parse(replay);
+  const events = replayDocument.events ?? [];
+  const hasEvent = (domain, type, predicate = () => true) => events.some((entry) =>
+    entry.event?.domain === domain && entry.event?.type === type && predicate(entry.event.data ?? {}, entry));
+  const hasCompletionSubmission = (boundary, memoryMarkerVisible) => hasEvent("tool", "tool_execution_started", (data) =>
+    data.toolName === "__graph_complete__"
+    && data.args?.result?.boundary === boundary
+    && data.args?.result?.memoryMarkerVisible === memoryMarkerVisible);
+  const auditChecks = {
+    runCompleted: result.status === "completed" && result.output?.phaseAudit === "passed",
+    replayComplete: result.replay.status === "complete" && replayDocument.recording?.status === "complete",
+    composeEntered: hasEvent("graph", "graph_entered", (data) => data.graphId === "phase_audit_compose" && data.boundary === "compose"),
+    callEntered: hasEvent("graph", "graph_entered", (data) => data.graphId === "phase_audit_call" && data.boundary === "call"),
+    composeMemoryVisible: hasCompletionSubmission("compose", true),
+    callMemoryIsolated: hasCompletionSubmission("call", false),
+    expectedToolFailureRecorded: hasEvent("tool", "tool_execution_finished", (data) => data.toolName === PHASE_AUDIT_FAIL_TOOL && data.isError === true),
+    completionRejectedThenAccepted: hasEvent("completion", "completion.rejected", (data) => data.reason === "PHASE_AUDIT_EXPECTED_FIRST_REJECTION")
+      && hasEvent("completion", "completion.accepted"),
+    skillInstructionProjected: replay.includes("PHASE_AUDIT_SKILL_TOKEN"),
+    secretNotRecorded: !replay.includes("PHASE_AUDIT_SECRET_MUST_NOT_APPEAR"),
+  };
+  const failedChecks = Object.entries(auditChecks).filter(([, passed]) => !passed).map(([name]) => name);
+  process.stdout.write(`${JSON.stringify({ result, replayPath, htmlPath, registeredGraphs: phaseAuditGraphs.map((graph) => `${graph.id}@${graph.version}`), auditChecks, failedChecks }, null, 2)}\n`);
+  if (failedChecks.length > 0) process.exitCode = 1;
 } finally {
   await host.dispose();
 }

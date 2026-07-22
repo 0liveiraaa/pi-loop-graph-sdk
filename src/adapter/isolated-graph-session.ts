@@ -150,17 +150,18 @@ export function createIsolatedGraphSessionFactory(
             pricingResolver: options.pricingResolver,
             createInvocationAgentHost: (_request: InvocationAgentHostRequest, recorder: Recorder | null) => createPiInvocationAgentHost(options, recorder),
           } as any);
-          for (const graph of options.graphs ?? []) loop.registerGraph(graph);
         },
       ],
     });
     await resourceLoader.reload();
 
     const customToolNames = (options.customTools ?? []).map((tool) => tool.name);
+    const catalogToolNames = options.toolCatalog?.names ?? [];
     const activeTools = [
       "read",
       ...(legacyOptions.defaultTools ?? []),
       ...customToolNames,
+      ...catalogToolNames,
       "__graph_complete__",
     ];
 
@@ -183,6 +184,9 @@ export function createIsolatedGraphSessionFactory(
       throw new Error("runtime-only LoopGraph extension 初始化失败");
     }
     const runtime = loop as LoopGraphExtension;
+    // Resource loading may instantiate the inline extension more than once. Register
+    // only after createAgentSession has selected the final instance that run() uses.
+    for (const graph of options.graphs ?? []) runtime.registerGraph(graph);
 
     return {
       run(graph, request) {
@@ -257,12 +261,12 @@ export async function createPiInvocationAgentHost(
           recording: "off",
           createInvocationAgentHost: (_request, nestedRecorder) => createPiInvocationAgentHost(options, nestedRecorder),
         });
-        for (const graph of options.graphs ?? []) loop.registerGraph(graph);
       },
     ],
   });
   await resourceLoader.reload();
   const customToolNames = (options.customTools ?? []).map((tool) => tool.name);
+  const catalogToolNames = options.toolCatalog?.names ?? [];
   const { session } = await createAgentSession({
     cwd,
     agentDir,
@@ -274,13 +278,15 @@ export async function createPiInvocationAgentHost(
     settingsManager,
     resourceLoader,
     customTools: options.customTools,
-    tools: [...new Set(["read", ...customToolNames, "__graph_complete__"])],
+    tools: [...new Set(["read", ...customToolNames, ...catalogToolNames, "__graph_complete__"])],
   });
   if (!loop) {
     session.dispose();
     throw new Error("invocation-scoped Pi Agent Host 初始化失败");
   }
-  const agentHost = (loop as LoopGraphExtension).createAgentHost(recorder);
+  const runtime = loop as LoopGraphExtension;
+  for (const graph of options.graphs ?? []) runtime.registerGraph(graph);
+  const agentHost = runtime.createAgentHost(recorder);
   let disposed = false;
   return {
     runAgent: agentHost.runAgent,

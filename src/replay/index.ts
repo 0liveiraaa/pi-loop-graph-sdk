@@ -11,6 +11,8 @@ export type {
   ReplayEventScope,
 } from "./events.js";
 export { FileRunStore } from "./store.js";
+export { CHECKPOINT_SCHEMA_VERSION, encodeCheckpoint, decodeCheckpoint } from "./checkpoint.js";
+export type { CheckpointDocument, CheckpointNodeBoundary } from "./checkpoint.js";
 export type {
   ArtifactStore,
   CheckpointStore,

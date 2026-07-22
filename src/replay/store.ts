@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile, appendFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import type { ReplayArtifactRef } from "./events.js";
 
@@ -16,6 +16,9 @@ export interface ArtifactStore {
 export interface CheckpointStore {
   writeCheckpoint(runId: string, checkpointId: string, content: string): Promise<void>;
   readCheckpoint(runId: string, checkpointId: string): Promise<string>;
+  listCheckpoints?(runId: string): Promise<readonly string[]>;
+  pruneCheckpoints?(runId: string, keep: readonly string[]): Promise<void>;
+  deleteCheckpoint?(runId: string, checkpointId: string): Promise<void>;
 }
 
 export interface RunStore extends JournalStore, ArtifactStore, CheckpointStore {
@@ -76,6 +79,29 @@ export class FileRunStore implements RunStore {
     return readFile(join(this.runDir(runId), "checkpoints", safeSegment(checkpointId, "checkpointId")), "utf8");
   }
 
+  async listCheckpoints(runId: string): Promise<readonly string[]> {
+    try {
+      return Object.freeze((await readdir(join(this.runDir(runId), "checkpoints"), { withFileTypes: true }))
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name)
+        .sort());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
+      throw error;
+    }
+  }
+
+  async pruneCheckpoints(runId: string, keep: readonly string[]): Promise<void> {
+    const retained = new Set(keep.map((id) => safeSegment(id, "checkpointId")));
+    for (const id of await this.listCheckpoints(runId)) {
+      if (!retained.has(id)) await this.deleteCheckpoint(runId, id);
+    }
+  }
+
+  async deleteCheckpoint(runId: string, checkpointId: string): Promise<void> {
+    await rm(join(this.runDir(runId), "checkpoints", safeSegment(checkpointId, "checkpointId")), { force: true });
+  }
+
   async writeReplay(runId: string, content: string): Promise<void> {
     const dir = this.runDir(runId);
     await mkdir(dir, { recursive: true });
@@ -108,4 +134,3 @@ function safeSegment(value: string, name: string): string {
   }
   return value;
 }
-
