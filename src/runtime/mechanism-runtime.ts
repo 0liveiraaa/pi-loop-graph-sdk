@@ -197,6 +197,43 @@ export class MechanismRuntime {
     }
   }
 
+  /** Yield JSON-compatible snapshots for all mechanisms that implement snapshot. */
+  snapshotAll(chains: readonly MechanismChain[]): readonly { readonly name: string; readonly snapshot: JsonValue }[] {
+    const snapshots: { name: string; snapshot: JsonValue }[] = [];
+    for (const invocation of flatten(chains)) {
+      if (invocation.definition.snapshot) {
+        try {
+          const snapshot = invocation.definition.snapshot(invocation.context.state);
+          if (!isJsonValue(snapshot)) throw new Error("Mechanism snapshot must be JSON-compatible");
+          snapshots.push({ name: invocation.definition.name, snapshot });
+        } catch (error) {
+          // Observation: snapshots are best-effort; failure does not alter control flow.
+          const message = `Mechanism "${invocation.definition.name}" snapshot failed: ${error instanceof Error ? error.message : String(error)}`;
+          this.warn?.(message);
+        }
+      }
+    }
+    return Object.freeze(snapshots);
+  }
+
+  /** Restore mechanism state from a checkpoint. A declared restore hook is fail-closed. */
+  restoreState(chains: readonly MechanismChain[], saved: readonly { readonly name: string; readonly snapshot: JsonValue }[]): void {
+    const snapshotMap = new Map(saved.map((s) => [s.name, s.snapshot]));
+    for (const invocation of flatten(chains)) {
+      if (!invocation.definition.restore) continue;
+      const snapshot = snapshotMap.get(invocation.definition.name);
+      if (snapshot === undefined) continue;
+      try {
+        const restored = invocation.definition.restore(snapshot);
+        if (!isJsonValue(restored)) throw new Error("Restored mechanism state must be JSON-compatible");
+        (invocation.context as { state: JsonValue }).state = restored;
+      } catch (error) {
+        throw this.error(invocation.definition, invocation.installation, "createState", invocation.scope.scopeId,
+          new Error(`checkpoint restore failed: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
+  }
+
   private async observe(chain: MechanismChain, hookName: "onRootEnter" | "onGraphEnter" | "onNodeEnter"): Promise<void> {
     for (const invocation of chain.invocations) {
       const hook = invocation.definition[hookName] as ((ctx: MechanismContext) => void | Promise<void>) | undefined;

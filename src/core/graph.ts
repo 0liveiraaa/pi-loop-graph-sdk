@@ -74,6 +74,10 @@ export interface CodeNodeExecution<TInput, TResult> {
   readonly input: Readonly<TInput>;
   readonly complete: (result: TResult) => TResult;
   readonly runAgent: (request: AgentRunRequest) => Promise<NodeCompletion>;
+  /** Present during resume; use for idempotent-side-effect guards. */
+  readonly resumeAttempt?: number;
+  readonly nodeVisitId?: string;
+  readonly rootRunId?: string;
 }
 
 export interface AgentRunRequest {

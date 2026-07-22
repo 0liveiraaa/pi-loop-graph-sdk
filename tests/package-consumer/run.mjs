@@ -61,6 +61,7 @@ const available = [
   ["pi-loop-graph-sdk", /\\/dist\\/index\\.js$/],
   ["pi-loop-graph-sdk/extension", /\\/dist\\/adapter\\/extension\\.js$/],
   ["pi-loop-graph-sdk/replay", /\\/dist\\/replay\\/index\\.js$/],
+  ["pi-loop-graph-sdk/advanced", /\\/dist\\/advanced\\.js$/],
 ];
 
 for (const [specifier, expectedPath] of available) {
@@ -71,19 +72,11 @@ for (const [specifier, expectedPath] of available) {
   await import(specifier);
 }
 
-for (const specifier of ["pi-loop-graph-sdk/advanced"]) {
-  try {
-    await import(specifier);
-    throw new Error(specifier + " unexpectedly exists before its implementation phase");
-  } catch (error) {
-    if (error?.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw error;
-  }
-}
 `);
 
   runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], consumerRoot);
   run(process.execPath, ["verify.mjs"], consumerRoot);
-  process.stdout.write("Packed consumer verified root, replay, and extension from dist; advanced remains a later 0.2 gap.\n");
+  process.stdout.write("Packed consumer verified root, replay, advanced, and extension from dist.\n");
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }

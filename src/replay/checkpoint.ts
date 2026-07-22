@@ -6,6 +6,8 @@ export interface CheckpointNodeBoundary {
   readonly kind: "node-boundary";
   readonly schemaVersion: typeof CHECKPOINT_SCHEMA_VERSION;
   readonly checkpointId: string;
+  /** Monotonic wall-clock ordering metadata; checkpoint ids are opaque. */
+  readonly createdAt?: string;
   readonly rootRunId: string;
   readonly graph: { readonly id: string; readonly version: string };
   readonly invocationStack: readonly {
@@ -13,10 +15,13 @@ export interface CheckpointNodeBoundary {
     readonly parentGraphInvocationId?: string;
     readonly boundary: "root" | "call" | "compose" | "delegate";
     readonly depth: number;
+    readonly graph?: { readonly id: string; readonly version: string };
   }[];
   readonly next: {
     readonly stageId: string;
     readonly nodeInput: JsonValue;
+    /** Stable identity for repeated attempts to resume this pending Node Visit. */
+    readonly nodeVisitId?: string;
   };
   readonly frames: readonly JsonValue[];
   readonly budget: JsonValue;
@@ -51,6 +56,17 @@ function assertCheckpoint(value: unknown): asserts value is CheckpointDocument {
   if (!isRecord(value.next) || !isNonEmpty(value.next.stageId) || !Number.isInteger(value.resumeAttempt) || value.resumeAttempt < 0) {
     throw new Error("Checkpoint next boundary is invalid");
   }
+  if (value.createdAt !== undefined && (typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt)))) {
+    throw new Error("Checkpoint createdAt is invalid");
+  }
+  for (const entry of value.invocationStack) {
+    if (!isRecord(entry) || !isNonEmpty(entry.graphInvocationId) || !Number.isInteger(entry.depth) || entry.depth < 1
+      || !["root", "call", "compose", "delegate"].includes(entry.boundary)) throw new Error("Checkpoint invocation stack is invalid");
+  }
+  if (!isJson(value.next.nodeInput) || !value.frames.every(isJson) || !isJson(value.budget)
+    || !value.mechanisms.every((item: unknown) => isRecord(item) && isNonEmpty(item.name) && isJson(item.snapshot))) {
+    throw new Error("Checkpoint payload is not JSON-compatible");
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -59,4 +75,11 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 function isNonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isJson(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJson);
+  return isRecord(value) && Object.values(value).every(isJson);
 }

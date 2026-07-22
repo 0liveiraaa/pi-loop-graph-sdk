@@ -5,7 +5,7 @@ import type { GraphRunResult } from "../core/result.js";
 import type { RecordingMode } from "../core/result.js";
 import { GraphRuntime, type GraphRuntimeHost } from "../runtime/graph-runtime.js";
 import { RuntimeEventBus } from "../runtime/event-bus.js";
-import { FileRunStore, type RunStore } from "../replay/store.js";
+import { FileRunStore, type RunStore, type CheckpointStore } from "../replay/store.js";
 import { Recorder } from "../replay/recorder.js";
 import type { PricingResolver } from "../replay/events.js";
 
@@ -17,11 +17,24 @@ export interface GraphHostRunOptions {
   readonly recordingRequired?: boolean;
 }
 
+export interface GraphHostResumeOptions {
+  readonly runId: string;
+  readonly signal?: AbortSignal;
+  readonly maxSteps?: number;
+  readonly checkpointMigrator?: (saved: { readonly id: string; readonly version: string }) => { readonly id: string; readonly version: string };
+  readonly recording?: RecordingMode;
+  readonly recordingRequired?: boolean;
+}
+
 export interface GraphHost {
   execute<TInputSchema extends TSchema, TOutputSchema extends TSchema>(
     graph: Graph<TInputSchema, TOutputSchema>,
     input: SchemaValue<TInputSchema>,
     options?: GraphHostRunOptions,
+  ): Promise<GraphRunResult<SchemaValue<TOutputSchema>>>;
+  resume<TInputSchema extends TSchema, TOutputSchema extends TSchema>(
+    graph: Graph<TInputSchema, TOutputSchema>,
+    options: GraphHostResumeOptions,
   ): Promise<GraphRunResult<SchemaValue<TOutputSchema>>>;
   dispose(): Promise<void>;
 }
@@ -32,6 +45,7 @@ export interface CreateGraphHostOptions {
   readonly recording?: RecordingMode;
   readonly recordingRequired?: boolean;
   readonly runStore?: RunStore;
+  readonly checkpointStore?: CheckpointStore;
   readonly artifactThresholdBytes?: number;
   readonly pricingResolver?: PricingResolver;
 }
@@ -39,8 +53,9 @@ export interface CreateGraphHostOptions {
 /** Owns one Core Runtime execution lane. Concurrent roots require separate hosts. */
 export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost {
   const eventBus = options.runtime?.eventBus ?? new RuntimeEventBus();
-  const runtime = new GraphRuntime({ ...options.runtime, eventBus });
   const runStore = options.runStore ?? new FileRunStore();
+  const checkpointStore = options.checkpointStore ?? runStore;
+  const runtime = new GraphRuntime({ ...options.runtime, eventBus, checkpointStore });
   let running = false;
   let activeRun: Promise<GraphRunResult<any>> | undefined;
   let activeController: AbortController | undefined;
@@ -90,6 +105,65 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
         return { ...result, replay: finalized.replay };
       } finally {
         runOptions.signal?.removeEventListener("abort", onAbort);
+        running = false;
+        activeController = undefined;
+      }
+      })();
+      activeRun = execution;
+      try {
+        return await execution;
+      } finally {
+        if (activeRun === execution) activeRun = undefined;
+      }
+    },
+    async resume(graph, resumeOptions = { runId: "" }) {
+      if (disposed) throw new Error("GraphHost 已释放");
+      if (running) throw new Error("GraphHost 已有 Root Run 正在执行；并发运行必须创建独立 Host");
+      running = true;
+      const controller = new AbortController();
+      activeController = controller;
+      const onAbort = () => controller.abort(resumeOptions.signal?.reason);
+      if (resumeOptions.signal?.aborted) onAbort();
+      else resumeOptions.signal?.addEventListener("abort", onAbort, { once: true });
+      const recording = resumeOptions.recording ?? options.recording ?? "replay";
+      const recordingRequired = resumeOptions.recordingRequired ?? options.recordingRequired ?? false;
+      const recorder = recording === "off" ? undefined : new Recorder({
+        mode: recording,
+        store: runStore,
+        artifactThresholdBytes: options.artifactThresholdBytes,
+        pricingResolver: options.pricingResolver,
+      });
+      recorder?.attach(eventBus);
+      const execution: Promise<GraphRunResult<any>> = (async () => {
+      try {
+        const result = await runtime.resume(graph, {
+          runId: resumeOptions.runId,
+          signal: controller.signal,
+          maxSteps: resumeOptions.maxSteps,
+          checkpointMigrator: resumeOptions.checkpointMigrator,
+        });
+        if (!recorder) return { ...result, replay: Object.freeze({ mode: "off", status: "off" }) };
+        const finalized = await recorder.finalize(result);
+        if (recordingRequired && finalized.replay.status !== "complete") {
+          return {
+            rootRunId: result.rootRunId,
+            graphId: result.graphId,
+            graphVersion: result.graphVersion,
+            steps: result.steps,
+            durationMs: result.durationMs,
+            replay: finalized.replay,
+            status: "failed" as const,
+            failure: {
+              code: "persistence-failed",
+              phase: "host",
+              message: finalized.replay.issues?.join("; ") ?? "Replay recording failed",
+              retryable: true,
+            },
+          } as GraphRunResult<any>;
+        }
+        return { ...result, replay: finalized.replay };
+      } finally {
+        resumeOptions.signal?.removeEventListener("abort", onAbort);
         running = false;
         activeController = undefined;
       }

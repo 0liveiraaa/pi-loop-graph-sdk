@@ -57,4 +57,17 @@ export class InvocationBudget {
       maxDepthReached: this.maxDepthReached,
     });
   }
+
+  /** Restore budget position from a saved checkpoint. New usage must be at least as high. */
+  restore(usage: InvocationBudgetUsage): void {
+    if (usage.graphInvocations < 0 || usage.nodeVisits < 0 || usage.maxDepthReached < 0) {
+      throw new Error("Invalid budget usage");
+    }
+    if (usage.maxDepthReached > this.limits.maxGraphDepth) {
+      throw new InvocationBudgetExceededError("graph-depth", `Checkpoint depth ${usage.maxDepthReached} exceeds maxGraphDepth ${this.limits.maxGraphDepth}`);
+    }
+    this.graphInvocations = Math.max(this.graphInvocations, usage.graphInvocations);
+    this.nodeVisits = Math.max(this.nodeVisits, usage.nodeVisits);
+    this.maxDepthReached = Math.max(this.maxDepthReached, usage.maxDepthReached);
+  }
 }

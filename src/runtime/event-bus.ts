@@ -14,6 +14,7 @@ export type RuntimeEvent =
   | { readonly type: "context_snapshot_materialized"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly memoryRevision: number; readonly layerCount: number }
   | { readonly type: "mechanism_scope_opened" | "mechanism_scope_closed"; readonly rootRunId: string; readonly graphInvocationId?: string; readonly nodeVisitId?: string; readonly installation: "host" | "graph" | "node"; readonly count: number }
   | { readonly type: "transition_selected"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly stageId: string; readonly connectionId: string; readonly target: string }
+  | { readonly type: "checkpoint_saved"; readonly rootRunId: string; readonly graphInvocationId: string; readonly checkpointId: string; readonly nextStageId: string }
   | { readonly type: "runtime_warning"; readonly rootRunId: string; readonly graphInvocationId?: string; readonly stageId?: string; readonly code: "unsafe-tool-policy-bypass" | "unsafe-host-baseline" | "unmanaged-mechanism-access"; readonly message: string };
 
 export type RuntimeEventListener = (event: RuntimeEvent) => void;

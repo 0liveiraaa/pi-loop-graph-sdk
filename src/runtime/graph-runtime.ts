@@ -41,6 +41,8 @@ import {
   InvocationBudgetExceededError,
 } from "./invocation-budget.js";
 import { MechanismRuntime, MechanismRuntimeError, type MechanismChain, type MechanismRuntimeOptions } from "./mechanism-runtime.js";
+import type { CheckpointStore } from "../replay/store.js";
+import { decodeCheckpoint, encodeCheckpoint, type CheckpointNodeBoundary } from "../replay/checkpoint.js";
 
 export type InvocationBoundary = "root" | "call" | "compose" | "delegate";
 
@@ -131,6 +133,8 @@ export interface GraphRuntimeHost {
   readonly maxStickyContextBytes?: number;
   readonly mechanisms?: readonly Mechanism[];
   readonly mechanismRuntime?: MechanismRuntimeOptions;
+  /** Store for persisting node-boundary checkpoints. */
+  readonly checkpointStore?: CheckpointStore;
   runAgent?(
     node: AgentNodeDefinition,
     input: JsonValue,
@@ -183,6 +187,8 @@ export class GraphRuntime {
   readonly eventBus: RuntimeEventBus;
   private readonly mechanismRuns = new WeakMap<RootRunState, { runtime: MechanismRuntime; host: MechanismChain }>();
   private readonly invocationAgentHosts = new Map<string, InvocationAgentHost>();
+  private readonly activeInvocations = new Map<string, { state: GraphInvocationState; parentId?: string }>();
+  private readonly activeGraphMechanisms = new Map<string, MechanismChain>();
 
   constructor(private readonly host: GraphRuntimeHost = {}) {
     this.eventBus = host.eventBus ?? new RuntimeEventBus();
@@ -327,6 +333,7 @@ export class GraphRuntime {
         boundary,
         depth,
       });
+      this.activeInvocations.set(state.graphInvocationId, { state, parentId: state.parentGraphInvocationId });
 
       if ((boundary === "call" || boundary === "compose") && this.host.createInvocationAgentHost) {
         const agentHost = await this.host.createInvocationAgentHost({ root, invocation: state });
@@ -374,6 +381,7 @@ export class GraphRuntime {
         rootRunId: root.rootRunId,
         graphInvocationId: state.graphInvocationId,
       }, contextState);
+      this.activeGraphMechanisms.set(state.graphInvocationId, graphMechanisms);
       this.eventBus.emit({ type: "mechanism_scope_opened", rootRunId: root.rootRunId, graphInvocationId: state.graphInvocationId, installation: "graph", count: graphMechanisms.invocations.length });
       await request.mechanismRuntime.enter([request.hostMechanisms, graphMechanisms], "onGraphEnter");
 
@@ -577,6 +585,18 @@ export class GraphRuntime {
           this.assertNotCancelled(root);
           stageId = connection.to;
           exitNode();
+
+          // Node-boundary checkpoint: transition done, next Node not yet started.
+          await this.writeNodeCheckpoint(
+            root,
+            state,
+            nodeVisit,
+            stageId,
+            nodeInput,
+            frames,
+            request.mechanismRuntime,
+            request.hostMechanisms,
+          );
         } catch (error) {
           if (error instanceof RuntimeFailure) {
             exitNode();
@@ -613,9 +633,11 @@ export class GraphRuntime {
       if (state) {
         const agentHost = this.invocationAgentHosts.get(state.graphInvocationId);
         this.invocationAgentHosts.delete(state.graphInvocationId);
+        this.activeInvocations.delete(state.graphInvocationId);
         await agentHost?.dispose();
       }
       if (graphMechanisms) {
+        this.activeGraphMechanisms.delete(state!.graphInvocationId);
         await request.mechanismRuntime.graphExit([request.hostMechanisms, graphMechanisms], graphError);
         await request.mechanismRuntime.close(graphMechanisms);
         this.eventBus.emit({ type: "mechanism_scope_closed", rootRunId: root.rootRunId, graphInvocationId: state?.graphInvocationId, installation: "graph", count: graphMechanisms.invocations.length });
@@ -710,6 +732,8 @@ export class GraphRuntime {
         result = await node.execute({
           input: input as never,
           complete: (value) => value,
+          rootRunId: root.rootRunId,
+          nodeVisitId: nodeVisit.nodeVisitId,
           runAgent: async (agentRequest) => ({
             result: await this.runCodeAgent(
           agentRequest,
@@ -1100,6 +1124,688 @@ export class GraphRuntime {
     return this.host.catalog?.resolve(ref) ?? this.host.resolveGraph?.(ref);
   }
 
+  private buildInvocationStack(rootRunId: string): readonly {
+    readonly graphInvocationId: string;
+    readonly parentGraphInvocationId?: string;
+    readonly boundary: "root" | "call" | "compose" | "delegate";
+    readonly depth: number;
+    readonly graph: GraphRef;
+  }[] {
+    // Walk all active invocations from root to deepest, ordered by depth.
+    const byParent = new Map<string | undefined, string[]>();
+    for (const [id, entry] of this.activeInvocations) {
+      if (entry.state.rootRunId !== rootRunId) continue;
+      const key = entry.parentId ?? undefined;
+      if (!byParent.has(key)) byParent.set(key, []);
+      byParent.get(key)!.push(id);
+    }
+    const stack: ReturnType<typeof this.buildInvocationStack>[number][] = [];
+    let current: string | undefined = byParent.get(undefined)?.[0];
+    while (current) {
+      const entry = this.activeInvocations.get(current);
+      if (!entry) break;
+      stack.push({
+        graphInvocationId: entry.state.graphInvocationId,
+        parentGraphInvocationId: entry.state.parentGraphInvocationId,
+        boundary: entry.state.boundary,
+        depth: entry.state.depth,
+        graph: entry.state.graph,
+      });
+      current = byParent.get(current)?.[0];
+    }
+    return Object.freeze(stack);
+  }
+
+  private async writeNodeCheckpoint(
+    root: RootRunState,
+    invocation: GraphInvocationState,
+    _nodeVisit: NodeVisitState,
+    nextStageId: string,
+    nextNodeInput: JsonValue,
+    frames: readonly JsonValue[],
+    mechanismRuntime: MechanismRuntime,
+    hostMechanisms: MechanismChain,
+  ): Promise<void> {
+    const store = this.host.checkpointStore;
+    if (!store) return;
+    try {
+      const invocationStack = this.buildInvocationStack(root.rootRunId);
+      // A nested continuation needs parent return/transition state in addition to
+      // the active stack. Until that is encoded, never persist a misleading point.
+      if (invocationStack.length !== 1 || invocation.boundary !== "root") return;
+      const graphChains = [...this.activeGraphMechanisms.values()];
+      const mechanisms = mechanismRuntime.snapshotAll([hostMechanisms, ...graphChains]);
+      const checkpoint: CheckpointNodeBoundary = Object.freeze({
+        kind: "node-boundary",
+        schemaVersion: 1 as const,
+        checkpointId: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        rootRunId: root.rootRunId,
+        graph: invocation.graph,
+        invocationStack,
+        next: Object.freeze({ stageId: nextStageId, nodeInput: nextNodeInput, nodeVisitId: crypto.randomUUID() }),
+        frames: Object.freeze([...frames]),
+        budget: { ...root.budget.usage } as JsonValue,
+        resumeAttempt: 0,
+        mechanisms,
+      });
+      await store.writeCheckpoint(root.rootRunId, checkpoint.checkpointId, encodeCheckpoint(checkpoint));
+      this.eventBus.emit({
+        type: "checkpoint_saved",
+        rootRunId: root.rootRunId,
+        graphInvocationId: invocation.graphInvocationId,
+        checkpointId: checkpoint.checkpointId,
+        nextStageId,
+      });
+    } catch (error) {
+      // Checkpoint write failure must not alter business control flow.
+      this.eventBus.emit({
+        type: "runtime_warning",
+        rootRunId: root.rootRunId,
+        graphInvocationId: invocation.graphInvocationId,
+        code: "unmanaged-mechanism-access",
+        message: `Checkpoint write failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  /** Resume a root graph run from the latest checkpoint. */
+  async resume<TInputSchema extends TSchema, TOutputSchema extends TSchema>(
+    graph: Graph<TInputSchema, TOutputSchema>,
+    options: {
+      readonly runId: string;
+      readonly signal?: AbortSignal;
+      readonly checkpointMigrator?: (saved: { readonly id: string; readonly version: string }) => { readonly id: string; readonly version: string };
+      readonly maxSteps?: number;
+    },
+  ): Promise<GraphRunResult<SchemaValue<TOutputSchema>>> {
+    const store = this.host.checkpointStore;
+    if (!store) {
+      return {
+        rootRunId: options.runId,
+        graphId: graph.id,
+        graphVersion: graph.version,
+        steps: 0,
+        durationMs: 0,
+        replay: Object.freeze({ mode: "off", status: "off" }),
+        status: "failed",
+        failure: runtimeFailure("resume-incompatible", "host", "No checkpoint store configured; cannot resume", false),
+      };
+    }
+
+    let checkpointIds: readonly string[];
+    try {
+      checkpointIds = await (store.listCheckpoints?.(options.runId) ?? []);
+    } catch {
+      return {
+        rootRunId: options.runId,
+        graphId: graph.id,
+        graphVersion: graph.version,
+        steps: 0,
+        durationMs: 0,
+        replay: Object.freeze({ mode: "off", status: "off" }),
+        status: "failed",
+        failure: runtimeFailure("resume-incompatible", "host", "Failed to list checkpoints", false),
+      };
+    }
+    if (checkpointIds.length === 0) {
+      return {
+        rootRunId: options.runId,
+        graphId: graph.id,
+        graphVersion: graph.version,
+        steps: 0,
+        durationMs: 0,
+        replay: Object.freeze({ mode: "off", status: "off" }),
+        status: "failed",
+        failure: runtimeFailure("resume-incompatible", "host", `No checkpoints found for runId: ${options.runId}`, false),
+      };
+    }
+
+    // Checkpoint ids are opaque UUIDs. Inspect ordering metadata instead of
+    // assuming lexicographic filename order represents write order.
+    let latestId = "";
+    let checkpoint: CheckpointNodeBoundary | undefined;
+    try {
+      for (const id of checkpointIds) {
+        const candidate = decodeCheckpoint(await store.readCheckpoint(options.runId, id));
+        if (!checkpoint || checkpointOrder(candidate) > checkpointOrder(checkpoint)) {
+          checkpoint = candidate;
+          latestId = id;
+        }
+      }
+    } catch (error) {
+      return {
+        rootRunId: options.runId,
+        graphId: graph.id,
+        graphVersion: graph.version,
+        steps: 0,
+        durationMs: 0,
+        replay: Object.freeze({ mode: "off", status: "off" }),
+        status: "failed",
+        failure: runtimeFailure("resume-incompatible", "host", `Failed to read or decode checkpoint ${latestId || "unknown"}`, false, undefined, error),
+      };
+    }
+    if (!checkpoint) throw new Error("Checkpoint selection failed");
+
+    // Version check
+    let resolvedGraphId = graph.id;
+    let resolvedGraphVersion = graph.version;
+    if (checkpoint.graph.id !== graph.id || checkpoint.graph.version !== graph.version) {
+      if (!options.checkpointMigrator) {
+        return {
+          rootRunId: options.runId,
+          graphId: graph.id,
+          graphVersion: graph.version,
+          steps: 0,
+          durationMs: 0,
+          replay: Object.freeze({ mode: "off", status: "off" }),
+          status: "failed",
+          failure: runtimeFailure(
+            "resume-incompatible", "host",
+            `Checkpoint graph ${checkpoint.graph.id}@${checkpoint.graph.version} does not match ${graph.id}@${graph.version} and no migrator provided`,
+            false,
+          ),
+        };
+      }
+      const migrated = options.checkpointMigrator(checkpoint.graph);
+      if (migrated.id !== graph.id || migrated.version !== graph.version) {
+        return {
+          rootRunId: options.runId, graphId: graph.id, graphVersion: graph.version, steps: 0, durationMs: 0,
+          replay: Object.freeze({ mode: "off", status: "off" }), status: "failed",
+          failure: runtimeFailure("resume-incompatible", "host", `Checkpoint migrator resolved ${migrated.id}@${migrated.version}, expected ${graph.id}@${graph.version}`, false),
+        };
+      }
+      resolvedGraphId = migrated.id;
+      resolvedGraphVersion = migrated.version;
+    }
+
+    if (checkpoint.rootRunId !== options.runId) {
+      return {
+        rootRunId: options.runId,
+        graphId: graph.id,
+        graphVersion: graph.version,
+        steps: 0,
+        durationMs: 0,
+        replay: Object.freeze({ mode: "off", status: "off" }),
+        status: "failed",
+        failure: runtimeFailure("resume-incompatible", "host", `Checkpoint runId mismatch: ${checkpoint.rootRunId} vs ${options.runId}`, false),
+      };
+    }
+
+    const resumeAttempt = checkpoint.resumeAttempt + 1;
+    const root: RootRunState = Object.freeze({
+      rootRunId: options.runId,
+      startedAt: Date.now(),
+      budget: new InvocationBudget(resolveInvocationLimits()),
+      signal: options.signal,
+      baseline: resolveHostBaseline(this.host.baseline),
+    });
+    root.budget.restore(checkpoint.budget as never);
+
+    const maxSteps = options.maxSteps ?? Number.POSITIVE_INFINITY;
+    const mechanismRuntime = new MechanismRuntime(this.host.mechanismRuntime, (message) => this.eventBus.emit({
+      type: "runtime_warning",
+      rootRunId: root.rootRunId,
+      code: "unmanaged-mechanism-access",
+      message,
+    }));
+
+    this.eventBus.emit({
+      type: "root_started",
+      rootRunId: root.rootRunId,
+      graphId: resolvedGraphId,
+      graphVersion: resolvedGraphVersion,
+    });
+
+    let outcome: InvocationOutcome | undefined;
+    let hostMechanisms: MechanismChain | undefined;
+    const openGraphChains: MechanismChain[] = [];
+    try {
+      hostMechanisms = await mechanismRuntime.open("host", root.rootRunId, this.host.mechanisms ?? [], {
+        rootRunId: root.rootRunId,
+      });
+      await mechanismRuntime.enter([hostMechanisms], "onRootEnter");
+      this.mechanismRuns.set(root, { runtime: mechanismRuntime, host: hostMechanisms });
+
+      if (checkpoint.invocationStack.length !== 1 || checkpoint.invocationStack[0]?.boundary !== "root") {
+        outcome = failureOutcome(runtimeFailure("resume-incompatible", "host", "Nested invocation checkpoints are not supported by this checkpoint schema", false));
+      }
+      const refGraph = graph;
+
+      // Restore mechanism state from checkpoint: open graph mechanisms per invocation
+      for (const entry of outcome ? [] : checkpoint.invocationStack) {
+        if (!refGraph) {
+          outcome = failureOutcome(runtimeFailure("invalid-graph", "graph", `Graph not found: ${resolvedGraphId}@${resolvedGraphVersion}`, false));
+          break;
+        }
+        const gm = await mechanismRuntime.open("graph", entry.graphInvocationId, refGraph.mechanisms ?? [], {
+          rootRunId: root.rootRunId,
+          graphInvocationId: entry.graphInvocationId,
+        });
+        openGraphChains.push(gm);
+      }
+      if (!outcome) {
+        try {
+          mechanismRuntime.restoreState([hostMechanisms, ...openGraphChains], checkpoint.mechanisms);
+        } catch (error) {
+          outcome = failureOutcome(runtimeFailure("resume-incompatible", "host", `Mechanism checkpoint restore failed: ${errorMessage(error)}`, false, undefined, error));
+        }
+
+        const deepest = outcome ? undefined : checkpoint.invocationStack[checkpoint.invocationStack.length - 1];
+        if (!deepest) {
+          outcome = failureOutcome(runtimeFailure("resume-incompatible", "host", "Checkpoint has empty invocation stack", false));
+        } else {
+          const graphMechanisms = openGraphChains[openGraphChains.length - 1];
+          outcome = await this.resumeFromCheckpoint(
+            graph,
+            checkpoint,
+            root,
+            maxSteps,
+            mechanismRuntime,
+            hostMechanisms,
+            graphMechanisms ?? { invocations: [] },
+            resumeAttempt,
+          );
+        }
+      }
+    } catch (error) {
+      outcome = failureOutcome(mapUnexpectedFailure(error, root.signal));
+    } finally {
+      this.mechanismRuns.delete(root);
+      // Close graph mechanisms opened during resume
+      for (const chain of [...openGraphChains].reverse()) {
+        try { await mechanismRuntime.close(chain); } catch { /* cleanup is best-effort */ }
+      }
+      if (hostMechanisms) {
+        await mechanismRuntime.rootExit(hostMechanisms);
+        await mechanismRuntime.close(hostMechanisms);
+      }
+    }
+
+    const usage = root.budget.usage;
+    const steps = usage.nodeVisits;
+    const durationMs = Math.max(0, Date.now() - root.startedAt);
+    this.eventBus.emit({
+      type: "root_finished",
+      rootRunId: root.rootRunId,
+      status: outcome.status,
+      usage,
+    });
+    const common = {
+      rootRunId: root.rootRunId,
+      graphId: graph.id,
+      graphVersion: graph.version,
+      steps,
+      durationMs,
+      replay: Object.freeze({ mode: "off", status: "off" }),
+    } as const;
+    if (outcome.status === "completed") {
+      return { ...common, status: "completed", output: outcome.output as SchemaValue<TOutputSchema> };
+    }
+    const failure = outcome.failure ?? runtimeFailure("runtime-error", "root", "Graph failed without a failure object");
+    return outcome.status === "cancelled"
+      ? { ...common, status: "cancelled", failure: failure as GraphFailure & { code: "cancelled" } }
+      : { ...common, status: "failed", failure };
+  }
+
+  private async resumeFromCheckpoint(
+    graph: Graph,
+    checkpoint: CheckpointNodeBoundary,
+    root: RootRunState,
+    maxSteps: number,
+    mechanismRuntime: MechanismRuntime,
+    hostMechanisms: MechanismChain,
+    graphMechanisms: MechanismChain,
+    resumeAttempt: number,
+  ): Promise<InvocationOutcome> {
+    const deepest = checkpoint.invocationStack[checkpoint.invocationStack.length - 1];
+    if (!deepest) {
+      return failureOutcome(runtimeFailure("resume-incompatible", "host", "Checkpoint has empty invocation stack", false));
+    }
+    const boundary = deepest.boundary;
+    const frames = [...checkpoint.frames];
+    const invocation: GraphInvocationState = {
+      graphInvocationId: deepest.graphInvocationId,
+      rootRunId: root.rootRunId,
+      parentGraphInvocationId: deepest.parentGraphInvocationId,
+      graph: { id: checkpoint.graph.id, version: checkpoint.graph.version },
+      boundary,
+      depth: deepest.depth,
+      frames,
+      frameRevision: { value: 0 },
+    };
+    this.activeInvocations.set(invocation.graphInvocationId, { state: invocation, parentId: invocation.parentGraphInvocationId });
+    try {
+      this.eventBus.emit({
+        type: "graph_entered",
+        rootRunId: root.rootRunId,
+        graphInvocationId: invocation.graphInvocationId,
+        parentGraphInvocationId: invocation.parentGraphInvocationId,
+        graphId: checkpoint.graph.id,
+        graphVersion: checkpoint.graph.version,
+        boundary,
+        depth: deepest.depth,
+      });
+
+      const graphSkills = this.resolveSkills(graph.skills);
+      const graphInput = checkpoint.next.nodeInput;
+
+      const contextState = new ContextState({
+        rootRunId: root.rootRunId,
+        graphInvocationId: invocation.graphInvocationId,
+        graph,
+        graphInput,
+        graphSkills,
+        frames: [...checkpoint.frames],
+        frameRevision: { value: 0 },
+        externalContributions: (nodeVisitId) => mechanismRuntime.contextContributions.filter((item) =>
+          item.lifetime === "root-run"
+          || item.lifetime === "graph-invocation" && item.scopeId === invocation.graphInvocationId
+          || item.lifetime === "node-visit" && item.scopeId === nodeVisitId
+          || item.lifetime === "agent-run"),
+      });
+      await contextState.initialize();
+
+      try {
+        this.activeGraphMechanisms.set(invocation.graphInvocationId, graphMechanisms);
+        await mechanismRuntime.enter([hostMechanisms, graphMechanisms], "onGraphEnter");
+
+        let stageId = checkpoint.next.stageId;
+        let nodeInput: JsonValue = checkpoint.next.nodeInput;
+        const visits = new Map<string, number>();
+
+        for (let localStep = 0; localStep < maxSteps; localStep += 1) {
+          this.assertNotCancelled(root);
+          root.budget.enterNode();
+          const stage = graph.stages[stageId];
+          if (!stage) {
+            return failureOutcome(runtimeFailure("invalid-graph", "graph", `Stage not found: ${stageId}`, false, stageId));
+          }
+          const visit = (visits.get(stageId) ?? 0) + 1;
+          visits.set(stageId, visit);
+
+          // Inject resume identity for Code Node idempotency
+          const nodeVisit: NodeVisitState = Object.freeze({
+            nodeVisitId: checkpoint.next.nodeVisitId ?? stableResumeNodeVisitId(checkpoint),
+            rootRunId: root.rootRunId,
+            graphInvocationId: invocation.graphInvocationId,
+            stageId,
+            visit,
+          });
+          this.eventBus.emit({
+            type: "node_entered",
+            rootRunId: root.rootRunId,
+            graphInvocationId: nodeVisit.graphInvocationId,
+            nodeVisitId: nodeVisit.nodeVisitId,
+            stageId,
+            visit,
+          });
+          const exitNode = () => this.eventBus.emit({
+            type: "node_exited",
+            rootRunId: root.rootRunId,
+            graphInvocationId: nodeVisit.graphInvocationId,
+            nodeVisitId: nodeVisit.nodeVisitId,
+            stageId: nodeVisit.stageId,
+          });
+
+          try {
+            nodeInput = this.validateSchemaBoundary(
+              stage.node.input,
+              nodeInput,
+              "invalid-input",
+              "node",
+              `Node input is invalid at Stage "${stageId}"`,
+              stageId,
+            );
+          } catch (error) {
+            const failure = error instanceof RuntimeFailure
+              ? error.failure
+              : runtimeFailure("invalid-input", "node", errorMessage(error), false, stageId, error);
+            exitNode();
+            return failureOutcome(failure);
+          }
+
+          let completion: NodeCompletion;
+          try {
+            completion = await this.executeNodeWithResume(
+              graph,
+              stage.node,
+              nodeInput,
+              root,
+              invocation,
+              nodeVisit,
+              maxSteps,
+              graphSkills,
+              contextState,
+              mechanismRuntime,
+              hostMechanisms,
+              graphMechanisms,
+              resumeAttempt,
+            );
+            this.assertNotCancelled(root);
+          } catch (error) {
+            const failure = error instanceof RuntimeFailure
+              ? error.failure
+              : error instanceof MechanismRuntimeError
+                ? runtimeFailure("mechanism-failed", error.failure.installation === "node" ? "node" : "graph", error.message, false, stageId, error)
+              : isCancellationError(error, root.signal)
+                ? cancelledFailure(error)
+              : runtimeFailure("runtime-error", stage.node.kind === "agent" ? "agent" : "node", errorMessage(error), true, stageId, error);
+            exitNode();
+            return failureOutcome(failure);
+          }
+
+          try {
+            const result = this.validateSchemaBoundary(
+              stage.node.output,
+              completion.result,
+              "validation-exhausted",
+              stage.node.kind === "agent" ? "agent" : "node",
+              `Node output is invalid at Stage "${stageId}"`,
+              stageId,
+            );
+            completion = Object.freeze({ result });
+          } catch (error) {
+            const failure = error instanceof RuntimeFailure
+              ? error.failure
+              : runtimeFailure("validation-exhausted", "node", errorMessage(error), false, stageId, error);
+            exitNode();
+            return failureOutcome(failure);
+          }
+
+          let connection: Connection | undefined;
+          try {
+            connection = await selectConnection(stage.route, completion);
+            this.assertNotCancelled(root);
+          } catch (error) {
+            if (error instanceof RuntimeFailure) {
+              exitNode();
+              return failureOutcome(error.failure);
+            }
+            if (isCancellationError(error, root.signal)) {
+              exitNode();
+              return failureOutcome(cancelledFailure(error));
+            }
+            exitNode();
+            return failureOutcome(runtimeFailure(
+              "transition-failed",
+              "route",
+              `Route evaluation failed at Stage "${stageId}"`,
+              true,
+              stageId,
+              error,
+            ));
+          }
+          if (!connection) {
+            exitNode();
+            return failureOutcome(runtimeFailure(
+              "no-route",
+              "route",
+              `No Connection matched at Stage "${stageId}"`,
+              false,
+              stageId,
+            ));
+          }
+          this.eventBus.emit({
+            type: "transition_selected",
+            rootRunId: root.rootRunId,
+            graphInvocationId: invocation.graphInvocationId,
+            nodeVisitId: nodeVisit.nodeVisitId,
+            stageId,
+            connectionId: connection.id,
+            target: connection.to,
+          });
+
+          const transitionInput = { completion } as const;
+          try {
+            if (connection.transition.frame) {
+              frames.push(connection.transition.frame(transitionInput));
+              contextState.bumpMemoryRevision();
+            }
+            this.assertNotCancelled(root);
+            if (connection.to === "__graph_finish__") {
+              const output = connection.transition.output?.(transitionInput);
+              if (output === undefined) {
+                throw new Error(`Finish Connection "${connection.id}" did not produce output`);
+              }
+              this.assertNotCancelled(root);
+              const validatedOutput = this.validateSchemaBoundary(
+                graph.output,
+                output,
+                "validation-exhausted",
+                "graph",
+                `Graph output is invalid for ${graph.id}@${graph.version}`,
+                stageId,
+              );
+              exitNode();
+              return completedOutcome(validatedOutput);
+            }
+            nodeInput = connection.transition.map?.(transitionInput) ?? completion.result;
+            this.assertNotCancelled(root);
+            stageId = connection.to;
+            exitNode();
+
+            // Write checkpoint at resumed node boundary
+            await this.writeNodeCheckpoint(
+              root,
+              invocation,
+              nodeVisit,
+              stageId,
+              nodeInput,
+              frames,
+              mechanismRuntime,
+              hostMechanisms,
+            );
+          } catch (error) {
+            if (error instanceof RuntimeFailure) {
+              exitNode();
+              return failureOutcome(error.failure);
+            }
+            if (isCancellationError(error, root.signal)) {
+              exitNode();
+              return failureOutcome(cancelledFailure(error));
+            }
+            exitNode();
+            return failureOutcome(runtimeFailure(
+              "transition-failed",
+              "transition",
+              `Transition "${connection.id}" failed`,
+              true,
+              stageId,
+              error,
+            ));
+          }
+        }
+        return failureOutcome(runtimeFailure(
+          "max-steps-exceeded",
+          "graph",
+          `Graph Invocation exceeded maxSteps ${maxSteps}`,
+          false,
+          stageId,
+        ));
+      } finally {
+        this.activeGraphMechanisms.delete(invocation.graphInvocationId);
+        // graphMechanisms are owned by the resume caller, not closed here.
+      }
+    } finally {
+      this.activeInvocations.delete(invocation.graphInvocationId);
+    }
+  }
+
+  private async executeNodeWithResume(
+    graph: Graph,
+    node: NodeDefinition,
+    input: JsonValue,
+    root: RootRunState,
+    invocation: GraphInvocationState,
+    nodeVisit: NodeVisitState,
+    maxSteps: number,
+    graphSkills: readonly ResolvedSkillView[],
+    contextState: ContextState,
+    mechanismRuntime: MechanismRuntime,
+    hostMechanisms: MechanismChain,
+    graphMechanisms: MechanismChain,
+    resumeAttempt: number,
+  ): Promise<NodeCompletion> {
+    const capabilities = this.resolveNodeCapabilities(graph, nodeVisit.stageId, node, graphSkills, root, invocation);
+    const nodeMechanisms = await mechanismRuntime.open("node", nodeVisit.nodeVisitId, node.mechanisms ?? [], {
+      rootRunId: root.rootRunId,
+      graphInvocationId: invocation.graphInvocationId,
+      nodeVisitId: nodeVisit.nodeVisitId,
+      stageId: nodeVisit.stageId,
+    }, contextState);
+    const chains = [hostMechanisms, graphMechanisms, nodeMechanisms] as const;
+    try {
+      await mechanismRuntime.enter(chains, "onNodeEnter");
+      const { snapshot } = await contextState.materializeNode(
+        nodeVisit.nodeVisitId,
+        nodeVisit.stageId,
+        graph.stages[nodeVisit.stageId],
+        input,
+        capabilities.skills,
+      );
+      let result: JsonValue;
+      if (node.kind === "agent") {
+        result = await this.runAgent(graph, node, input, root, invocation, nodeVisit, 1, maxSteps, capabilities.tools, capabilities.skills, snapshot, contextState, mechanismRuntime, chains);
+      } else if (node.kind === "graph") {
+        result = await this.executeGraphNode(node, input, root, invocation, maxSteps);
+      } else {
+        let agentIndex = 0;
+        result = await node.execute({
+          input: input as never,
+          complete: (value) => value,
+          resumeAttempt,
+          rootRunId: root.rootRunId,
+          nodeVisitId: nodeVisit.nodeVisitId,
+          runAgent: async (agentRequest) => ({
+            result: await this.runCodeAgent(
+              agentRequest,
+              node,
+              root,
+              invocation,
+              nodeVisit,
+              ++agentIndex,
+              maxSteps,
+              capabilities.tools,
+              capabilities.skills,
+              snapshot,
+              contextState,
+              mechanismRuntime,
+              chains,
+            ),
+          }),
+        }) as JsonValue;
+      }
+      await mechanismRuntime.nodeExit(chains, result);
+      return { result };
+    } catch (error) {
+      await mechanismRuntime.nodeError(chains, error);
+      throw error;
+    } finally {
+      await mechanismRuntime.close(nodeMechanisms);
+    }
+  }
+
   private assertNotCancelled(root: RootRunState): void {
     if (root.signal?.aborted) {
       throw new RuntimeFailure(runtimeFailure("cancelled", "root", "Graph execution cancelled", false));
@@ -1237,4 +1943,15 @@ function cancelledFailure(cause?: unknown): GraphFailure {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function checkpointOrder(checkpoint: CheckpointNodeBoundary): number {
+  if (checkpoint.createdAt) return Date.parse(checkpoint.createdAt);
+  // Legacy v1 checkpoints did not carry ordering metadata. They remain readable,
+  // but tie deterministically without pretending their UUID encodes chronology.
+  return 0;
+}
+
+function stableResumeNodeVisitId(checkpoint: CheckpointNodeBoundary): string {
+  return `resume-${checkpoint.checkpointId}-${checkpoint.next.stageId}`;
 }

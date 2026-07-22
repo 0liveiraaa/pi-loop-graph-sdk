@@ -37,7 +37,9 @@ import { IsolatedSessionGraphHost } from "./graph-execution-host.js";
 import type { HostBaseline } from "../host/baseline.js";
 import type { SkillCatalog } from "../host/skill-catalog.js";
 import type { ToolCatalog, UnsafeToolResolver } from "../host/tool-catalog.js";
-import type { GraphHost } from "../host/graph-host.js";
+import { createGraphHost, type GraphHost } from "../host/graph-host.js";
+import { GraphCatalog } from "../host/graph-catalog.js";
+import { FileRunStore } from "../replay/store.js";
 import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
 import type { RecordingMode } from "../core/result.js";
 import type { RunStore } from "../replay/store.js";
@@ -308,7 +310,8 @@ export async function createPiInvocationAgentHost(
 export async function createPiGraphHost(
   options: IsolatedGraphSessionFactoryOptions,
 ): Promise<GraphHost> {
-  const createSession = createIsolatedGraphSessionFactory(options);
+  const effectiveOptions = { ...options, runStore: options.runStore ?? new FileRunStore() };
+  const createSession = createIsolatedGraphSessionFactory(effectiveOptions);
   const session = await createSession({
     background: {},
     invocationKind: "api",
@@ -344,6 +347,40 @@ export async function createPiGraphHost(
       if (disposed) return;
       disposed = true;
       try { await session.abort(); } finally { session.dispose(); }
+    },
+    async resume(graph, resumeOptions) {
+      if (disposed) throw new Error("GraphHost 已释放");
+      if (running) throw new Error("GraphHost 已有 Root Run 正在执行；并发运行必须创建独立 Host");
+      running = true;
+      const catalog = new GraphCatalog();
+      for (const registered of effectiveOptions.graphs ?? []) catalog.register(registered);
+      if (!catalog.has({ id: graph.id, version: graph.version })) catalog.register(graph);
+      const agentHost = await createPiInvocationAgentHost(effectiveOptions, null);
+      const resumeHost = createGraphHost({
+        runtime: {
+          catalog,
+          toolCatalog: effectiveOptions.toolCatalog,
+          skillCatalog: effectiveOptions.skillCatalog,
+          unsafeToolResolver: effectiveOptions.unsafeToolResolver,
+          baseline: effectiveOptions.baseline,
+          runAgent: agentHost.runAgent,
+          runAgentFromCode: agentHost.runAgentFromCode,
+          createInvocationAgentHost: (request) => createPiInvocationAgentHost(effectiveOptions, null),
+        },
+        runStore: effectiveOptions.runStore,
+        checkpointStore: effectiveOptions.runStore,
+        recording: effectiveOptions.recording,
+        recordingRequired: effectiveOptions.recordingRequired,
+        artifactThresholdBytes: effectiveOptions.artifactThresholdBytes,
+        pricingResolver: effectiveOptions.pricingResolver,
+      });
+      try {
+        return await resumeHost.resume(graph, resumeOptions);
+      } finally {
+        running = false;
+        await resumeHost.dispose();
+        await agentHost.dispose();
+      }
     },
   };
 }

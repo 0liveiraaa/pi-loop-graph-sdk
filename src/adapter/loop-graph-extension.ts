@@ -279,6 +279,7 @@ export function createLoopGraphExtension(
       const runtime = new CoreGraphRuntime({
         eventBus,
         catalog,
+        checkpointStore: options.runStore,
         toolCatalog: piToolCatalog,
         skillCatalog: options.skillCatalog,
         unsafeToolResolver: options.unsafeToolResolver,
