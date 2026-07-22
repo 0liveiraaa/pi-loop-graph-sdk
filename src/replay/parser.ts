@@ -265,7 +265,7 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
       const outcome = ev.event.type === "completion.accepted" ? "accepted"
         : ev.event.type === "completion.failed" ? "failed" : "rejected";
       const existing = completionsByArId.get(arId);
-      const stages = completionStagesByArId.get(arId) ?? [];
+      const stages = [...(completionStagesByArId.get(arId) ?? [])];
       completionsByArId.set(arId, Object.freeze({
         ...(existing ?? { timestamp: ev.timestamp, validationStages: Object.freeze(stages) }),
         outcome,

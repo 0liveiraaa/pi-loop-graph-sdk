@@ -1,199 +1,36 @@
-# Loop Graph SDK
+# pi-loop-graph-sdk
 
-> **🌐 English:** This SDK is developed primarily by a Chinese-speaking developer, so the detailed documentation is currently in Chinese. If you're not familiar with Chinese, you can use AI assistants (such as the pi agent, ChatGPT, or Claude) to help translate or interpret the docs. The code examples and API signatures are in TypeScript and are language-agnostic.
->
-> **Install:** `npm install git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1` or `pi install git:github.com/0liveiraaa/pi-loop-graph-sdk`
->
-> See [README-EN.md](README-EN.md) for an English overview.
+面向 Pi 的 0.2 图编排 SDK。公共入口提供 Graph/Node Builder、Graph Host、结果协议与 Pi Extension 工厂；运行时诊断和低层适配器位于 `pi-loop-graph-sdk/advanced`，回放工具位于 `pi-loop-graph-sdk/replay`。
 
----
+```ts
+import { Type } from "typebox";
+import { codeNode, connect, createGraphHost, defineGraph, entry, finish, firstMatch } from "pi-loop-graph-sdk";
 
-面向 pi 的串行、可循环图编排 SDK。
-
-> **版本状态：alpha。** 这是首个测试版本，API 仍可能调整。
-
-Loop Graph SDK 让开发者用代码把复杂任务拆成明确阶段,将skill变为可调用的工作流。每个阶段可以运行普通代码、调用 Agent 或调用子图；阶段完成后，由显式路由决定下一步、保留哪些工作记忆以及是否形成循环。
-
-## 适合什么
-
-- 多阶段生成、检查、修改和再次检查；
-- 代码处理与 Agent 推理混合的串行流程；
-- 根据完成结果选择下一阶段或返回重试；
-- 为不同节点声明工具，并增加工具门禁、自动验收和审计；
-- 通过子图复用一组阶段，同时明确控制上下文共享边界。
-
-## 核心能力
-
-- **两类节点**：code node 执行代码或 Agent，graph node 调用子图。
-- **条件路由和循环**：根据阶段完成结果选择边，也可以返回先前节点。
-- **代码与 Agent 混合**：同一 code node 内可以准备数据、调用 Agent、再处理结果。
-- **自动验证**：输出格式、自定义验证和外部可信验收可以阻止不合格结果放行。
-- **工具控制**：节点声明可用工具，横切扩展可以拒绝、修改或脱敏工具调用。
-- **上下文定制**：控制当前任务说明和已完成工作记忆如何呈现给 Agent。
-- **三种子图边界**：call、compose 和 delegate 提供不同程度的共享与隔离。
-
-整个 SDK 以**栈帧**为核心心智模型：每次节点访问是一次函数调用，传入参数、执行、返回结果，由 Edge 选择保留什么到调用者的持久记忆。详见[栈帧文档](docs/concepts/stack-frame.md)。
-
-## 参考项目
-[pi-study-helper](https://github.com/0liveiraaa/pi-study-helper)使用该SDK完成内部工作流编排
-
-## 安装
-
-作为 library 依赖安装：
-
-```bash
-npm install git:github.com/0liveiraaa/pi-loop-graph-sdk#v0.1
-```
-
-如果只想体验 SDK 自带的测试图，也可以作为 pi extension 安装：
-
-```bash
-pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
-```
-
-## 最小示例
-
-下面是一张单节点图：接收 `/hello` 的参数，让 Agent 打招呼，然后通过 `END` 返回结果。
-
-### 1. 定义图
-
-创建 `hello-graph.ts`：
-
-```typescript
-import { END, createAgentExecute } from "pi-loop-graph-sdk";
-import type { Edge, Entry, Graph, Node } from "pi-loop-graph-sdk";
-
-const greetNode: Node = {
-  kind: "code",
-  id: "greet",
-  subGoal: "根据用户提供的名字打招呼",
-  execute: createAgentExecute({
-    prompt: (input) =>
-      `请用一句简短的话向 ${String(input.data.name ?? "世界")} 打招呼。`,
-  }),
-};
-
-const done: Edge = {
-  id: "done",
-  from: "greet",
-  to: END,
-  priority: 10,
-  guard: () => true,
-  migrate(_instance, completion) {
-    return {
-      frame: {
-        greetingOutcome: completion.result,
-      },
-      output: {
-        status: completion.status,
-        result: completion.result,
-      },
-    };
-  },
-};
-
-const entry: Entry = {
-  id: "main",
-  guard: () => true,
-  startNodeId: "greet",
-  mapInput: (background) => ({
-    name: String(background.name ?? "世界"),
-  }),
-};
-
-export const helloGraph: Graph = {
-  id: "hello_world",
-  goal: "向用户指定的人打招呼",
-  invocation: {
-    name: "hello",
-    description: "生成一句问候",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string" },
-      },
-      required: ["name"],
-    },
-    parseArgs: (args) => ({ name: args.trim() || "世界" }),
-  },
-  entries: [entry],
-  nodes: {
-    greet: greetNode,
-  },
-  routing: {
+const Input = Type.Object({ name: Type.String() });
+const Output = Type.Object({ message: Type.String() });
+const graph = defineGraph({
+  id: "hello", version: "1", goal: "greet", input: Input, output: Output,
+  entries: [entry("main", { to: "greet" })],
+  stages: {
     greet: {
-      nodeId: "greet",
-      edges: [done],
-      router: { kind: "first-match" },
+      node: codeNode({
+        subGoal: "greet", input: Input, output: Output,
+        execute: ({ input, complete }) => complete({ message: `Hello, ${input.name}` }),
+      }),
+      route: firstMatch({ done: finish({ output: ({ completion }) => completion.result }) }),
     },
   },
-};
+});
+
+const result = await createGraphHost().execute(graph, { name: "World" });
 ```
 
-`frame` 是留给后续阶段的业务工作记忆，结构由图作者定义。`output` 明确声明整张图返回的状态和结果。
+Agent completion 使用严格的 `graph_complete({ result })` 协议；`status` 不属于模型提交内容，由 Runtime 决定。`GraphRunResult` 的失败信息位于 `failure`。
 
-### 2. 注册到 pi extension
+常用导出包括 `defineGraph`、`defineSingleAgentGraph`、`defineLinearGraph`、`agentNode`、`codeNode`、`graphNode`、`graphRef`、`entry`、`connect`、`finish`、`firstMatch`、`createGraphHost`、`executeIsolatedGraph` 和 `createLoopGraphExtension`。
 
-创建 `my-extension.ts`：
+Phase 10 当前仅支持可靠的单层 Root checkpoint/resume；嵌套 call/compose/delegate continuation 恢复仍 fail-closed。真实 LLM 测试需设置 `PI_LIVE_TESTS=1`。Study Helper 六张图业务回归不属于默认验证范围。
 
-```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createLoopGraphExtension } from "pi-loop-graph-sdk";
-import { helloGraph } from "./hello-graph.js";
+更多内容：[`docs/getting-started.md`](docs/getting-started.md)、[`docs/migration-0.1-to-0.2.md`](docs/migration-0.1-to-0.2.md)。
 
-export default function myExtension(pi: ExtensionAPI): void {
-  const loop = createLoopGraphExtension(pi);
-  loop.registerGraph(helloGraph);
-}
-```
-
-将这个入口加入你的 pi extension 配置，启动 pi 后运行：
-
-```text
-/hello 世界
-```
-
-完整的项目配置和执行过程见[十分钟快速开始](docs/getting-started.md)。
-
-## 子图边界
-
-| 边界         | 何时使用                                                           |
-| ------------ | ------------------------------------------------------------------ |
-| `call`     | 默认选择。复用当前执行会话，但子图使用新的逻辑工作实例和工作记忆。 |
-| `compose`  | 子图必须读取父级工作记忆，或作为父节点的内部实现展开。             |
-| `delegate` | 子任务需要独立执行会话和独立上下文生命周期。                       |
-
-三种边界当前都会沿单一路径等待子图完成；delegate 不代表并行调度。
-
-## 当前限制
-
-- 同一图运行始终只推进一条节点路径，不支持 fork/join 并行分支。
-- 不提供多个独立 Agent 之间的通讯和协作协议。
-- 不提供进程或会话结束后的图运行恢复。
-- 同一 `LoopGraphExtension` 实例不支持并发顶层执行。
-- 当前是 alpha 版本；在生产使用前，应自行完成安全评估、故障处理和稳定性验证。
-
-## 文档
-
-| 目标                       | 入口                                       |
-| -------------------------- | ------------------------------------------ |
-| 完成第一个可运行 extension | [Getting Started](docs/getting-started.md)  |
-| 理解图、状态和子图边界     | [Concepts](docs/concepts/)                  |
-| 统一心智模型：栈帧         | [Stack Frame](docs/concepts/stack-frame.md) |
-| 按任务查找实现方法         | [Guides](docs/guides/)                      |
-| 查询 API、配置和错误行为   | [API Reference](docs/reference/)            |
-| 了解内部设计与维护约束     | [Design](docs/design/core-design.md)        |
-
-## 开发检查
-
-```bash
-npm run build
-npm test
-npm run typecheck
-```
-
-默认不会写调试日志文件。只有显式设置 `debug: true` 时，SDK 才启用 JSONL 生命周期日志。
-
-## License
-
-MIT
+默认不会写调试日志文件；如需启用旧版调试输出，请显式设置 `debug: true`。

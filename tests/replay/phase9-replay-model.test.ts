@@ -44,7 +44,9 @@ describe("Phase 9 Replay Model and HTML", () => {
   it("exports one offline HTML document and escapes all replay-controlled text", () => {
     const html = exportReplayHtml(parseReplay(golden()));
     expect(html).toContain("<!doctype html>");
-    expect(html).toContain("Invocation tree");
+    // New HTML structure: timeline, model view, raw events sections
+    expect(html).toContain("Timeline");
+    expect(html).toContain("Raw Events");
     expect(html).toContain("completion.rejected");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
