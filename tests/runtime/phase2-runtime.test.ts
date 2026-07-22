@@ -487,6 +487,8 @@ describe("Phase 2 structured results and events", () => {
     expect(events.map((event) => event.type)).toEqual([
       "root_started",
       "host_baseline_selected",
+      "mechanism_scope_opened",
+      "mechanism_scope_closed",
       "root_finished",
     ]);
   });
@@ -577,11 +579,18 @@ describe("Phase 2 structured results and events", () => {
     expect(events.map((event) => event.type)).toEqual([
       "root_started",
       "host_baseline_selected",
+      "mechanism_scope_opened",
       "graph_entered",
+      "mechanism_scope_opened",
       "node_entered",
+      "mechanism_scope_opened",
+      "context_snapshot_materialized",
+      "mechanism_scope_closed",
       "transition_selected",
       "node_exited",
       "graph_exited",
+      "mechanism_scope_closed",
+      "mechanism_scope_closed",
       "root_finished",
     ]);
   });

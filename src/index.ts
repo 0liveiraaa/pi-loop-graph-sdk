@@ -170,6 +170,8 @@ export type {
   GraphFailure,
   GraphFailureCode,
   GraphRunResult,
+  RecordingMode,
+  ReplayReference,
 } from "./core/result.js";
 export { defineGraph, defineLinearGraph, defineSingleAgentGraph } from "./builders/graph.js";
 export { agentNode, codeNode, graphNode } from "./builders/node.js";

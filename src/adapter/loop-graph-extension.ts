@@ -7,7 +7,9 @@ import type { ContextSnapshot } from "../core/context.js";
 import type { Mechanism } from "../core/mechanism.js";
 import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
 import type { InvocationLimits } from "../core/limits.js";
+import type { RecordingMode } from "../core/result.js";
 import { GraphRuntime as CoreGraphRuntime } from "../runtime/graph-runtime.js";
+import { RuntimeEventBus } from "../runtime/event-bus.js";
 import { GraphCatalog } from "../host/graph-catalog.js";
 import { preflightGraphCapabilities } from "../host/preflight.js";
 import type { HostBaseline } from "../host/baseline.js";
@@ -26,6 +28,9 @@ import { reviewGraph } from "../graphs/review-graph.js";
 import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 import type { NodeContextRenderer } from "./projection.js";
 import type { GraphRef } from "../core/graph.js";
+import { FileRunStore, type RunStore } from "../replay/store.js";
+import { Recorder, toRecordedJson } from "../replay/recorder.js";
+import type { PricingResolver, ReplayEvent, ReplayEventScope } from "../replay/events.js";
 
 const completeToolRegistered = new WeakSet<object>();
 
@@ -46,6 +51,8 @@ export interface LoopGraphExecutionOptions {
   readonly signal?: AbortSignal;
   readonly limits?: Partial<InvocationLimits>;
   readonly maxSteps?: number;
+  readonly recording?: RecordingMode;
+  readonly recordingRequired?: boolean;
 }
 
 export interface CompletionFeedbackInput {
@@ -77,6 +84,11 @@ export interface LoopGraphExtensionOptions {
   readonly mechanisms?: readonly Mechanism[];
   readonly modelMessageFormatter?: Partial<ModelMessageFormatter>;
   readonly completionFeedbackFormatter?: CompletionFeedbackFormatter;
+  readonly recording?: RecordingMode;
+  readonly recordingRequired?: boolean;
+  readonly runStore?: RunStore;
+  readonly artifactThresholdBytes?: number;
+  readonly pricingResolver?: PricingResolver;
 }
 
 export interface LoopGraphExtension {
@@ -110,6 +122,11 @@ export function createLoopGraphExtension(
   const piToolCatalog = options.toolCatalog ? new ToolCatalog() : undefined;
   let rootActive = false;
   let activeNodeContext: PiNodeContext | null = null;
+  let activeRecorder: Recorder | null = null;
+
+  const recordPiEvent = (event: ReplayEvent, scope?: ReplayEventScope | null): void => {
+    if (activeRecorder && scope) activeRecorder.record(event, scope);
+  };
 
   if (!completeToolRegistered.has(pi as object)) {
     pi.registerTool(createCompleteTool());
@@ -117,6 +134,12 @@ export function createLoopGraphExtension(
   }
 
   pi.on("tool_result", async (event) => {
+    const replayScope = activeNodeContext?.getReplayScope();
+    recordPiEvent({
+      domain: "tool",
+      type: "tool_result",
+      data: toRecordedJson({ toolName: event.toolName, input: event.input, content: event.content, isError: event.isError }, "forensic"),
+    }, replayScope ? { ...replayScope, toolCallId: event.toolCallId } : null);
     if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;
     const params = event.input as Record<string, unknown> | undefined;
     if (!params || Object.keys(params).some((key) => key !== "result") || !isRecord(params.result)) {
@@ -124,6 +147,7 @@ export function createLoopGraphExtension(
         decision: "rejected",
         reason: "完成提交只能包含对象类型 result",
       };
+      recordPiEvent({ domain: "completion", type: "completion.rejected", data: { reason: decision.reason, validatorStage: "protocol" } }, activeNodeContext.getReplayScope());
       return {
         content: [{ type: "text", text: completionFeedbackFormatter({ nodeId: "?", decision }) }],
         details: decision,
@@ -142,11 +166,45 @@ export function createLoopGraphExtension(
   pi.on("agent_end", async () => {
     await activeNodeContext?.onAgentEnd();
   });
+  pi.on("turn_start", async (event) => {
+    recordPiEvent({ domain: "model", type: "model_turn_started", data: { turn: event.turnIndex } }, activeNodeContext?.getReplayScope());
+  });
+  pi.on("turn_end", async (event) => {
+    const message = event.message as unknown as Record<string, unknown>;
+    recordPiEvent({
+      domain: "model",
+      type: "model_turn_finished",
+      data: toRecordedJson({
+        turn: event.turnIndex,
+        provider: message.provider ?? "unknown",
+        model: message.model ?? "unknown",
+        usage: message.usage ?? {},
+        durationMs: message.durationMs,
+        retry: message.retry ?? 0,
+        message,
+        toolResults: event.toolResults,
+      }, "forensic"),
+    }, activeNodeContext?.getReplayScope());
+  });
+  pi.on("tool_execution_start", async (event) => {
+    const scope = activeNodeContext?.getReplayScope();
+    recordPiEvent({ domain: "tool", type: "tool_execution_started", data: toRecordedJson({ toolName: event.toolName, args: event.args }, "forensic") }, scope ? { ...scope, toolCallId: event.toolCallId } : null);
+  });
+  pi.on("tool_execution_end", async (event) => {
+    const scope = activeNodeContext?.getReplayScope();
+    recordPiEvent({ domain: "tool", type: "tool_execution_finished", data: toRecordedJson({ toolName: event.toolName, result: event.result, isError: event.isError }, "forensic") }, scope ? { ...scope, toolCallId: event.toolCallId } : null);
+  });
+  pi.on("session_compact", async (event) => {
+    recordPiEvent({ domain: "compaction", type: "compaction_finished", data: toRecordedJson(event, "forensic") }, activeNodeContext?.getReplayScope());
+  });
   pi.on("context", async (event) => {
     const message = activeNodeContext?.getContextSnapshotMessage();
     const messages = event.messages.filter((item) => !(
       item.role === "custom" && item.customType === CONTEXT_SNAPSHOT_MESSAGE_TYPE
     ));
+    if (message) {
+      recordPiEvent({ domain: "context", type: "context_snapshot_projected", data: toRecordedJson(message, "forensic") }, activeNodeContext?.getReplayScope());
+    }
     return message ? { messages: [message as any, ...messages] } : { messages };
   });
   if (!options.runtimeOnly) {
@@ -176,18 +234,35 @@ export function createLoopGraphExtension(
     rootActive = true;
     const previousTools = saveActiveTools(pi);
     const previousContext = activeNodeContext;
+    const previousRecorder = activeRecorder;
+    const eventBus = new RuntimeEventBus();
+    const recording = executionOptions.recording ?? options.recording ?? "replay";
+    const recorder = recording === "off" ? null : new Recorder({
+      mode: recording,
+      store: options.runStore ?? new FileRunStore(),
+      artifactThresholdBytes: options.artifactThresholdBytes,
+      pricingResolver: options.pricingResolver,
+    });
+    recorder?.attach(eventBus);
+    activeRecorder = recorder;
     const nodeContext = new PiNodeContext(
       pi,
       limits.agentRunTimeoutMs,
       modelMessageFormatter,
       limits.completionValidationTimeoutMs,
       options.outputContractMaxBytes,
+      (event) => recordPiEvent({
+        domain: event.type.startsWith("completion.") ? "completion" : "context",
+        type: event.type,
+        data: toRecordedJson(event, "forensic"),
+      }, nodeContext.getReplayScope()),
     );
     activeNodeContext = nodeContext;
     try {
       syncPiBusinessTools(options.toolCatalog, piToolCatalog, pi);
       const input = trigger.source === "tool" || trigger.params ? (trigger.params ?? {}) : { args: trigger.args ?? "" };
       const runtime = new CoreGraphRuntime({
+        eventBus,
         catalog,
         toolCatalog: piToolCatalog,
         skillCatalog: options.skillCatalog,
@@ -204,15 +279,36 @@ export function createLoopGraphExtension(
           return runPiAgent(request.prompt, request.output, context.nodeVisit.stageId, context.snapshot, nodeContext);
         },
       });
-      return await runtime.execute(graph, input as never, {
+      const result = await runtime.execute(graph, input as never, {
         signal: executionOptions.signal,
         limits: executionOptions.limits,
         maxSteps: executionOptions.maxSteps ?? limits.rootMaxSteps,
       }) as CoreGraphRunResult;
+      if (!recorder) return result;
+      const finalized = await recorder.finalize(result);
+      if ((executionOptions.recordingRequired ?? options.recordingRequired) && finalized.replay.status !== "complete") {
+        return {
+          rootRunId: result.rootRunId,
+          graphId: result.graphId,
+          graphVersion: result.graphVersion,
+          steps: result.steps,
+          durationMs: result.durationMs,
+          status: "failed",
+          replay: finalized.replay,
+          failure: {
+            code: "persistence-failed",
+            phase: "host",
+            message: finalized.replay.issues?.join("; ") ?? "Replay recording failed",
+            retryable: true,
+          },
+        };
+      }
+      return { ...result, replay: finalized.replay } as CoreGraphRunResult;
     } finally {
       nodeContext.reset();
       restoreActiveTools(pi, previousTools);
       activeNodeContext = previousContext;
+      activeRecorder = previousRecorder;
       rootActive = false;
     }
   }

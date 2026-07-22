@@ -37,12 +37,22 @@ export interface GraphFailure {
   readonly cause?: unknown;
 }
 
+export type RecordingMode = "off" | "events" | "replay" | "forensic";
+
+export interface ReplayReference {
+  readonly mode: RecordingMode;
+  readonly status: "off" | "complete" | "incomplete" | "failed";
+  readonly location?: string;
+  readonly issues?: readonly string[];
+}
+
 export interface GraphRunCommon {
   readonly rootRunId: string;
   readonly graphId: string;
   readonly graphVersion: string;
   readonly steps: number;
   readonly durationMs: number;
+  readonly replay: ReplayReference;
 }
 
 export interface CompletedGraphRun<TOutput = JsonValue> extends GraphRunCommon {

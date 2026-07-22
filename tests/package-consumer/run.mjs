@@ -39,7 +39,7 @@ try {
   if (packedPaths.some((path) => path === "src" || path.startsWith("src/"))) {
     throw new Error("Published tarball unexpectedly contains src/");
   }
-  for (const required of ["dist/index.js", "dist/index.d.ts", "dist/adapter/extension.js"]) {
+  for (const required of ["dist/index.js", "dist/index.d.ts", "dist/adapter/extension.js", "dist/replay/index.js", "dist/replay/index.d.ts"]) {
     if (!packedPaths.includes(required)) {
       throw new Error(`Published tarball is missing ${required}`);
     }
@@ -60,6 +60,7 @@ try {
 const available = [
   ["pi-loop-graph-sdk", /\\/dist\\/index\\.js$/],
   ["pi-loop-graph-sdk/extension", /\\/dist\\/adapter\\/extension\\.js$/],
+  ["pi-loop-graph-sdk/replay", /\\/dist\\/replay\\/index\\.js$/],
 ];
 
 for (const [specifier, expectedPath] of available) {
@@ -70,10 +71,10 @@ for (const [specifier, expectedPath] of available) {
   await import(specifier);
 }
 
-for (const specifier of ["pi-loop-graph-sdk/replay", "pi-loop-graph-sdk/advanced"]) {
+for (const specifier of ["pi-loop-graph-sdk/advanced"]) {
   try {
     await import(specifier);
-    throw new Error(specifier + " unexpectedly exists in the 0.1 package baseline");
+    throw new Error(specifier + " unexpectedly exists before its implementation phase");
   } catch (error) {
     if (error?.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw error;
   }
@@ -82,7 +83,7 @@ for (const specifier of ["pi-loop-graph-sdk/replay", "pi-loop-graph-sdk/advanced
 
   runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], consumerRoot);
   run(process.execPath, ["verify.mjs"], consumerRoot);
-  process.stdout.write("Packed consumer verified root and extension from dist; replay and advanced remain recorded 0.2 gaps.\n");
+  process.stdout.write("Packed consumer verified root, replay, and extension from dist; advanced remains a later 0.2 gap.\n");
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }

@@ -38,6 +38,9 @@ import type { SkillCatalog } from "../host/skill-catalog.js";
 import type { ToolCatalog, UnsafeToolResolver } from "../host/tool-catalog.js";
 import type { GraphHost } from "../host/graph-host.js";
 import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
+import type { RecordingMode } from "../core/result.js";
+import type { RunStore } from "../replay/store.js";
+import type { PricingResolver } from "../replay/events.js";
 
 export interface IsolatedGraphSessionFactoryOptions {
   authStorage: AuthStorage;
@@ -69,6 +72,11 @@ export interface IsolatedGraphSessionFactoryOptions {
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   /** 省略时遵循 pi 默认 compaction；可由 host 显式覆盖。 */
   compaction?: CompactionSettings;
+  recording?: RecordingMode;
+  recordingRequired?: boolean;
+  runStore?: RunStore;
+  artifactThresholdBytes?: number;
+  pricingResolver?: PricingResolver;
   /** 供子图继续使用 delegate；runtime-only adapter 不注册对外入口。 */
   createDelegateHost?: DelegateHostFactory;
 }
@@ -130,6 +138,11 @@ export function createIsolatedGraphSessionFactory(
             logger: options.logger,
             debug: options.debug,
             debugLogPath: options.debugLogPath,
+            recording: options.recording,
+            recordingRequired: options.recordingRequired,
+            runStore: options.runStore,
+            artifactThresholdBytes: options.artifactThresholdBytes,
+            pricingResolver: options.pricingResolver,
           } as any);
         },
       ],
@@ -169,6 +182,12 @@ export function createIsolatedGraphSessionFactory(
         return (runtime as any).executeGraph(graph, {
           source: "tool",
           params: request.background,
+        }, {
+          signal: request.signal,
+          limits: (request as any).limits,
+          maxSteps: (request as any).maxSteps,
+          recording: (request as any).recording,
+          recordingRequired: (request as any).recordingRequired,
         });
       },
       abort() {
@@ -224,7 +243,11 @@ export async function createPiGraphHost(
           invocationKind: "api",
           boundary: "call",
           signal: runOptions.signal,
-        }) as unknown as CoreGraphRunResult<any>;
+          limits: runOptions.limits,
+          maxSteps: runOptions.maxSteps,
+          recording: runOptions.recording,
+          recordingRequired: runOptions.recordingRequired,
+        } as any) as unknown as CoreGraphRunResult<any>;
       } finally {
         runOptions.signal?.removeEventListener("abort", onAbort);
         running = false;

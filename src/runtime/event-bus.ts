@@ -11,6 +11,8 @@ export type RuntimeEvent =
   | { readonly type: "node_exited"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly stageId: string }
   | { readonly type: "agent_started"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly agentRunId: string; readonly index: number }
   | { readonly type: "agent_finished"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly agentRunId: string }
+  | { readonly type: "context_snapshot_materialized"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly memoryRevision: number; readonly layerCount: number }
+  | { readonly type: "mechanism_scope_opened" | "mechanism_scope_closed"; readonly rootRunId: string; readonly graphInvocationId?: string; readonly nodeVisitId?: string; readonly installation: "host" | "graph" | "node"; readonly count: number }
   | { readonly type: "transition_selected"; readonly rootRunId: string; readonly graphInvocationId: string; readonly nodeVisitId: string; readonly stageId: string; readonly connectionId: string; readonly target: string }
   | { readonly type: "runtime_warning"; readonly rootRunId: string; readonly graphInvocationId?: string; readonly stageId?: string; readonly code: "unsafe-tool-policy-bypass" | "unsafe-host-baseline" | "unmanaged-mechanism-access"; readonly message: string };
 

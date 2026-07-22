@@ -218,6 +218,7 @@ export class GraphRuntime {
       hostMechanisms = await mechanismRuntime.open("host", root.rootRunId, this.host.mechanisms ?? [], {
         rootRunId: root.rootRunId,
       });
+      this.eventBus.emit({ type: "mechanism_scope_opened", rootRunId: root.rootRunId, installation: "host", count: hostMechanisms.invocations.length });
       await mechanismRuntime.enter([hostMechanisms], "onRootEnter");
       this.mechanismRuns.set(root, { runtime: mechanismRuntime, host: hostMechanisms });
       const invocation = await this.runInvocation({
@@ -237,6 +238,7 @@ export class GraphRuntime {
       if (hostMechanisms) {
         await mechanismRuntime.rootExit(hostMechanisms);
         await mechanismRuntime.close(hostMechanisms);
+        this.eventBus.emit({ type: "mechanism_scope_closed", rootRunId: root.rootRunId, installation: "host", count: hostMechanisms.invocations.length });
       }
     }
 
@@ -255,6 +257,7 @@ export class GraphRuntime {
       graphVersion: graph.version,
       steps,
       durationMs,
+      replay: Object.freeze({ mode: "off", status: "off" }),
     } as const;
     if (outcome.status === "completed") {
       return { ...common, status: "completed", output: outcome.output as SchemaValue<TOutputSchema> };
@@ -348,6 +351,7 @@ export class GraphRuntime {
         rootRunId: root.rootRunId,
         graphInvocationId: state.graphInvocationId,
       }, contextState);
+      this.eventBus.emit({ type: "mechanism_scope_opened", rootRunId: root.rootRunId, graphInvocationId: state.graphInvocationId, installation: "graph", count: graphMechanisms.invocations.length });
       await request.mechanismRuntime.enter([request.hostMechanisms, graphMechanisms], "onGraphEnter");
 
       const entry = await firstMatchingEntry(graph, graphInput);
@@ -586,6 +590,7 @@ export class GraphRuntime {
       if (graphMechanisms) {
         await request.mechanismRuntime.graphExit([request.hostMechanisms, graphMechanisms], graphError);
         await request.mechanismRuntime.close(graphMechanisms);
+        this.eventBus.emit({ type: "mechanism_scope_closed", rootRunId: root.rootRunId, graphInvocationId: state?.graphInvocationId, installation: "graph", count: graphMechanisms.invocations.length });
       }
     }
   }
@@ -633,6 +638,7 @@ export class GraphRuntime {
       nodeVisitId: nodeVisit.nodeVisitId,
       stageId: nodeVisit.stageId,
     }, contextState);
+    this.eventBus.emit({ type: "mechanism_scope_opened", rootRunId: root.rootRunId, graphInvocationId: invocation.graphInvocationId, nodeVisitId: nodeVisit.nodeVisitId, installation: "node", count: nodeMechanisms.invocations.length });
     const chains = [hostMechanisms, graphMechanisms, nodeMechanisms] as const;
     try {
       await mechanismRuntime.enter(chains, "onNodeEnter");
@@ -643,6 +649,14 @@ export class GraphRuntime {
         input,
         capabilities.skills,
       );
+      this.eventBus.emit({
+        type: "context_snapshot_materialized",
+        rootRunId: root.rootRunId,
+        graphInvocationId: invocation.graphInvocationId,
+        nodeVisitId: nodeVisit.nodeVisitId,
+        memoryRevision: snapshot.memoryRevision,
+        layerCount: snapshot.layers.length,
+      });
       let result: JsonValue;
       if (node.kind === "agent") {
         result = await this.runAgent(
@@ -693,6 +707,7 @@ export class GraphRuntime {
       throw error;
     } finally {
       await mechanismRuntime.close(nodeMechanisms);
+      this.eventBus.emit({ type: "mechanism_scope_closed", rootRunId: root.rootRunId, graphInvocationId: invocation.graphInvocationId, nodeVisitId: nodeVisit.nodeVisitId, installation: "node", count: nodeMechanisms.invocations.length });
     }
   }
 

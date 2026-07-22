@@ -15,6 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ContextBlock } from "../core/graph.js";
 import type { ContextSnapshot } from "../core/context.js";
+import type { ReplayEventScope } from "../replay/events.js";
 import type {
   CompletionSubmission,
   CompletionSubmissionDecision,
@@ -300,6 +301,17 @@ export class PiNodeContext implements NodeContext {
       }),
       timestamp: Date.now(),
     });
+  }
+
+  getReplayScope(): ReplayEventScope | null {
+    const snapshot = this.activeContextSnapshot;
+    if (!snapshot) return null;
+    return {
+      rootRunId: snapshot.rootRunId,
+      graphInvocationId: snapshot.graphInvocationId,
+      nodeVisitId: snapshot.nodeVisitId,
+      agentRunId: snapshot.agentRunId,
+    };
   }
 
   submitCompletion(params: {

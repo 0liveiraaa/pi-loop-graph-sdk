@@ -14,6 +14,10 @@
     "./extension": {
       "types": "./dist/adapter/extension.d.ts",
       "import": "./dist/adapter/extension.js"
+    },
+    "./replay": {
+      "types": "./dist/replay/index.d.ts",
+      "import": "./dist/replay/index.js"
     }
   },
   "files": [
