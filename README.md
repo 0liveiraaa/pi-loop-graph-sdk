@@ -52,7 +52,7 @@ import { parseReplay, exportReplayHtml } from "pi-loop-graph-sdk/replay";
 import { GraphRuntime, validateGraph } from "pi-loop-graph-sdk/advanced";
 ```
 
-当前 `package.json` 保留了 `private: true`，因此暂时不能直接从 npm registry 安装；本地目录、tarball 和 Git 依赖均可使用。将来发布到 npm 时，只需要在不改变这些 package subpath 的前提下移除该限制并发布正式版本。
+当前 `package.json` 保留了 `private: true`，因此暂时不能直接从 npm registry 安装；本地目录、tarball 和 Git 依赖均可使用。
 
 ### 2. 运行最小示例
 
