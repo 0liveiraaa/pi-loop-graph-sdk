@@ -54,11 +54,16 @@ export class Recorder {
     const runId = this.rootRunId ?? result.rootRunId;
     try {
       const recordedResult = toRecordedJson(result, this.options.mode) as unknown as GraphRunResult;
+      const serializedResult = JSON.stringify(recordedResult);
+      const threshold = this.options.artifactThresholdBytes ?? 64 * 1024;
+      const persistedResult = Buffer.byteLength(serializedResult, "utf8") > threshold
+        ? await this.options.store.writeArtifact(runId, "final-result.json", serializedResult)
+        : recordedResult;
       const document = await finalizeJournal({
         store: this.options.store,
         runId,
         mode: this.options.mode,
-        result: recordedResult,
+        result: persistedResult,
         pricingResolver: this.options.pricingResolver,
         initialIssues: this.issues,
       });
@@ -69,10 +74,10 @@ export class Recorder {
         location: this.options.store.location(runId),
         issues: document.recording.issues,
       }) satisfies ReplayReference;
-      await this.options.store.writeReplay(runId, `${JSON.stringify({
-        ...document,
-        result: { ...recordedResult, replay },
-      }, null, 2)}\n`);
+      const replayResult = isArtifactReference(persistedResult)
+        ? persistedResult
+        : { ...recordedResult, replay };
+      await this.options.store.writeReplay(runId, `${JSON.stringify({ ...document, result: replayResult }, null, 2)}\n`);
       return {
         replay,
         documentWritten: true,
@@ -127,18 +132,22 @@ export function toRecordedJson(value: unknown, mode: RecordingMode): JsonValue {
 
 function sanitize(value: unknown, mode: RecordingMode, ancestors: WeakSet<object>, key = ""): JsonValue {
   if (mode !== "forensic" && sensitiveKey(key)) return "[REDACTED]";
+  if (mode !== "forensic" && key === "thinking") return "[REDACTED]";
   if (mode === "events" && verboseKey(key)) return "[OMITTED]";
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "string") return mode === "forensic" ? value : redactString(value);
   if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
   if (typeof value === "bigint" || typeof value === "symbol" || typeof value === "function" || value === undefined) return String(value);
   if (ancestors.has(value as object)) return "[CIRCULAR]";
+  if (mode !== "forensic" && isThinkingBlock(value)) {
+    return { type: "thinking", thinking: "[REDACTED]" };
+  }
   ancestors.add(value as object);
   try {
     if (Array.isArray(value)) return value.map((entry) => sanitize(entry, mode, ancestors));
     const output: Record<string, JsonValue> = {};
     for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
-      if (mode !== "forensic" && childKey === "reasoning") continue;
+      if (mode !== "forensic" && (childKey === "reasoning" || childKey === "thinking")) continue;
       output[childKey] = sanitize(child, mode, ancestors, childKey);
     }
     return output;
@@ -147,6 +156,11 @@ function sanitize(value: unknown, mode: RecordingMode, ancestors: WeakSet<object
   } finally {
     ancestors.delete(value as object);
   }
+}
+
+function isThinkingBlock(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).type === "thinking";
 }
 
 function sensitiveKey(key: string): boolean {
@@ -180,4 +194,8 @@ function safeType(type: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isArtifactReference(value: unknown): value is import("./events.js").ReplayArtifactRef {
+  return value !== null && typeof value === "object" && "artifactId" in value && "sha256" in value;
 }

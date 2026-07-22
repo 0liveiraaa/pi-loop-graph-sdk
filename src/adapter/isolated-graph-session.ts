@@ -11,6 +11,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ContextFrame, GraphRunRequest } from "../type.js";
+import type { Graph as CoreGraph } from "../core/graph.js";
 import type { NodeContextRenderer } from "./projection.js";
 import {
   createLoopGraphExtension,
@@ -41,6 +42,8 @@ import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
 import type { RecordingMode } from "../core/result.js";
 import type { RunStore } from "../replay/store.js";
 import type { PricingResolver } from "../replay/events.js";
+import type { Recorder } from "../replay/recorder.js";
+import type { InvocationAgentHost, InvocationAgentHostRequest } from "../runtime/graph-runtime.js";
 
 export interface IsolatedGraphSessionFactoryOptions {
   authStorage: AuthStorage;
@@ -79,6 +82,8 @@ export interface IsolatedGraphSessionFactoryOptions {
   pricingResolver?: PricingResolver;
   /** 供子图继续使用 delegate；runtime-only adapter 不注册对外入口。 */
   createDelegateHost?: DelegateHostFactory;
+  /** Core graphs made available to GraphRef resolution in this isolated Host. */
+  graphs?: readonly CoreGraph[];
 }
 
 /**
@@ -143,7 +148,9 @@ export function createIsolatedGraphSessionFactory(
             runStore: options.runStore,
             artifactThresholdBytes: options.artifactThresholdBytes,
             pricingResolver: options.pricingResolver,
+            createInvocationAgentHost: (_request: InvocationAgentHostRequest, recorder: Recorder | null) => createPiInvocationAgentHost(options, recorder),
           } as any);
+          for (const graph of options.graphs ?? []) loop.registerGraph(graph);
         },
       ],
     });
@@ -215,6 +222,80 @@ export function createIsolatedDelegateHostFactory(
     createDelegateHost: createHost,
   });
   return createHost;
+}
+
+/** Creates one Pi Session that only executes Agent Runs for a Core Graph Invocation. */
+export async function createPiInvocationAgentHost(
+  options: IsolatedGraphSessionFactoryOptions,
+  recorder: Recorder | null = null,
+): Promise<InvocationAgentHost> {
+  const cwd = options.cwd ?? process.cwd();
+  const agentDir = options.agentDir ?? getAgentDir();
+  const settingsManager = SettingsManager.inMemory(options.compaction ? { compaction: options.compaction } : undefined);
+  let loop: LoopGraphExtension | null = null;
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    extensionFactories: [
+      (pi) => {
+        loop = createLoopGraphExtension(pi, {
+          runtimeOnly: true,
+          toolCatalog: options.toolCatalog,
+          skillCatalog: options.skillCatalog,
+          unsafeToolResolver: options.unsafeToolResolver,
+          baseline: options.baseline,
+          limits: options.limits,
+          modelMessageFormatter: options.modelMessageFormatter,
+          completionFeedbackFormatter: options.completionFeedbackFormatter,
+          outputContractMaxBytes: options.outputContractMaxBytes,
+          recording: "off",
+          createInvocationAgentHost: (_request, nestedRecorder) => createPiInvocationAgentHost(options, nestedRecorder),
+        });
+        for (const graph of options.graphs ?? []) loop.registerGraph(graph);
+      },
+    ],
+  });
+  await resourceLoader.reload();
+  const customToolNames = (options.customTools ?? []).map((tool) => tool.name);
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir,
+    authStorage: options.authStorage,
+    modelRegistry: options.modelRegistry,
+    model: options.model,
+    thinkingLevel: options.thinkingLevel ?? "off",
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager,
+    resourceLoader,
+    customTools: options.customTools,
+    tools: [...new Set(["read", ...customToolNames, "__graph_complete__"])],
+  });
+  if (!loop) {
+    session.dispose();
+    throw new Error("invocation-scoped Pi Agent Host 初始化失败");
+  }
+  const agentHost = (loop as LoopGraphExtension).createAgentHost(recorder);
+  let disposed = false;
+  return {
+    runAgent: agentHost.runAgent,
+    runAgentFromCode: agentHost.runAgentFromCode,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      try {
+        await session.abort();
+      } finally {
+        await agentHost.dispose();
+        session.dispose();
+      }
+    },
+  };
 }
 
 /** Creates a Core GraphHost backed by one isolated Pi AgentSession. */

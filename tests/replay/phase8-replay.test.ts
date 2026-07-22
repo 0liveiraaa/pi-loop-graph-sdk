@@ -70,6 +70,16 @@ describe("Phase 8 recorder and RunStore", () => {
     const replayLine = JSON.parse(replayStore.journal.get("run-replay")!.split("\n")[0]);
     expect(replayLine.event.data).toEqual({ provider: "test", model: "m", token: "[REDACTED]", answer: "visible" });
 
+    const thinkingStore = memoryStore();
+    const thinkingRecorder = new Recorder({ mode: "replay", store: thinkingStore });
+    thinkingRecorder.record({ domain: "model", type: "model_turn_finished", data: {
+      message: { content: [{ type: "thinking", thinking: "private chain" }, { type: "text", text: "visible" }] },
+    } }, { rootRunId: "run-thinking" });
+    await thinkingRecorder.finalize(fakeResult("run-thinking"));
+    const thinkingLine = JSON.parse(thinkingStore.journal.get("run-thinking")!.split("\n")[0]);
+    expect(JSON.stringify(thinkingLine.event.data)).not.toContain("private chain");
+    expect(thinkingLine.event.data.message.content[0]).toEqual({ type: "thinking", thinking: "[REDACTED]" });
+
     const forensicStore = memoryStore();
     const forensicRecorder = new Recorder({ mode: "forensic", store: forensicStore });
     forensicRecorder.record({ domain: "model", type: "model_turn_finished", data: { token: "private", reasoning: "hidden" } }, { rootRunId: "run-forensic" });
@@ -90,6 +100,20 @@ describe("Phase 8 recorder and RunStore", () => {
     const document = await finalizeJournal({ store, runId: "artifact-run", mode: "replay", result: fakeResult("artifact-run") });
     expect(document.recording.status).toBe("incomplete");
     expect(document.recording.issues.join(" ")).toContain("artifact");
+  });
+
+  it("moves a large final Graph result to an artifact", async () => {
+    const store = memoryStore();
+    const recorder = new Recorder({ mode: "replay", store, artifactThresholdBytes: 32 });
+    const result = { ...fakeResult("large-result"), output: { text: "x".repeat(200) } };
+    await recorder.finalize(result);
+    const document = JSON.parse(store.replays.get("large-result")!);
+    expect(document.result).toMatchObject({ artifactId: "final-result.json", byteSize: expect.any(Number) });
+    expect(store.artifacts.get("final-result.json")).toContain("x".repeat(200));
+    store.artifacts.delete("final-result.json");
+    const incomplete = await finalizeJournal({ store, runId: "large-result", mode: "replay", result: document.result });
+    expect(incomplete.recording.status).toBe("failed");
+    expect(incomplete.recording.issues.join(" ")).toContain("final-result.json");
   });
 
   it("keeps complete JSONL entries when the final journal line is partial", async () => {

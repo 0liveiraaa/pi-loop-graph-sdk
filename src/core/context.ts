@@ -125,7 +125,7 @@ export class ContextState {
       layers.push({
         name: "memory",
         scopeId: this.options.graphInvocationId,
-        retention: "sticky",
+        retention: "foldable",
         content: memory,
       });
     }
@@ -142,15 +142,20 @@ export class ContextState {
       ...(this.options.externalContributions?.(nodeVisitId) ?? []),
       ...this.contributions.values(),
     ];
-    const mechanismContent = contributions.flatMap((item) => typeof item.content === "string"
-      ? [{ type: "text" as const, text: item.content }]
-      : item.content);
-    const projectedLayers = mechanismContent.length === 0 ? layers : [...layers, {
-      name: "mechanism" as const,
-      scopeId: nodeVisitId ?? this.options.graphInvocationId,
-      retention: "sticky" as const,
-      content: Object.freeze(mechanismContent.map((block) => Object.freeze({ ...block }))),
-    }];
+    const mechanismLayers = (["sticky", "foldable", "transient"] as const).flatMap((retention) => {
+      const content = contributions
+        .filter((item) => item.retention === retention)
+        .flatMap((item) => typeof item.content === "string"
+          ? [{ type: "text" as const, text: item.content }]
+          : item.content);
+      return content.length === 0 ? [] : [{
+        name: "mechanism" as const,
+        scopeId: nodeVisitId ?? this.options.graphInvocationId,
+        retention,
+        content: Object.freeze(content.map((block) => Object.freeze({ ...block }))),
+      }];
+    });
+    const projectedLayers = [...layers, ...mechanismLayers];
     return Object.freeze({
       rootRunId: this.options.rootRunId,
       graphInvocationId: this.options.graphInvocationId,

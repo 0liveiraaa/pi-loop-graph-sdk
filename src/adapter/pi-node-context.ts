@@ -82,12 +82,15 @@ export class PiNodeContext implements NodeContext {
   private readonly messageFormatter: ModelMessageFormatter;
   private readonly completionValidationTimeoutMs: number;
   private nodeValidateFn: AgentRunRequest["validateCompletion"] = undefined;
+  private routeValidateFn: AgentRunRequest["validateCompletion"] = undefined;
   private postMechanismValidateFn: AgentRunRequest["validateCompletion"] = undefined;
   private mechanismLifecycle: AgentRunMechanismLifecycle | null = null;
   private validationInFlight: Promise<void> | null = null;
   private activeOutputContract: PreparedOutputContract | null = null;
   private activeOutputContractMessage: Readonly<Record<string, unknown>> | null = null;
   private activeContextSnapshot: ContextSnapshot | null = null;
+  private contextProjectionCount = 0;
+  private foldableContextCompacted = false;
   private submissionQueue: Promise<void> = Promise.resolve();
   private rejectionCount = 0;
   private completionState: CompletionState = "submitted";
@@ -276,7 +279,15 @@ export class PiNodeContext implements NodeContext {
   }
 
   setContextSnapshot(snapshot: ContextSnapshot | null): void {
+    if (snapshot?.agentRunId !== this.activeContextSnapshot?.agentRunId) {
+      this.contextProjectionCount = 0;
+      this.foldableContextCompacted = false;
+    }
     this.activeContextSnapshot = snapshot;
+  }
+
+  markContextCompacted(): void {
+    this.foldableContextCompacted = true;
   }
 
   getContextSnapshotMessage(): Readonly<Record<string, unknown>> | null {
@@ -284,9 +295,12 @@ export class PiNodeContext implements NodeContext {
     if (!snapshot) return null;
     const content: ContextBlock[] = [];
     for (const layer of snapshot.layers) {
+      if (layer.retention === "foldable" && this.foldableContextCompacted) continue;
+      if (layer.retention === "transient" && this.contextProjectionCount > 0) continue;
       if (typeof layer.content === "string") content.push({ type: "text", text: layer.content });
       else content.push(...layer.content.map((block) => ({ ...block })));
     }
+    this.contextProjectionCount += 1;
     return Object.freeze({
       role: "custom",
       customType: CONTEXT_SNAPSHOT_MESSAGE_TYPE,
@@ -459,6 +473,7 @@ export class PiNodeContext implements NodeContext {
       ["outputSchema", this.activeOutputContract?.validate],
       ["agent-run", this.runValidateFn],
       ["node", this.nodeValidateFn],
+      ["route", this.routeValidateFn],
     ];
     for (const [stage, validator] of validationStages) {
       if (!validator) continue;
@@ -583,10 +598,13 @@ export class PiNodeContext implements NodeContext {
     this.completionFingerprints.clear();
     this.runValidateFn = undefined;
     this.nodeValidateFn = undefined;
+    this.routeValidateFn = undefined;
     this.postMechanismValidateFn = undefined;
     this.activeOutputContract = null;
     this.activeOutputContractMessage = null;
     this.activeContextSnapshot = null;
+    this.contextProjectionCount = 0;
+    this.foldableContextCompacted = false;
     this.rejectionCount = 0;
     this.completionState = "submitted";
   }
@@ -595,6 +613,12 @@ export class PiNodeContext implements NodeContext {
     validate: AgentRunRequest["validateCompletion"],
   ): void {
     this.nodeValidateFn = validate;
+  }
+
+  setRouteCompletionValidator(
+    validate: AgentRunRequest["validateCompletion"],
+  ): void {
+    this.routeValidateFn = validate;
   }
 
   setPostMechanismCompletionValidator(
@@ -657,6 +681,7 @@ export class PiNodeContext implements NodeContext {
     this.activeResolve = null;
     this.runValidateFn = undefined;
     this.nodeValidateFn = undefined;
+    this.routeValidateFn = undefined;
     this.postMechanismValidateFn = undefined;
     this.mechanismLifecycle = null;
     this.validationInFlight = null;

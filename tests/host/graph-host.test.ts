@@ -40,4 +40,30 @@ describe("Phase 7 GraphHost", () => {
     await first;
     await host.dispose();
   });
+
+  it("dispose aborts and waits for the active Root Run before releasing resources", async () => {
+    const dispose = vi.fn();
+    const slow = defineGraph({
+      ...graph,
+      id: "dispose-active",
+      stages: {
+        start: {
+          ...graph.stages.start,
+          node: codeNode({
+            ...graph.stages.start.node as any,
+            execute: async ({ input }) => {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              return input;
+            },
+          }),
+        },
+      },
+    });
+    const host = createGraphHost({ dispose });
+    const running = host.execute(slow, { value: 1 }, { recording: "off" });
+    const disposing = host.dispose();
+    await expect(running).resolves.toMatchObject({ status: "cancelled" });
+    await disposing;
+    expect(dispose).toHaveBeenCalledOnce();
+  });
 });

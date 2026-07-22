@@ -28,9 +28,11 @@ import { reviewGraph } from "../graphs/review-graph.js";
 import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 import type { NodeContextRenderer } from "./projection.js";
 import type { GraphRef } from "../core/graph.js";
+import { OUTPUT_CONTRACT_MESSAGE_TYPE } from "./output-contract.js";
 import { FileRunStore, type RunStore } from "../replay/store.js";
 import { Recorder, toRecordedJson } from "../replay/recorder.js";
 import type { PricingResolver, ReplayEvent, ReplayEventScope } from "../replay/events.js";
+import type { InvocationAgentHost, InvocationAgentHostRequest } from "../runtime/graph-runtime.js";
 
 const completeToolRegistered = new WeakSet<object>();
 
@@ -89,6 +91,10 @@ export interface LoopGraphExtensionOptions {
   readonly runStore?: RunStore;
   readonly artifactThresholdBytes?: number;
   readonly pricingResolver?: PricingResolver;
+  readonly createInvocationAgentHost?: (
+    request: InvocationAgentHostRequest,
+    recorder: Recorder | null,
+  ) => Promise<InvocationAgentHost>;
 }
 
 export interface LoopGraphExtension {
@@ -101,6 +107,8 @@ export interface LoopGraphExtension {
       | { readonly source: "tool"; readonly params?: Record<string, unknown> },
     options?: LoopGraphExecutionOptions,
   ): Promise<CoreGraphRunResult>;
+  /** @internal Creates an Agent-only lane; it never owns a GraphRuntime. */
+  createAgentHost(recorder?: Recorder | null): InvocationAgentHost;
 }
 
 export type GraphExposure =
@@ -195,17 +203,24 @@ export function createLoopGraphExtension(
     recordPiEvent({ domain: "tool", type: "tool_execution_finished", data: toRecordedJson({ toolName: event.toolName, result: event.result, isError: event.isError }, "forensic") }, scope ? { ...scope, toolCallId: event.toolCallId } : null);
   });
   pi.on("session_compact", async (event) => {
+    activeNodeContext?.markContextCompacted();
     recordPiEvent({ domain: "compaction", type: "compaction_finished", data: toRecordedJson(event, "forensic") }, activeNodeContext?.getReplayScope());
   });
   pi.on("context", async (event) => {
+    if (event.messages.some((item) => item.role === "compactionSummary")) {
+      activeNodeContext?.markContextCompacted();
+    }
     const message = activeNodeContext?.getContextSnapshotMessage();
+    const contract = activeNodeContext?.getActiveOutputContractMessage();
     const messages = event.messages.filter((item) => !(
-      item.role === "custom" && item.customType === CONTEXT_SNAPSHOT_MESSAGE_TYPE
+      item.role === "custom" && (
+        item.customType === CONTEXT_SNAPSHOT_MESSAGE_TYPE || item.customType === OUTPUT_CONTRACT_MESSAGE_TYPE
+      )
     ));
     if (message) {
       recordPiEvent({ domain: "context", type: "context_snapshot_projected", data: toRecordedJson(message, "forensic") }, activeNodeContext?.getReplayScope());
     }
-    return message ? { messages: [message as any, ...messages] } : { messages };
+    return { messages: [message, contract, ...messages].filter(Boolean) as any[] };
   });
   if (!options.runtimeOnly) {
     pi.on("session_start", async (_event, context) => {
@@ -270,13 +285,16 @@ export function createLoopGraphExtension(
         baseline: options.baseline,
         maxStickyContextBytes: options.contextMaxBytes,
         mechanisms: options.mechanisms,
+        createInvocationAgentHost: options.createInvocationAgentHost
+          ? (request) => options.createInvocationAgentHost!(request, activeRecorder)
+          : undefined,
         runAgent: (node, _input, context) => {
           pi.setActiveTools(context.tools.map((tool) => tool.name));
-          return runPiAgent(node.prompt ?? node.subGoal, node.output, context.nodeVisit.stageId, context.snapshot, nodeContext);
+          return runPiAgent(node.prompt ?? node.subGoal, node.output, context, nodeContext);
         },
         runAgentFromCode: (request, _node, context) => {
           pi.setActiveTools(context.tools.map((tool) => tool.name));
-          return runPiAgent(request.prompt, request.output, context.nodeVisit.stageId, context.snapshot, nodeContext);
+          return runPiAgent(request.prompt, request.output, context, nodeContext);
         },
       });
       const result = await runtime.execute(graph, input as never, {
@@ -317,7 +335,47 @@ export function createLoopGraphExtension(
     registerGraph: registerCoreGraph,
     exposeGraph,
     executeGraph,
+    createAgentHost,
   };
+
+  function createAgentHost(recorder: Recorder | null = null): InvocationAgentHost {
+    const nodeContext = new PiNodeContext(
+      pi,
+      limits.agentRunTimeoutMs,
+      modelMessageFormatter,
+      limits.completionValidationTimeoutMs,
+      options.outputContractMaxBytes,
+      (event) => recordPiEvent({
+        domain: event.type.startsWith("completion.") ? "completion" : "context",
+        type: event.type,
+        data: toRecordedJson(event, "forensic"),
+      }, nodeContext.getReplayScope()),
+    );
+    let disposed = false;
+    const run = async (prompt: string, output: unknown, execution: import("../runtime/graph-runtime.js").AgentExecutionContext) => {
+      if (disposed) throw new Error("Invocation Agent Host 已释放");
+      const previousContext = activeNodeContext;
+      const previousRecorder = activeRecorder;
+      activeNodeContext = nodeContext;
+      activeRecorder = recorder;
+      try {
+        pi.setActiveTools(execution.tools.map((tool) => tool.name));
+        return await runPiAgent(prompt, output, execution, nodeContext);
+      } finally {
+        activeNodeContext = previousContext;
+        activeRecorder = previousRecorder;
+      }
+    };
+    return {
+      runAgent: (node, _input, execution) => run(node.prompt ?? node.subGoal, node.output, execution),
+      runAgentFromCode: (request, _node, execution) => run(request.prompt, request.output, execution),
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        nodeContext.reset();
+      },
+    };
+  }
 
   function exposeGraph(ref: GraphRef, exposure: GraphExposure): void {
     const graph = catalog.resolve(ref);
@@ -347,12 +405,34 @@ export function createLoopGraphExtension(
   async function runPiAgent(
     prompt: string,
     outputSchema: unknown,
-    stageId: string,
-    snapshot: ContextSnapshot,
+    execution: import("../runtime/graph-runtime.js").AgentExecutionContext,
     context: PiNodeContext,
   ): Promise<JsonValue> {
+    const stageId = execution.nodeVisit.stageId;
     context.setCurrentNodeId(stageId);
-    context.setContextSnapshot(snapshot);
+    context.setContextSnapshot(execution.snapshot);
+    context.setNodeCompletionValidator(async (result) => {
+      const validation = await execution.validateNodeCompletion(result as JsonValue);
+      return validation.valid ? { isValid: true } : { isValid: false, reason: validation.reason ?? "Node completion rejected" };
+    });
+    context.setRouteCompletionValidator(async (result) => {
+      const validation = await execution.validateRouteStructure(result as JsonValue);
+      return validation.valid ? { isValid: true } : { isValid: false, reason: validation.reason ?? "Route structure rejected" };
+    });
+    context.setMechanismLifecycle({
+      beforeAgentRun: async () => ({ blocked: false }),
+      validateCompletion: async (_agentRunId, completion) => {
+        const decision = await execution.validateMechanismCompletion(completion.result as JsonValue);
+        return decision.action === "allow"
+          ? { action: "allow" }
+          : { action: decision.action, reason: decision.reason };
+      },
+      afterAgentRun: () => undefined,
+    });
+    context.setPostMechanismCompletionValidator(async (result) => {
+      const validation = await execution.validateAgentChoice(result as JsonValue);
+      return validation.valid ? { isValid: true } : { isValid: false, reason: validation.reason ?? "Agent choice rejected" };
+    });
     try {
       const completion = await context.runAgent({
         prompt,
@@ -361,6 +441,7 @@ export function createLoopGraphExtension(
       return completion.result as JsonValue;
     } finally {
       context.setContextSnapshot(null);
+      context.setMechanismLifecycle(null);
     }
   }
 }

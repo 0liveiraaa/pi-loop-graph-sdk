@@ -13,7 +13,7 @@ export interface ReplayDocument {
   readonly rootRunId: string;
   readonly mode: Exclude<RecordingMode, "off">;
   readonly createdAt: string;
-  readonly result: GraphRunResult;
+  readonly result: GraphRunResult | ReplayArtifactRef;
   readonly events: readonly ReplayEventEnvelope[];
   readonly recording: ReplayRecordingSummary;
   readonly totalCost?: number;
@@ -23,7 +23,7 @@ export interface FinalizeJournalOptions {
   readonly store: RunStore;
   readonly runId: string;
   readonly mode: Exclude<RecordingMode, "off">;
-  readonly result: GraphRunResult;
+  readonly result: GraphRunResult | ReplayArtifactRef;
   readonly pricingResolver?: PricingResolver;
   readonly initialIssues?: readonly string[];
 }
@@ -58,14 +58,9 @@ export async function finalizeJournal(options: FinalizeJournalOptions): Promise<
   for (const envelope of events) {
     const data = envelope.event.data;
     if (!isArtifactRef(data)) continue;
-    try {
-      const content = await options.store.readArtifact(options.runId, data.artifactId);
-      const digest = createHash("sha256").update(content).digest("hex");
-      if (digest !== data.sha256) issues.push(`artifact ${data.artifactId} checksum mismatch`);
-    } catch (error) {
-      issues.push(`artifact ${data.artifactId} unavailable: ${errorMessage(error)}`);
-    }
+    await verifyArtifact(options.store, options.runId, data, issues);
   }
+  if (isArtifactRef(options.result)) await verifyArtifact(options.store, options.runId, options.result, issues);
   const totalCost = await calculateCost(events, options.store, options.runId, options.pricingResolver, issues);
   return Object.freeze({
     schemaVersion: 1,
@@ -80,6 +75,16 @@ export async function finalizeJournal(options: FinalizeJournalOptions): Promise<
     }),
     ...(totalCost == null ? {} : { totalCost }),
   });
+}
+
+async function verifyArtifact(store: RunStore, runId: string, artifact: ReplayArtifactRef, issues: string[]): Promise<void> {
+  try {
+    const content = await store.readArtifact(runId, artifact.artifactId);
+    const digest = createHash("sha256").update(content).digest("hex");
+    if (digest !== artifact.sha256) issues.push(`artifact ${artifact.artifactId} checksum mismatch`);
+  } catch (error) {
+    issues.push(`artifact ${artifact.artifactId} unavailable: ${errorMessage(error)}`);
+  }
 }
 
 async function calculateCost(

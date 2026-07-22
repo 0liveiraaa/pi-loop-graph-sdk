@@ -42,6 +42,8 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
   const runtime = new GraphRuntime({ ...options.runtime, eventBus });
   const runStore = options.runStore ?? new FileRunStore();
   let running = false;
+  let activeRun: Promise<GraphRunResult<any>> | undefined;
+  let activeController: AbortController | undefined;
   let disposed = false;
   let disposing: Promise<void> | undefined;
   return {
@@ -49,6 +51,11 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
       if (disposed) throw new Error("GraphHost 已释放");
       if (running) throw new Error("GraphHost 已有 Root Run 正在执行；并发运行必须创建独立 Host");
       running = true;
+      const controller = new AbortController();
+      activeController = controller;
+      const onAbort = () => controller.abort(runOptions.signal?.reason);
+      if (runOptions.signal?.aborted) onAbort();
+      else runOptions.signal?.addEventListener("abort", onAbort, { once: true });
       const recording = runOptions.recording ?? options.recording ?? "replay";
       const recordingRequired = runOptions.recordingRequired ?? options.recordingRequired ?? false;
       const recorder = recording === "off" ? undefined : new Recorder({
@@ -58,8 +65,9 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
         pricingResolver: options.pricingResolver,
       });
       recorder?.attach(eventBus);
+      const execution: Promise<GraphRunResult<any>> = (async () => {
       try {
-        const result = await runtime.execute(graph, input, runOptions);
+        const result = await runtime.execute(graph, input, { ...runOptions, signal: controller.signal });
         if (!recorder) return { ...result, replay: Object.freeze({ mode: "off", status: "off" }) };
         const finalized = await recorder.finalize(result);
         if (recordingRequired && finalized.replay.status !== "complete") {
@@ -70,24 +78,37 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
             steps: result.steps,
             durationMs: result.durationMs,
             replay: finalized.replay,
-            status: "failed",
+            status: "failed" as const,
             failure: {
               code: "persistence-failed",
               phase: "host",
               message: finalized.replay.issues?.join("; ") ?? "Replay recording failed",
               retryable: true,
             },
-          };
+          } as GraphRunResult<any>;
         }
         return { ...result, replay: finalized.replay };
       } finally {
+        runOptions.signal?.removeEventListener("abort", onAbort);
         running = false;
+        activeController = undefined;
+      }
+      })();
+      activeRun = execution;
+      try {
+        return await execution;
+      } finally {
+        if (activeRun === execution) activeRun = undefined;
       }
     },
     async dispose() {
       if (disposing) return disposing;
       disposed = true;
-      disposing = Promise.resolve(options.dispose?.()).then(() => undefined);
+      activeController?.abort(new Error("GraphHost disposed"));
+      disposing = (async () => {
+        await activeRun?.catch(() => undefined);
+        await options.dispose?.();
+      })();
       return disposing;
     },
   };

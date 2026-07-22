@@ -15,7 +15,7 @@ import type { InvocationLimits } from "../core/limits.js";
 import { resolveInvocationLimits } from "../core/limits.js";
 import type { GraphFailure, GraphRunResult } from "../core/result.js";
 import type { JsonValue } from "../core/json.js";
-import type { Mechanism } from "../core/mechanism.js";
+import type { Mechanism, MechanismCompletionDecision } from "../core/mechanism.js";
 import { ContextState, type ContextSnapshot } from "../core/context.js";
 import { checkJsonSchemaValue } from "../core/schema.js";
 import type { ResolvedSkillView, SkillRef } from "../core/skill.js";
@@ -89,6 +89,10 @@ export interface AgentExecutionContext {
   readonly baseline: HostBaseline;
   readonly snapshot: ContextSnapshot;
   readonly mechanisms?: MechanismChain;
+  validateNodeCompletion(result: JsonValue): Promise<{ readonly valid: boolean; readonly reason?: string }>;
+  validateRouteStructure(result: JsonValue): Promise<{ readonly valid: boolean; readonly reason?: string }>;
+  validateMechanismCompletion(result: JsonValue): Promise<MechanismCompletionDecision>;
+  validateAgentChoice(result: JsonValue): Promise<{ readonly valid: boolean; readonly reason?: string }>;
   invokeGraph(
     ref: GraphRef,
     input: JsonValue,
@@ -102,6 +106,17 @@ export interface DelegateGraphRequest {
   readonly root: RootRunState;
   readonly parentInvocation: GraphInvocationState;
   readonly execute: () => Promise<InvocationOutcome>;
+}
+
+export interface InvocationAgentHost {
+  runAgent?: GraphRuntimeHost["runAgent"];
+  runAgentFromCode?: GraphRuntimeHost["runAgentFromCode"];
+  dispose(): void | Promise<void>;
+}
+
+export interface InvocationAgentHostRequest {
+  readonly root: RootRunState;
+  readonly invocation: GraphInvocationState;
 }
 
 export interface GraphRuntimeHost {
@@ -128,6 +143,8 @@ export interface GraphRuntimeHost {
   ): Promise<JsonValue>;
   resolveGraph?(ref: GraphRef): Graph | undefined;
   delegateGraph?(request: DelegateGraphRequest): Promise<InvocationOutcome>;
+  /** Creates an Agent execution lane for one call/compose Graph Invocation. */
+  createInvocationAgentHost?(request: InvocationAgentHostRequest): Promise<InvocationAgentHost>;
 }
 
 export interface GraphExecutionOptions {
@@ -165,6 +182,7 @@ class RuntimeFailure extends Error {
 export class GraphRuntime {
   readonly eventBus: RuntimeEventBus;
   private readonly mechanismRuns = new WeakMap<RootRunState, { runtime: MechanismRuntime; host: MechanismChain }>();
+  private readonly invocationAgentHosts = new Map<string, InvocationAgentHost>();
 
   constructor(private readonly host: GraphRuntimeHost = {}) {
     this.eventBus = host.eventBus ?? new RuntimeEventBus();
@@ -309,6 +327,11 @@ export class GraphRuntime {
         boundary,
         depth,
       });
+
+      if ((boundary === "call" || boundary === "compose") && this.host.createInvocationAgentHost) {
+        const agentHost = await this.host.createInvocationAgentHost({ root, invocation: state });
+        this.invocationAgentHosts.set(state.graphInvocationId, agentHost);
+      }
 
       let graphSkills: readonly ResolvedSkillView[];
       try {
@@ -485,7 +508,7 @@ export class GraphRuntime {
 
         let connection: Connection | undefined;
         try {
-          connection = await selectConnection(stage.route.connections, completion);
+          connection = await selectConnection(stage.route, completion);
           this.assertNotCancelled(root);
         } catch (error) {
           if (error instanceof RuntimeFailure) {
@@ -587,6 +610,11 @@ export class GraphRuntime {
       if (!state) return { outcome: failureOutcome(failure), frames: Object.freeze([...frames]) };
       return this.exitInvocation(state, frames, failureOutcome(failure));
     } finally {
+      if (state) {
+        const agentHost = this.invocationAgentHosts.get(state.graphInvocationId);
+        this.invocationAgentHosts.delete(state.graphInvocationId);
+        await agentHost?.dispose();
+      }
       if (graphMechanisms) {
         await request.mechanismRuntime.graphExit([request.hostMechanisms, graphMechanisms], graphError);
         await request.mechanismRuntime.close(graphMechanisms);
@@ -660,6 +688,7 @@ export class GraphRuntime {
       let result: JsonValue;
       if (node.kind === "agent") {
         result = await this.runAgent(
+        graph,
         node,
         input,
         root,
@@ -712,6 +741,7 @@ export class GraphRuntime {
   }
 
   private async runAgent(
+    graph: Graph,
     node: AgentNodeDefinition,
     input: JsonValue,
     root: RootRunState,
@@ -726,11 +756,12 @@ export class GraphRuntime {
     mechanismRuntime: MechanismRuntime,
     mechanismChains: readonly MechanismChain[],
   ): Promise<JsonValue> {
-    if (!this.host.runAgent) throw new RuntimeFailure(runtimeFailure("host-unavailable", "host", "Agent Node requires host.runAgent", false, nodeVisit.stageId));
+    const runAgent = this.invocationAgentHosts.get(invocation.graphInvocationId)?.runAgent ?? this.host.runAgent;
+    if (!runAgent) throw new RuntimeFailure(runtimeFailure("host-unavailable", "host", "Agent Node requires host.runAgent", false, nodeVisit.stageId));
     const state = this.beginAgent(root, invocation, nodeVisit, index);
     try {
       await mechanismRuntime.beforeAgentRun(mechanismChains, state.agentRunId, node.prompt ?? node.subGoal);
-      return await this.host.runAgent(node, input, this.createAgentContext(
+      return await runAgent(node, input, this.createAgentContext(
         root,
         invocation,
         nodeVisit,
@@ -739,6 +770,10 @@ export class GraphRuntime {
         tools,
         skills,
         contextState.refreshSnapshot(snapshot, state.agentRunId),
+        node.output,
+        graph.stages[nodeVisit.stageId]?.route,
+        mechanismRuntime,
+        mechanismChains,
         mechanismChains.at(-1),
       ));
     } finally {
@@ -762,11 +797,12 @@ export class GraphRuntime {
     mechanismRuntime: MechanismRuntime,
     mechanismChains: readonly MechanismChain[],
   ): Promise<JsonValue> {
-    if (!this.host.runAgentFromCode) throw new RuntimeFailure(runtimeFailure("host-unavailable", "host", "Code Node runAgent requires host.runAgentFromCode", false, nodeVisit.stageId));
+    const runAgentFromCode = this.invocationAgentHosts.get(invocation.graphInvocationId)?.runAgentFromCode ?? this.host.runAgentFromCode;
+    if (!runAgentFromCode) throw new RuntimeFailure(runtimeFailure("host-unavailable", "host", "Code Node runAgent requires host.runAgentFromCode", false, nodeVisit.stageId));
     const state = this.beginAgent(root, invocation, nodeVisit, index);
     try {
       await mechanismRuntime.beforeAgentRun(mechanismChains, state.agentRunId, request.prompt);
-      return await this.host.runAgentFromCode(request, node, this.createAgentContext(
+      return await runAgentFromCode(request, node, this.createAgentContext(
         root,
         invocation,
         nodeVisit,
@@ -775,6 +811,10 @@ export class GraphRuntime {
         tools,
         skills,
         contextState.refreshSnapshot(snapshot, state.agentRunId),
+        request.output as TSchema,
+        undefined,
+        mechanismRuntime,
+        mechanismChains,
         mechanismChains.at(-1),
       ));
     } finally {
@@ -813,6 +853,10 @@ export class GraphRuntime {
     tools: readonly ToolImplementation[],
     skills: readonly ResolvedSkillView[],
     snapshot: ContextSnapshot,
+    outputSchema: TSchema,
+    route: import("../core/graph.js").Route | undefined,
+    mechanismRuntime: MechanismRuntime,
+    mechanismChains: readonly MechanismChain[],
     mechanisms?: MechanismChain,
   ): AgentExecutionContext {
     const agentSnapshot = Object.freeze({ ...snapshot, agentRunId: agentRun.agentRunId });
@@ -827,6 +871,20 @@ export class GraphRuntime {
       baseline: root.baseline,
       snapshot: agentSnapshot,
       mechanisms,
+      validateNodeCompletion: async (result: JsonValue) => {
+        try {
+          const checked = checkJsonSchemaValue(outputSchema, result);
+          return checked.valid
+            ? { valid: true }
+            : { valid: false, reason: `Node output is invalid at Stage "${nodeVisit.stageId}": ${checked.message ?? "schema validation failed"}` };
+        } catch (error) {
+          return { valid: false, reason: `Invalid Node output schema: ${errorMessage(error)}` };
+        }
+      },
+      validateRouteStructure: async (result: JsonValue) => validateRouteStructure(route, result),
+      validateMechanismCompletion: (result: JsonValue) =>
+        mechanismRuntime.validateCompletion(mechanismChains, agentRun.agentRunId, result),
+      validateAgentChoice: async (result: JsonValue) => validateAgentChoice(route, result),
       invokeGraph: (ref: GraphRef, input: JsonValue, boundary: Exclude<InvocationBoundary, "root"> = "call") =>
         this.invokeGraph(ref, input, boundary, root, invocation, maxSteps),
     });
@@ -1093,13 +1151,46 @@ async function firstMatchingEntry<TInputSchema extends TSchema>(
 }
 
 async function selectConnection(
-  connections: readonly Connection[],
+  route: import("../core/graph.js").Route,
   completion: NodeCompletion,
 ): Promise<Connection | undefined> {
-  for (const connection of connections) {
+  if (route.kind === "agent-choice" && isJsonObject(completion.result)) {
+    const choice = completion.result.chosen_edge_id;
+    if (typeof choice === "string") return route.connections.find((connection) => connection.id === choice);
+  }
+  for (const connection of route.connections) {
     if (!connection.transition.guard || await connection.transition.guard(completion.result)) return connection;
   }
   return undefined;
+}
+
+function validateRouteStructure(
+  route: import("../core/graph.js").Route | undefined,
+  result: JsonValue,
+): { readonly valid: boolean; readonly reason?: string } {
+  if (!route) return { valid: true };
+  if (route.connections.length === 0) return { valid: false, reason: "Route has no connections" };
+  if (route.kind !== "agent-choice") return { valid: true };
+  return isJsonObject(result)
+    ? { valid: true }
+    : { valid: false, reason: "agent-choice result must be an object" };
+}
+
+function validateAgentChoice(
+  route: import("../core/graph.js").Route | undefined,
+  result: JsonValue,
+): { readonly valid: boolean; readonly reason?: string } {
+  if (!route || route.kind !== "agent-choice") return { valid: true };
+  if (!isJsonObject(result)) return { valid: false, reason: "agent-choice result must be an object" };
+  const choice = result.chosen_edge_id;
+  if (typeof choice !== "string" || !choice) return { valid: false, reason: "agent-choice requires result.chosen_edge_id" };
+  return route.connections.some((connection) => connection.id === choice)
+    ? { valid: true }
+    : { valid: false, reason: `Unknown agent-choice connection: ${choice}` };
+}
+
+function isJsonObject(value: JsonValue): value is Record<string, JsonValue> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function completedOutcome(output: JsonValue): InvocationOutcome {

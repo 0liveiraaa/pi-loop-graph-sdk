@@ -11,7 +11,7 @@ import { ToolCatalog } from "../../src/host/tool-catalog.js";
 const Empty = Type.Object({});
 const AgentResult = Type.Object({ fromAgent: Type.Boolean() });
 
-function fakePi() {
+function fakePi(submissions: Array<Record<string, unknown>> = [{ fromAgent: true }]) {
   const handlers = new Map<string, Function[]>();
   const registeredTools: any[] = [];
   const contextResults: any[] = [];
@@ -36,11 +36,13 @@ function fakePi() {
             ],
           }));
         }
-        for (const handler of handlers.get("tool_result") ?? []) {
-          await handler({
-            toolName: "__graph_complete__",
-            input: { result: { fromAgent: true } },
-          });
+        for (const submission of submissions) {
+          for (const handler of handlers.get("tool_result") ?? []) {
+            await handler({
+              toolName: "__graph_complete__",
+              input: { result: submission },
+            });
+          }
         }
         for (const handler of handlers.get("agent_end") ?? []) await handler({});
       });
@@ -117,6 +119,15 @@ describe("Core LoopGraphExtension", () => {
       },
     });
     await expect(extension.executeGraph(hybrid, { source: "tool", params: {} })).resolves.toMatchObject({
+      status: "completed",
+      output: { fromAgent: true },
+    });
+  });
+
+  it("rejects an invalid Pi completion inside the active Agent Run and accepts a corrected submission", async () => {
+    const pi = fakePi([{ fromAgent: "invalid" }, { fromAgent: true }]);
+    const extension = createLoopGraphExtension(pi, { runtimeOnly: true });
+    await expect(extension.executeGraph(agentGraph(), { source: "tool", params: {} })).resolves.toMatchObject({
       status: "completed",
       output: { fromAgent: true },
     });
@@ -233,5 +244,7 @@ describe("Core LoopGraphExtension", () => {
       nodeVisitId: expect.any(String),
       agentRunId: expect.any(String),
     });
+    const contracts = messages.filter((message: any) => message.customType === "loop_graph_output_contract");
+    expect(contracts).toHaveLength(1);
   });
 });
