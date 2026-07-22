@@ -142,7 +142,14 @@ describe("PiNodeContext completion submission", () => {
     await expect(run).resolves.toEqual({
       nodeId: "draft",
       status: "failed",
-      result: { reason: "Agent finished without calling __graph_complete__." },
+      result: {
+        reason: "Agent finished without calling __graph_complete__.",
+        runtimeFailure: {
+          code: "agent-ended-without-completion",
+          phase: "agent",
+          retryable: true,
+        },
+      },
     });
   });
 
@@ -219,7 +226,14 @@ describe("PiNodeContext completion submission", () => {
       await expect(run).resolves.toEqual({
         nodeId: "slow",
         status: "failed",
-        result: { reason: "Agent run timed out after 25 ms" },
+        result: {
+          reason: "Agent run timed out after 25 ms",
+          runtimeFailure: {
+            code: "agent-timeout",
+            phase: "agent",
+            retryable: true,
+          },
+        },
       });
     } finally {
       vi.useRealTimers();

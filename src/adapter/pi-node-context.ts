@@ -202,6 +202,11 @@ export class PiNodeContext implements NodeContext {
             reason: this.agentRunTimeoutMs === 5 * 60 * 1000
               ? "Agent run timed out after 5 minutes"
               : `Agent run timed out after ${this.agentRunTimeoutMs} ms`,
+            runtimeFailure: {
+              code: "agent-timeout",
+              phase: "agent",
+              retryable: true,
+            },
           },
         });
       }, this.agentRunTimeoutMs);
@@ -439,6 +444,11 @@ export class PiNodeContext implements NodeContext {
             nodeId: this.currentNodeId ?? "unknown",
             completeToolName: "__graph_complete__",
           }),
+          runtimeFailure: {
+            code: "agent-ended-without-completion",
+            phase: "agent",
+            retryable: true,
+          },
         },
       });
     }
@@ -577,7 +587,15 @@ export class PiNodeContext implements NodeContext {
       this.pendingCompletions.push({
         nodeId: this.currentNodeId ?? "unknown",
         status: "failed",
-        result: { reason, completionGate: { action: "rejection-budget-exhausted" } },
+        result: {
+          reason,
+          completionGate: { action: "rejection-budget-exhausted" },
+          runtimeFailure: {
+            code: "validation-exhausted",
+            phase: "agent",
+            retryable: false,
+          },
+        },
       });
     }
     return {

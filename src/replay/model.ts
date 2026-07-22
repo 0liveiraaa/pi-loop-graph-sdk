@@ -26,6 +26,7 @@ export interface ExtractedContextSnapshot {
 
 export interface ExtractedToolCall {
   readonly toolCallId: string;
+  readonly sequence: number;
   readonly toolName: string;
   readonly args?: unknown;
   readonly result?: unknown;
@@ -35,6 +36,7 @@ export interface ExtractedToolCall {
 
 export interface ExtractedTurn {
   readonly turnIndex: number;
+  readonly startedSequence: number;
   readonly provider?: string;
   readonly model?: string;
   readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number };
@@ -60,7 +62,7 @@ export interface ExtractedAgentRun {
   readonly graphInvocationId: string;
   readonly contextSnapshot?: ExtractedContextSnapshot;
   readonly turns: readonly ExtractedTurn[];
-  readonly completion?: ExtractedCompletionAttempt;
+  readonly completions: readonly ExtractedCompletionAttempt[];
 }
 
 export interface ExtractedNodeVisit {

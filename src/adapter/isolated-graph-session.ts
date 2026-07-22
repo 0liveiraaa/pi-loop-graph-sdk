@@ -366,6 +366,7 @@ export async function createPiGraphHost(
           runAgent: agentHost.runAgent,
           runAgentFromCode: agentHost.runAgentFromCode,
           createInvocationAgentHost: (request) => createPiInvocationAgentHost(effectiveOptions, null),
+          delegateGraph: (request) => request.execute(),
         },
         runStore: effectiveOptions.runStore,
         checkpointStore: effectiveOptions.runStore,

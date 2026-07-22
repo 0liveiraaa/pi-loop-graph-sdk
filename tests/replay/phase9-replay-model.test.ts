@@ -54,4 +54,33 @@ describe("Phase 9 Replay Model and HTML", () => {
     expect(html).not.toMatch(/https?:\/\//);
     expect(html).not.toMatch(/<link\b|<iframe\b/i);
   });
+
+  it("preserves every completion attempt and assigns tools to their actual model turn", () => {
+    const document = golden();
+    const base = { schemaVersion: 1 as const, rootRunId: "root-1", timestamp: "2026-07-22T00:00:00.000Z", graphInvocationId: "g-root", nodeVisitId: "n-1", agentRunId: "a-1" };
+    const events = [
+      { ...base, sequence: 1, event: { domain: "graph", type: "graph_entered", data: { graphId: "root", graphVersion: "1", boundary: "root", depth: 1 } } },
+      { ...base, sequence: 2, event: { domain: "node", type: "node_entered", data: { stageId: "work" } } },
+      { ...base, sequence: 3, event: { domain: "agent", type: "agent_started" } },
+      { ...base, sequence: 4, event: { domain: "model", type: "model_turn_started", data: { turn: 0 } } },
+      { ...base, sequence: 5, toolCallId: "tool-1", event: { domain: "tool", type: "tool_execution_started", data: { toolName: "read", args: { path: "a" } } } },
+      { ...base, sequence: 6, toolCallId: "tool-1", event: { domain: "tool", type: "tool_execution_finished", data: { result: "a" } } },
+      { ...base, sequence: 7, event: { domain: "model", type: "model_turn_finished", data: { message: { content: [] } } } },
+      { ...base, sequence: 8, event: { domain: "completion", type: "completion.submitted", data: { schemaFingerprint: "schema-1" } } },
+      { ...base, sequence: 9, event: { domain: "completion", type: "completion.validation_started", data: { validatorStage: "output" } } },
+      { ...base, sequence: 10, event: { domain: "completion", type: "completion.rejected", data: { reason: "missing field", validatorStage: "output" } } },
+      { ...base, sequence: 11, event: { domain: "model", type: "model_turn_started", data: { turn: 1 } } },
+      { ...base, sequence: 12, toolCallId: "tool-2", event: { domain: "tool", type: "tool_execution_started", data: { toolName: "read", args: { path: "b" } } } },
+      { ...base, sequence: 13, toolCallId: "tool-2", event: { domain: "tool", type: "tool_execution_finished", data: { result: "b" } } },
+      { ...base, sequence: 14, event: { domain: "model", type: "model_turn_finished", data: { message: { content: [] } } } },
+      { ...base, sequence: 15, event: { domain: "completion", type: "completion.submitted", data: { schemaFingerprint: "schema-1" } } },
+      { ...base, sequence: 16, event: { domain: "completion", type: "completion.validation_started", data: { validatorStage: "output" } } },
+      { ...base, sequence: 17, event: { domain: "completion", type: "completion.accepted" } },
+    ] as ReplayDocument["events"];
+
+    const run = parseReplay({ ...document, events }).nodes[0].agentRuns[0];
+    expect(run.completions.map((attempt) => attempt.outcome)).toEqual(["rejected", "accepted"]);
+    expect(run.completions[0]).toMatchObject({ reason: "missing field", validationStages: ["output"] });
+    expect(run.turns.map((turn) => turn.toolCalls.map((call) => call.toolCallId))).toEqual([["tool-1"], ["tool-2"]]);
+  });
 });

@@ -41,6 +41,7 @@ export interface GraphHost {
 
 export interface CreateGraphHostOptions {
   readonly runtime?: GraphRuntimeHost;
+  readonly limits?: InvocationLimits;
   readonly dispose?: () => void | Promise<void>;
   readonly recording?: RecordingMode;
   readonly recordingRequired?: boolean;
@@ -55,7 +56,7 @@ export function createGraphHost(options: CreateGraphHostOptions = {}): GraphHost
   const eventBus = options.runtime?.eventBus ?? new RuntimeEventBus();
   const runStore = options.runStore ?? new FileRunStore();
   const checkpointStore = options.checkpointStore ?? runStore;
-  const runtime = new GraphRuntime({ ...options.runtime, eventBus, checkpointStore });
+  const runtime = new GraphRuntime({ ...options.runtime, eventBus, checkpointStore, limits: options.limits ?? options.runtime?.limits });
   let running = false;
   let activeRun: Promise<GraphRunResult<any>> | undefined;
   let activeController: AbortController | undefined;

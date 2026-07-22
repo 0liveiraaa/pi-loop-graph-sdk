@@ -119,6 +119,7 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
         stageId: nv?.stageId ?? "",
         graphInvocationId: stringValue(ev.graphInvocationId) ?? "",
         turns: [],
+        completions: [],
       });
     }
   }
@@ -146,6 +147,7 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
       const list = turns.get(currentArId) ?? [];
       list.push({
         turnIndex: currentTurnIdx,
+        startedSequence: ev.sequence,
         assistantTexts: [],
         toolCalls: [],
       });
@@ -198,6 +200,7 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
       if (ev.event.type === "tool_execution_started") {
         const tc: ExtractedToolCall = {
           toolCallId: tcId,
+          sequence: ev.sequence,
           toolName: stringValue(data?.toolName) ?? "unknown",
           args: data?.args,
           timestamp: ev.timestamp,
@@ -224,32 +227,39 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
     }
   }
 
-  // Attach tool calls to turns (simplified: all tool calls for an agent run go to its last turn)
+  // Attach each tool call to the turn that was active when it started.
   for (const [arId, arTurns] of turns) {
     const tcList = toolCallsByArId.get(arId) ?? [];
     if (tcList.length > 0 && arTurns.length > 0) {
-      // Assign all tool calls to the last turn
-      const lastIdx = arTurns.length - 1;
-      const last = arTurns[lastIdx];
-      arTurns[lastIdx] = Object.freeze({ ...last, toolCalls: Object.freeze(tcList) });
-      turns.set(arId, arTurns);
+      const byTurn = arTurns.map((turn, index) => {
+        const nextStart = arTurns[index + 1]?.startedSequence ?? Number.POSITIVE_INFINITY;
+        const calls = tcList.filter((call) => call.sequence >= turn.startedSequence && call.sequence < nextStart);
+        return calls.length > 0 ? Object.freeze({ ...turn, toolCalls: Object.freeze(calls) }) : turn;
+      });
+      turns.set(arId, byTurn);
+      continue;
     }
   }
 
   // Collect completion attempts
-  const completionsByArId = new Map<string, ExtractedCompletionAttempt>();
+  const completionsByArId = new Map<string, ExtractedCompletionAttempt[]>();
+  const activeCompletionByArId = new Map<string, number>();
   const completionStagesByArId = new Map<string, string[]>();
   for (const ev of allEvents) {
     const arId = stringValue(ev.agentRunId);
     if (!arId) continue;
     if (ev.event.type === "completion.submitted") {
       const data = isObject(ev.event.data) ? ev.event.data : null;
-      completionsByArId.set(arId, {
+      const attempts = completionsByArId.get(arId) ?? [];
+      attempts.push({
         timestamp: ev.timestamp,
         schemaFingerprint: stringValue(data?.schemaFingerprint),
         outcome: "accepted", // default, will be updated
         validationStages: [],
       });
+      completionsByArId.set(arId, attempts);
+      activeCompletionByArId.set(arId, attempts.length - 1);
+      completionStagesByArId.set(arId, []);
     }
     if (ev.event.type === "completion.validation_started") {
       const data = isObject(ev.event.data) ? ev.event.data : null;
@@ -264,24 +274,30 @@ export function parseReplay(input: string | ReplayDocument): ReplayModel {
       const data = isObject(ev.event.data) ? ev.event.data : null;
       const outcome = ev.event.type === "completion.accepted" ? "accepted"
         : ev.event.type === "completion.failed" ? "failed" : "rejected";
-      const existing = completionsByArId.get(arId);
+      const attempts = completionsByArId.get(arId) ?? [];
+      const activeIndex = activeCompletionByArId.get(arId);
       const stages = [...(completionStagesByArId.get(arId) ?? [])];
-      completionsByArId.set(arId, Object.freeze({
+      const index = activeIndex ?? attempts.length;
+      const existing = attempts[index];
+      attempts[index] = Object.freeze({
         ...(existing ?? { timestamp: ev.timestamp, validationStages: Object.freeze(stages) }),
         outcome,
         reason: stringValue(data?.reason),
         validatorStage: stringValue(data?.validatorStage),
         durationMs: typeof data?.durationMs === "number" ? data.durationMs : undefined,
         validationStages: Object.freeze(stages),
-      }));
+      });
+      completionsByArId.set(arId, attempts);
+      activeCompletionByArId.delete(arId);
+      completionStagesByArId.delete(arId);
     }
   }
 
   // Attach turns and completions to agent runs
   for (const [arId, ar] of agentRuns) {
     const arTurns = Object.freeze(turns.get(arId)?.map(t => Object.freeze(t)) ?? []);
-    const completion = completionsByArId.get(arId);
-    agentRuns.set(arId, Object.freeze({ ...ar, turns: arTurns, completion }));
+    const completions = Object.freeze(completionsByArId.get(arId) ?? []);
+    agentRuns.set(arId, Object.freeze({ ...ar, turns: arTurns, completions }));
   }
 
   // Attach agent runs to node visits

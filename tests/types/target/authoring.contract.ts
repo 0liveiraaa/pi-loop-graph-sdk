@@ -51,8 +51,15 @@ const write = agentNode({
   context: {
     focus: {
       select: (input) => ({ topic: input.topic, excerpts: input.excerpts }),
-      render: ({ selected, meta }) =>
-        `${meta.node.subGoal}\n${JSON.stringify(selected)}`,
+      render: ({ selected, meta }) => {
+        if (selected) {
+          selected.topic;
+          selected.excerpts;
+          // @ts-expect-error The renderer only receives fields returned by select.
+          selected.internalJobId;
+        }
+        return `${meta.node.subGoal}\n${JSON.stringify(selected)}`;
+      },
     },
   },
   prompt: "Complete the current node and submit its structured result.",

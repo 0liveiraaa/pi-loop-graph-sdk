@@ -19,3 +19,5 @@ const result = await createGraphHost().execute(graph, { name: "World" });
 ```
 
 Model completion is strictly `__graph_complete__({ result })`; Runtime owns status and failures are returned as `GraphRunResult.failure`. Phase 10 currently supports reliable single-layer Root checkpoint/resume only. Nested continuation recovery remains fail-closed. Set `PI_LIVE_TESTS=1` for live LLM tests.
+
+Graph exposures created with `exposeGraph()` run in an isolated Pi Session by default. Use `execution: "current-session"` only when sharing the caller's session state is intentional. The packaged `/extension` entry installs the base runtime and does not register demo graphs.

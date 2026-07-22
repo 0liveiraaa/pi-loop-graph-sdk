@@ -39,6 +39,12 @@ try {
   if (packedPaths.some((path) => path === "src" || path.startsWith("src/"))) {
     throw new Error("Published tarball unexpectedly contains src/");
   }
+  if (packedPaths.some((path) => path.startsWith("dist/graphs/"))) {
+    throw new Error("Published tarball unexpectedly contains demo graphs");
+  }
+  if (packedPaths.includes("dist/registry.js") || packedPaths.includes("dist/registry.d.ts")) {
+    throw new Error("Published tarball unexpectedly contains the legacy global registry");
+  }
   for (const required of ["dist/index.js", "dist/index.d.ts", "dist/adapter/extension.js", "dist/replay/index.js", "dist/replay/index.d.ts"]) {
     if (!packedPaths.includes(required)) {
       throw new Error(`Published tarball is missing ${required}`);
@@ -57,6 +63,10 @@ try {
   }, null, 2));
 
   writeFileSync(join(consumerRoot, "verify.mjs"), `
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const available = [
   ["pi-loop-graph-sdk", /\\/dist\\/index\\.js$/],
   ["pi-loop-graph-sdk/extension", /\\/dist\\/adapter\\/extension\\.js$/],
@@ -70,6 +80,27 @@ for (const [specifier, expectedPath] of available) {
     throw new Error(specifier + " resolved outside dist: " + resolved);
   }
   await import(specifier);
+}
+
+const root = await import("pi-loop-graph-sdk");
+for (const name of [
+  "ContextState",
+  "materializeProjection",
+  "prepareOutputContract",
+  "defaultCompletionFeedbackFormatter",
+  "defaultSkillContentProvider",
+  "DEFAULT_HOST_BASELINE",
+  "DEFAULT_INVOCATION_LIMITS",
+  "GraphRuntime",
+  "ToolCatalog",
+  "SkillCatalog",
+]) {
+  if (name in root) throw new Error(name + " must not be exported from the package root");
+}
+const rootDeclarations = readFileSync(join(dirname(fileURLToPath(import.meta.resolve("pi-loop-graph-sdk"))), "index.d.ts"), "utf8");
+for (const name of ["Entry", "ContextFrame"]) {
+  const declarations = rootDeclarations;
+  if (!declarations.includes(name)) throw new Error(name + " is missing from root declarations");
 }
 
 const { ToolCatalog, SkillCatalog } = await import("pi-loop-graph-sdk/advanced");

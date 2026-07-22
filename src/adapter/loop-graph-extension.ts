@@ -8,7 +8,7 @@ import type { Mechanism } from "../core/mechanism.js";
 import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
 import type { InvocationLimits } from "../core/limits.js";
 import type { RecordingMode } from "../core/result.js";
-import { GraphRuntime as CoreGraphRuntime } from "../runtime/graph-runtime.js";
+import { AgentExecutionFailure, GraphRuntime as CoreGraphRuntime } from "../runtime/graph-runtime.js";
 import { RuntimeEventBus } from "../runtime/event-bus.js";
 import { GraphCatalog } from "../host/graph-catalog.js";
 import { preflightGraphCapabilities } from "../host/preflight.js";
@@ -21,11 +21,6 @@ import {
   defaultModelMessageFormatter,
   type ModelMessageFormatter,
 } from "./model-messages.js";
-import { probeGraph } from "../graphs/probe-graph.js";
-import { chainGraph } from "../graphs/chain-graph.js";
-import { childGraph, subgraphGraph } from "../graphs/subgraph-graph.js";
-import { reviewGraph } from "../graphs/review-graph.js";
-import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 import type { NodeContextRenderer } from "./projection.js";
 import type { GraphRef } from "../core/graph.js";
 import { OUTPUT_CONTRACT_MESSAGE_TYPE } from "./output-contract.js";
@@ -75,7 +70,6 @@ export const defaultCompletionFeedbackFormatter: CompletionFeedbackFormatter = (
 
 export interface LoopGraphExtensionOptions {
   readonly runtimeOnly?: boolean;
-  readonly demoGraphs?: boolean;
   readonly toolCatalog?: ToolCatalog;
   readonly skillCatalog?: SkillCatalog;
   readonly unsafeToolResolver?: UnsafeToolResolver;
@@ -112,8 +106,8 @@ export interface LoopGraphExtension {
 }
 
 export type GraphExposure =
-  | { readonly kind: "command"; readonly name: string; readonly description?: string; readonly parseInput?: (args: string) => JsonValue }
-  | { readonly kind: "tool"; readonly name: string; readonly description?: string; readonly parameters?: ToolDefinition["parameters"]; readonly parseInput?: (params: unknown) => JsonValue; readonly formatResult?: (result: CoreGraphRunResult) => unknown };
+  | { readonly kind: "command"; readonly name: string; readonly description?: string; readonly execution?: "isolated" | "current-session"; readonly parseInput?: (args: string) => JsonValue }
+  | { readonly kind: "tool"; readonly name: string; readonly description?: string; readonly execution?: "isolated" | "current-session"; readonly parameters?: ToolDefinition["parameters"]; readonly parseInput?: (params: unknown) => JsonValue; readonly formatResult?: (result: CoreGraphRunResult) => unknown };
 
 export function createLoopGraphExtension(
   pi: ExtensionAPI,
@@ -228,12 +222,6 @@ export function createLoopGraphExtension(
     });
   }
 
-  if (options.demoGraphs) {
-    for (const graph of [reviewGraph, probeGraph, chainGraph, childGraph, subgraphGraph, validateTestGraph]) {
-      registerCoreGraph(graph);
-    }
-  }
-
   function registerCoreGraph(graph: CoreGraph): void {
     syncPiBusinessTools(options.toolCatalog, piToolCatalog, pi);
     preflightGraphCapabilities(graph, { ...options, toolCatalog: piToolCatalog });
@@ -288,6 +276,9 @@ export function createLoopGraphExtension(
         mechanisms: options.mechanisms,
         createInvocationAgentHost: options.createInvocationAgentHost
           ? (request) => options.createInvocationAgentHost!(request, activeRecorder)
+          : undefined,
+        delegateGraph: options.createInvocationAgentHost
+          ? (request) => request.execute()
           : undefined,
         runAgent: (node, _input, context) => {
           pi.setActiveTools(context.tools.map((tool) => tool.name));
@@ -384,8 +375,13 @@ export function createLoopGraphExtension(
     if (exposure.kind === "command") {
       pi.registerCommand(exposure.name, {
         description: exposure.description,
-        async handler(args) {
-          await executeGraph(graph, { source: "command", params: (exposure.parseInput?.(args) ?? { args }) as Record<string, unknown> });
+        async handler(args, context) {
+          const input = (exposure.parseInput?.(args) ?? { args }) as Record<string, unknown>;
+          if (exposure.execution === "current-session") {
+            await executeGraph(graph, { source: "command", params: input });
+          } else {
+            await executeExposedGraph(graph, input, context);
+          }
         },
       });
       return;
@@ -395,12 +391,50 @@ export function createLoopGraphExtension(
       label: exposure.name,
       description: exposure.description ?? exposure.name,
       parameters: exposure.parameters ?? Type.Record(Type.String(), Type.Unknown()),
-      async execute(_toolCallId, params) {
-        const result = await executeGraph(graph, { source: "tool", params: (exposure.parseInput?.(params) ?? params) as Record<string, unknown> });
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
+        const input = (exposure.parseInput?.(params) ?? params) as Record<string, unknown>;
+        const result = exposure.execution === "current-session"
+          ? await executeGraph(graph, { source: "tool", params: input })
+          : await executeExposedGraph(graph, input, context);
         const formatted = exposure.formatResult?.(result) ?? result;
         return { content: [{ type: "text", text: typeof formatted === "string" ? formatted : JSON.stringify(formatted) }], details: formatted };
       },
     });
+  }
+
+  async function executeExposedGraph(
+    graph: CoreGraph,
+    input: Record<string, unknown>,
+    context: import("@earendil-works/pi-coding-agent").ExtensionContext,
+  ): Promise<CoreGraphRunResult> {
+    const [{ AuthStorage }, { createPiGraphHost }] = await Promise.all([
+      import("@earendil-works/pi-coding-agent"),
+      import("./isolated-graph-session.js"),
+    ]);
+    const authStorage = AuthStorage.create();
+    const host = await createPiGraphHost({
+      authStorage,
+      modelRegistry: context.modelRegistry,
+      cwd: context.cwd,
+      model: context.model,
+      graphs: catalog.values,
+      toolCatalog: options.toolCatalog,
+      skillCatalog: options.skillCatalog,
+      unsafeToolResolver: options.unsafeToolResolver,
+      baseline: options.baseline,
+      limits: options.limits,
+      outputContractMaxBytes: options.outputContractMaxBytes,
+      recording: options.recording,
+      recordingRequired: options.recordingRequired,
+      runStore: options.runStore,
+      artifactThresholdBytes: options.artifactThresholdBytes,
+      pricingResolver: options.pricingResolver,
+    });
+    try {
+      return await host.execute(graph, input as never, { signal: context.signal }) as CoreGraphRunResult;
+    } finally {
+      await host.dispose();
+    }
   }
 
   async function runPiAgent(
@@ -439,12 +473,48 @@ export function createLoopGraphExtension(
         prompt,
         outputSchema: outputSchema as AgentRunRequest["outputSchema"],
       });
+      if (completion.status !== "ok") {
+        throw new AgentExecutionFailure(toAgentFailure(completion, stageId));
+      }
       return completion.result as JsonValue;
     } finally {
       context.setContextSnapshot(null);
       context.setMechanismLifecycle(null);
     }
   }
+}
+
+function toAgentFailure(
+  completion: import("../type.js").NodeCompletion,
+  stageId: string,
+): import("../core/result.js").GraphFailure {
+  const result = completion.result as Record<string, unknown>;
+  const reason = typeof result.reason === "string" ? result.reason : "Agent execution failed";
+  const runtimeFailure = isRecord(result.runtimeFailure) ? result.runtimeFailure : undefined;
+  const completionGate = isRecord(result.completionGate) ? result.completionGate : undefined;
+  const gateAction = completionGate?.action;
+  if (gateAction === "fail-node" || gateAction === "fail-graph") {
+    return {
+      code: "mechanism-failed",
+      phase: gateAction === "fail-graph" ? "graph" : "node",
+      message: reason,
+      retryable: false,
+      stageId,
+    };
+  }
+  const code = typeof runtimeFailure?.code === "string"
+    ? runtimeFailure.code as import("../core/result.js").GraphFailureCode
+    : "runtime-error";
+  const phase = typeof runtimeFailure?.phase === "string"
+    ? runtimeFailure.phase as import("../core/result.js").GraphFailure["phase"]
+    : "agent";
+  return {
+    code,
+    phase,
+    message: reason,
+    retryable: runtimeFailure?.retryable === true,
+    stageId,
+  };
 }
 
 function resolveLimits(limits: LoopGraphLimits | undefined): Required<LoopGraphLimits> {

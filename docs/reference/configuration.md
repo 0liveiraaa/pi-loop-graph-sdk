@@ -12,6 +12,7 @@
 | `artifactThresholdBytes` | `number` | 65536 | 超过此字节数的大载荷存储为 artifact 引用 |
 | `pricingResolver` | `PricingResolver` | — | 费用计算函数 |
 | `dispose` | `() => void \| Promise<void>` | — | Host 释放时的额外清理 |
+| `limits` | `InvocationLimits` | SDK 默认上限 | Host 硬上限；单次运行只能收紧，不能扩大 |
 
 ## GraphRuntimeHost（runtime 字段）
 
@@ -44,8 +45,9 @@
 | `artifactThresholdBytes` | `number` | 大载荷 artifact 阈值 |
 | `pricingResolver` | `PricingResolver`（来自 `/replay`） | 费用计算 |
 | `unsafeToolResolver` | `UnsafeToolResolver`（来自 `/advanced`） | 越权工具解析 |
-| `demoGraphs` | `boolean` | 是否注册 SDK 自带测试图 |
 | `runtimeOnly` | `boolean` | 仅安装 Runtime，不注册 UI 通知 |
+
+`exposeGraph()` 的 command/tool exposure 默认使用 `execution: "isolated"`，为每次调用创建独立 Pi Session。只有明确接受当前会话历史和状态相互影响时，才使用 `execution: "current-session"`。
 
 ## LoopGraphLimits
 

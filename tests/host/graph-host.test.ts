@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { defineGraph } from "../../src/builders/graph.js";
 import { codeNode } from "../../src/builders/node.js";
-import { entry, finish, firstMatch } from "../../src/builders/route.js";
+import { connect, entry, finish, firstMatch } from "../../src/builders/route.js";
 import { createGraphHost, executeIsolatedGraph } from "../../src/host/graph-host.js";
 
 const graph = defineGraph({
@@ -65,5 +65,32 @@ describe("Phase 7 GraphHost", () => {
     await expect(running).resolves.toMatchObject({ status: "cancelled" });
     await disposing;
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not allow per-run limits to enlarge Host hard limits", async () => {
+    const twoSteps = defineGraph({
+      ...graph,
+      id: "host-hard-limits",
+      stages: {
+        first: {
+          node: graph.stages.start.node,
+          route: firstMatch({ next: connect("second", { map: ({ completion }) => completion.result }) }),
+        },
+        second: graph.stages.start,
+      },
+      entries: [entry("start", { to: "first" })],
+    });
+    const host = createGraphHost({ limits: { maxGraphDepth: 8, maxGraphInvocations: 64, maxTotalNodeVisits: 1 } });
+    try {
+      await expect(host.execute(twoSteps, { value: 1 }, {
+        limits: { maxGraphDepth: 99, maxGraphInvocations: 999, maxTotalNodeVisits: 999 },
+        recording: "off",
+      })).resolves.toMatchObject({
+        status: "failed",
+        failure: { code: "max-steps-exceeded" },
+      });
+    } finally {
+      await host.dispose();
+    }
   });
 });

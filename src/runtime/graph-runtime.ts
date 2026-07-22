@@ -12,7 +12,7 @@ import type {
   SchemaValue,
 } from "../core/graph.js";
 import type { InvocationLimits } from "../core/limits.js";
-import { resolveInvocationLimits } from "../core/limits.js";
+import { DEFAULT_INVOCATION_LIMITS, resolveInvocationLimits } from "../core/limits.js";
 import type { GraphFailure, GraphRunResult } from "../core/result.js";
 import type { JsonValue } from "../core/json.js";
 import type { Mechanism, MechanismCompletionDecision } from "../core/mechanism.js";
@@ -122,6 +122,8 @@ export interface InvocationAgentHostRequest {
 }
 
 export interface GraphRuntimeHost {
+  /** Hard upper bound; per-run limits may only reduce these values. */
+  readonly limits?: InvocationLimits;
   readonly catalog?: GraphCatalog;
   readonly eventBus?: RuntimeEventBus;
   readonly toolCatalog?: ToolCatalog;
@@ -149,6 +151,14 @@ export interface GraphRuntimeHost {
   delegateGraph?(request: DelegateGraphRequest): Promise<InvocationOutcome>;
   /** Creates an Agent execution lane for one call/compose Graph Invocation. */
   createInvocationAgentHost?(request: InvocationAgentHostRequest): Promise<InvocationAgentHost>;
+}
+
+/** Lets an Agent host terminate execution with a stable Runtime failure. */
+export class AgentExecutionFailure extends Error {
+  constructor(readonly failure: GraphFailure) {
+    super(failure.message);
+    this.name = "AgentExecutionFailure";
+  }
 }
 
 export interface GraphExecutionOptions {
@@ -203,7 +213,10 @@ export class GraphRuntime {
     const root: RootRunState = Object.freeze({
       rootRunId: crypto.randomUUID(),
       startedAt: Date.now(),
-      budget: new InvocationBudget(resolveInvocationLimits(resolvedOptions.limits)),
+      budget: new InvocationBudget(tightenLimits(
+        this.host.limits ?? DEFAULT_INVOCATION_LIMITS,
+        resolvedOptions.limits,
+      )),
       signal: resolvedOptions.signal,
       baseline: resolveHostBaseline(this.host.baseline),
     });
@@ -335,7 +348,7 @@ export class GraphRuntime {
       });
       this.activeInvocations.set(state.graphInvocationId, { state, parentId: state.parentGraphInvocationId });
 
-      if ((boundary === "call" || boundary === "compose") && this.host.createInvocationAgentHost) {
+      if (boundary !== "root" && this.host.createInvocationAgentHost) {
         const agentHost = await this.host.createInvocationAgentHost({ root, invocation: state });
         this.invocationAgentHosts.set(state.graphInvocationId, agentHost);
       }
@@ -460,7 +473,7 @@ export class GraphRuntime {
             stageId,
           );
         } catch (error) {
-          const failure = error instanceof RuntimeFailure
+          const failure = error instanceof RuntimeFailure || error instanceof AgentExecutionFailure
             ? error.failure
             : runtimeFailure("invalid-input", "node", errorMessage(error), false, stageId, error);
           exitNode();
@@ -1558,7 +1571,7 @@ export class GraphRuntime {
               stageId,
             );
           } catch (error) {
-            const failure = error instanceof RuntimeFailure
+            const failure = error instanceof RuntimeFailure || error instanceof AgentExecutionFailure
               ? error.failure
               : runtimeFailure("invalid-input", "node", errorMessage(error), false, stageId, error);
             exitNode();
@@ -1943,6 +1956,18 @@ function cancelledFailure(cause?: unknown): GraphFailure {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function tightenLimits(
+  hard: InvocationLimits,
+  requested: Partial<InvocationLimits> | undefined,
+): InvocationLimits {
+  const candidate = resolveInvocationLimits(requested ?? {});
+  return Object.freeze({
+    maxGraphDepth: Math.min(hard.maxGraphDepth, candidate.maxGraphDepth),
+    maxGraphInvocations: Math.min(hard.maxGraphInvocations, candidate.maxGraphInvocations),
+    maxTotalNodeVisits: Math.min(hard.maxTotalNodeVisits, candidate.maxTotalNodeVisits),
+  });
 }
 
 function checkpointOrder(checkpoint: CheckpointNodeBoundary): number {

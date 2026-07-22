@@ -36,6 +36,7 @@
 | `createGraphHost(options?)` | 创建 Graph Host |
 | `executeIsolatedGraph(graph, options)` | 一次性隔离执行图 |
 | `createLoopGraphExtension(pi, options?)` | 创建 Pi extension 实例 |
+| `createPiGraphHost(options)` | 使用真实 Pi Session 创建隔离 Graph Host |
 
 ### 类型（值导出）
 
@@ -49,11 +50,11 @@
 |------|------|
 | `Graph` / `GraphDefinition` | 图定义类型 |
 | `GraphRef` | 图引用 `{ id: string; version: string }` |
-| `CoreEntry` | 入口类型 |
+| `Entry` | 入口类型 |
 | `Stage` | 阶段装配类型 |
 | `NodeDefinition` / `AgentNodeDefinition` / `CodeNodeDefinition` / `GraphNodeDefinition` | 节点定义类型 |
 | `Route` / `Connection` / `Transition` | 路由和迁移类型 |
-| `ContextContent` / `ContextProjection` | 上下文内容与投影类型 |
+| `ContextFrame` / `ContextContent` | 公共上下文类型 |
 | `SkillRef` / `ToolSet` | Skill 和工具集类型 |
 | `Mechanism` | Mechanism 类型 |
 | `NodeCompletion` | 节点完成类型 |
@@ -84,7 +85,7 @@
 | `validateGraph` / `assertValidGraph` / `validateGraphTools` | 图校验 |
 | `ToolCatalog` | 工具目录（用于构造 `toolCatalog` 配置） |
 | `SkillCatalog` | Skill 目录（用于构造 `skillCatalog` 配置） |
-| `IsolatedSessionGraphHost` | 旧版隔离 Host（不推荐） |
+| `IsolatedSessionGraphHost` | 底层隔离 Host（高级接口） |
 | **类型**：`GraphRuntimeHost`、`AgentExecutionContext`、`InvocationBoundary`、`ContextProjection`、`ContextContribution`、`ContextSnapshot`、`HostBaseline`、`UnsafeToolResolver`、`ToolImplementation`、`SkillResolver`、`GraphExecutionHost` 等 |
 
 ## /extension 子路径（`pi-loop-graph-sdk/extension`）

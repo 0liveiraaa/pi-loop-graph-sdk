@@ -64,16 +64,21 @@ describe("Phase 7.1 invocation-scoped Agent Host", () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it("does not create invocation Agent lanes for root or delegate boundaries", async () => {
+  it("creates and disposes an isolated Agent lane for delegate boundaries", async () => {
     const child = agentGraph("delegate-child");
     const root = parent("delegate", child.id);
     const catalog = new GraphCatalog(); catalog.register(root); catalog.register(child);
-    const factory = vi.fn();
+    const dispose = vi.fn();
+    const delegateAgent = vi.fn(async (_node, input) => input as { value: number });
+    const factory = vi.fn(async (_request: InvocationAgentHostRequest) => ({ runAgent: delegateAgent, dispose }));
     const rootAgent = vi.fn(async (_node, input) => input as { value: number });
     const runtime = new GraphRuntime({ catalog, runAgent: rootAgent, createInvocationAgentHost: factory, delegateGraph: (request) => request.execute() });
     await expect(runtime.execute(root, { value: 3 })).resolves.toMatchObject({ status: "completed", output: { value: 3 } });
-    expect(factory).not.toHaveBeenCalled();
-    expect(rootAgent).toHaveBeenCalledOnce();
+    expect(factory).toHaveBeenCalledOnce();
+    expect(factory.mock.calls[0][0].invocation).toMatchObject({ boundary: "delegate", depth: 2 });
+    expect(delegateAgent).toHaveBeenCalledOnce();
+    expect(rootAgent).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("creates a distinct lane for every recursive call invocation and disposes all lanes", async () => {

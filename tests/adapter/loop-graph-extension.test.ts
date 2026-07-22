@@ -1011,25 +1011,11 @@ describe("createLoopGraphExtension", () => {
     });
   });
 
-  describe("demo 图默认行为", () => {
-    it("默认不注册 demo 图", () => {
+  describe("显式图注册", () => {
+    it("注册图不会自动恢复旧 invocation exposure", async () => {
       const pi = fakePi();
       const loop = createLoopGraphExtension(pi);
-
-      // demo 图不应被注册（没有命令注册 demo 图的 invocation name）
-      const cmdNames = (pi.registerCommand as any).mock.calls.map(
-        (c: any[]) => c[0],
-      );
-      expect(cmdNames).not.toContain("echo-test");
-      expect(cmdNames).not.toContain("probe");
-      expect(cmdNames).not.toContain("chain");
-      expect(cmdNames).not.toContain("sub");
-      expect(cmdNames).not.toContain("validate-test");
-    });
-
-    it("demoGraphs: true 时加入 Core Catalog，但不提前恢复 invocation exposure", async () => {
-      const pi = fakePi();
-      const loop = createLoopGraphExtension(pi, { demoGraphs: true });
+      loop.registerGraph(reviewGraph);
 
       const cmdNames = (pi.registerCommand as any).mock.calls.map(
         (c: any[]) => c[0],
@@ -1074,8 +1060,8 @@ describe("createLoopGraphExtension", () => {
 
       await expect(loop.executeGraph(probeGraph, { source: "tool", params: {} }))
         .resolves.toMatchObject({
-          status: "completed",
-          output: { reason: "Agent finished without calling __graph_complete__." },
+          status: "failed",
+          failure: { phase: "agent" },
         });
     });
 

@@ -51,8 +51,9 @@ function renderNodeVisit(nv: ExtractedNodeVisit): string {
 
 function renderAgentRun(ar: ExtractedAgentRun): string {
   const ctx = ar.contextSnapshot;
-  const completionBadge = ar.completion
-    ? `<span class="badge ${ar.completion.outcome === "accepted" ? "ok" : ar.completion.outcome === "rejected" ? "warn" : "fail"}">${ar.completion.outcome}</span>`
+  const lastCompletion = ar.completions.at(-1);
+  const completionBadge = lastCompletion
+    ? `<span class="badge ${lastCompletion.outcome === "accepted" ? "ok" : lastCompletion.outcome === "rejected" ? "warn" : "fail"}">${lastCompletion.outcome}</span>`
     : "";
 
   return `<div class="ar-card">
@@ -61,8 +62,8 @@ function renderAgentRun(ar: ExtractedAgentRun): string {
       ${completionBadge}
     </div>
     ${ctx ? renderContext(ctx) : ""}
-    ${ar.turns.map(t => renderTurn(t, ar.completion)).join("")}
-    ${ar.completion ? renderCompletionVerdict(ar.completion) : ""}
+    ${ar.turns.map(t => renderTurn(t, ar.completions)).join("")}
+    ${ar.completions.map(renderCompletionVerdict).join("")}
   </div>`;
 }
 
@@ -75,9 +76,9 @@ function renderContext(ctx: ExtractedContextSnapshot): string {
   </details>`;
 }
 
-function renderTurn(turn: ExtractedTurn, completion: ExtractedAgentRun["completion"]): string {
+function renderTurn(turn: ExtractedTurn, completions: ExtractedAgentRun["completions"]): string {
   const toolsHtml = turn.toolCalls.length > 0
-    ? `<div class="tools">${turn.toolCalls.map(tc => renderToolCall(tc, completion)).join("")}</div>`
+    ? `<div class="tools">${turn.toolCalls.map(tc => renderToolCall(tc, completions)).join("")}</div>`
     : "";
   const textsHtml = turn.assistantTexts.length > 0
     ? turn.assistantTexts.map(t => `<div class="asstext">${escapeHtml(t)}</div>`).join("")
@@ -97,11 +98,12 @@ function renderTurn(turn: ExtractedTurn, completion: ExtractedAgentRun["completi
   </div>`;
 }
 
-function renderToolCall(tc: import("./model.js").ExtractedToolCall, completion: ExtractedAgentRun["completion"]): string {
+function renderToolCall(tc: import("./model.js").ExtractedToolCall, completions: ExtractedAgentRun["completions"]): string {
   const isCompletion = tc.toolName === "__graph_complete__";
   const icon = tc.isError ? "❌" : isCompletion ? "✅" : "🔧";
   const cls = tc.isError ? "tool-err" : isCompletion ? "tool-comp" : "";
 
+  const completion = isCompletion ? completions.find((item) => item.timestamp >= tc.timestamp) ?? completions.at(-1) : undefined;
   const outcomeNote = isCompletion && completion
     ? ` → <span class="badge ${completion.outcome === "accepted" ? "ok" : completion.outcome === "rejected" ? "warn" : "fail"}">${completion.outcome}</span>${completion.reason ? ` <span class="reason">${escapeHtml(completion.reason)}</span>` : ""}`
     : "";

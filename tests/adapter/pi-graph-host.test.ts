@@ -58,6 +58,28 @@ describe("createPiGraphHost Graph Catalog lifetime", () => {
     }
   });
 
+  it("executes delegate children through an isolated invocation Agent Host", async () => {
+    const delegatedRoot = defineGraph({
+      ...root,
+      id: "pi-host-catalog-delegate-root",
+      stages: {
+        child: {
+          node: graphNode({ subGoal: "delegate child", input: Value, output: Value, graph: graphRef(child.id, child.version), boundary: "delegate" }),
+          route: firstMatch({ done: finish({ output: ({ completion }) => completion.result }) }),
+        },
+      },
+    });
+    const host = await createPiGraphHost({ authStorage, modelRegistry, graphs: [child, delegatedRoot], recording: "off" });
+    try {
+      await expect(host.execute(delegatedRoot, { value: 4 }, { recording: "off" })).resolves.toMatchObject({
+        status: "completed",
+        output: { value: 5 },
+      });
+    } finally {
+      await host.dispose();
+    }
+  });
+
   it("writes and resumes a code-only root checkpoint through the Pi GraphHost", async () => {
     const first = codeNode({ subGoal: "first", input: Value, output: Value, execute: ({ input, complete }) => complete({ value: input.value + 1 }) });
     const second = codeNode({ subGoal: "second", input: Value, output: Value, execute: ({ input, complete }) => complete({ value: input.value + 1 }) });

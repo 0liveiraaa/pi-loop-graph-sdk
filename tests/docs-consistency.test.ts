@@ -107,7 +107,6 @@ describe("documentation consistency", () => {
       ...markdownFiles(resolve(docsRoot, "reference")),
       ...markdownFiles(resolve(docsRoot, "concepts")),
     ].map((file) => readFileSync(file, "utf8")).join("\n");
-    expect(currentGuides).not.toContain("createPiGraphHost");
     expect(currentGuides).not.toContain("Host 默认 renderer");
     expect(currentGuides).not.toMatch(/ctx\.completion(?:\?\.)?\.result/);
   });

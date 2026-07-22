@@ -16,6 +16,10 @@ export class GraphCatalog {
   has(ref: GraphRef): boolean {
     return this.graphs.has(refKey(ref));
   }
+
+  get values(): readonly Graph[] {
+    return Object.freeze([...this.graphs.values()]);
+  }
 }
 
 function graphKey(graph: Graph): string {

@@ -4,17 +4,17 @@ import { defineGraph } from "../core/graph.js";
 
 export { defineGraph } from "../core/graph.js";
 
-export function defineSingleAgentGraph<TInputSchema extends TSchema, TOutputSchema extends TSchema>(input: {
+export function defineSingleAgentGraph<TInputSchema extends TSchema, TOutputSchema extends TSchema, TBackground extends import("../core/json.js").JsonValue, TMemory extends import("../core/json.js").JsonValue = import("../core/json.js").JsonValue>(input: {
   id: string;
   version: string;
   goal: string;
   input: TInputSchema;
   output: TOutputSchema;
-  context: GraphDefinition<TInputSchema, TOutputSchema>["context"];
+  context: GraphDefinition<TInputSchema, TOutputSchema, TBackground, TMemory>["context"];
   node: Extract<NodeDefinition, { kind: "agent" }>;
   tools?: GraphDefinition<TInputSchema, TOutputSchema>["tools"];
   skills?: GraphDefinition<TInputSchema, TOutputSchema>["skills"];
-}): Graph<TInputSchema, TOutputSchema> {
+}): Graph<TInputSchema, TOutputSchema, TBackground, TMemory> {
   const stages: Record<string, Stage> = {
     main: {
       node: input.node,
@@ -28,20 +28,20 @@ export function defineSingleAgentGraph<TInputSchema extends TSchema, TOutputSche
       },
     },
   };
-  return defineGraph({ ...input, entries: [{ id: "main", to: "main" }], stages } as GraphDefinition<TInputSchema, TOutputSchema>);
+  return defineGraph({ ...input, entries: [{ id: "main", to: "main" }], stages } as GraphDefinition<TInputSchema, TOutputSchema, TBackground, TMemory>);
 }
 
-export function defineLinearGraph<TInputSchema extends TSchema, TOutputSchema extends TSchema>(input: {
+export function defineLinearGraph<TInputSchema extends TSchema, TOutputSchema extends TSchema, TBackground extends import("../core/json.js").JsonValue, TMemory extends import("../core/json.js").JsonValue = import("../core/json.js").JsonValue>(input: {
   id: string;
   version: string;
   goal: string;
   input: TInputSchema;
   output: TOutputSchema;
-  context: GraphDefinition<TInputSchema, TOutputSchema>["context"];
+  context: GraphDefinition<TInputSchema, TOutputSchema, TBackground, TMemory>["context"];
   nodes: readonly NodeDefinition[];
   tools?: GraphDefinition<TInputSchema, TOutputSchema>["tools"];
   skills?: GraphDefinition<TInputSchema, TOutputSchema>["skills"];
-}): Graph<TInputSchema, TOutputSchema> {
+}): Graph<TInputSchema, TOutputSchema, TBackground, TMemory> {
   const stages: Record<string, Stage> = {};
   input.nodes.forEach((node, index) => {
     const id = node.identity?.name ?? `stage-${index + 1}`;
@@ -60,5 +60,5 @@ export function defineLinearGraph<TInputSchema extends TSchema, TOutputSchema ex
       },
     };
   });
-  return defineGraph({ ...input, entries: [{ id: "main", to: Object.keys(stages)[0] ?? "" }], stages } as GraphDefinition<TInputSchema, TOutputSchema>);
+  return defineGraph({ ...input, entries: [{ id: "main", to: Object.keys(stages)[0] ?? "" }], stages } as GraphDefinition<TInputSchema, TOutputSchema, TBackground, TMemory>);
 }

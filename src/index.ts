@@ -1,55 +1,11 @@
-// Loop Graph SDK — public library API
-//
-//  作为 library 使用（推荐）：
-//    import { createLoopGraphExtension, Graph, ... } from "pi-loop-graph-sdk";
-//
-//  作为 debug/demo extension 使用：
-//    pi install git:github.com/0liveiraaa/pi-loop-graph-sdk@v0.1
-//    （自动加载 ./extension → 注册测试图）
-
-// ── 实例运行时工厂（新 API，推荐）──
-export {
-  createLoopGraphExtension,
-  defaultCompletionFeedbackFormatter,
-} from "./adapter/loop-graph-extension.js";
+export { createLoopGraphExtension } from "./adapter/loop-graph-extension.js";
 export type {
   LoopGraphExtension,
   LoopGraphExtensionOptions,
   LoopGraphLimits,
-  CompletionFeedbackFormatter,
-  CompletionFeedbackInput,
-  ContextRendererRegistry,
   LoopGraphExecutionOptions,
   GraphExposure,
 } from "./adapter/loop-graph-extension.js";
-export {
-  DEFAULT_OUTPUT_CONTRACT_MAX_BYTES,
-  OUTPUT_CONTRACT_MESSAGE_TYPE,
-  prepareOutputContract,
-} from "./adapter/output-contract.js";
-export type { PreparedOutputContract } from "./adapter/output-contract.js";
-export type {
-  DeadRunMessageInput,
-  GraphFailureMessageInput,
-  IncompleteNodeMessageInput,
-  ModelMessageFormatter,
-} from "./adapter/model-messages.js";
-export {
-  defaultSkillContentProvider,
-  defaultSkillContentRenderer,
-} from "./adapter/skill-content.js";
-export type {
-  SkillContentProvider,
-  SkillContentRenderer,
-  SkillFailurePolicies,
-  SkillFailurePolicy,
-  SkillLoadContext,
-} from "./adapter/skill-content.js";
-
-// ── 可观测性（旧版，不推荐）──
-// 已移至 /advanced。新代码使用 createGraphHost({ recording: "replay" }) + /replay 子路径。}
-
-// ── 核心类型 ──
 export { Type } from "typebox";
 export type {
   AgentNodeDefinition,
@@ -57,8 +13,8 @@ export type {
   CodeNodeDefinition,
   Connection,
   ContextContent,
-  ContextProjection,
-  Entry as CoreEntry,
+  ContextFrame,
+  Entry,
   Graph,
   GraphDefinition,
   GraphNodeDefinition,
@@ -71,17 +27,6 @@ export type {
 } from "./core/graph.js";
 export type { JsonValue, JsonSchema } from "./core/json.js";
 export type { ResolvedSkillView, SkillRef } from "./core/skill.js";
-export { ContextState, materializeProjection } from "./core/context.js";
-export type {
-  ContextContribution,
-  ContextLayer,
-  ContextLifetime,
-  ContextRetention,
-  ContextSnapshot,
-  ContextStateOptions,
-  NodeContextMaterialization,
-  ContextContributionHandle,
-} from "./core/context.js";
 export { defineMechanism } from "./core/mechanism.js";
 export type {
   Mechanism,
@@ -97,17 +42,10 @@ export type {
 } from "./core/mechanism.js";
 export type { NodeCompletion } from "./core/graph.js";
 export type { ToolSet } from "./builders/refs.js";
-export {
-  DEFAULT_HOST_BASELINE,
-  resolveHostBaseline,
-} from "./host/baseline.js";
-export type { HostBaseline } from "./host/baseline.js";
-export {
-  DEFAULT_INVOCATION_LIMITS,
-  resolveInvocationLimits,
-} from "./core/limits.js";
 export type { InvocationLimits } from "./core/limits.js";
 export { createGraphHost, executeIsolatedGraph } from "./host/graph-host.js";
+export { createPiGraphHost } from "./adapter/isolated-graph-session.js";
+export type { IsolatedGraphSessionFactoryOptions as CreatePiGraphHostOptions } from "./adapter/isolated-graph-session.js";
 export type {
   GraphHost,
   GraphHostRunOptions,
