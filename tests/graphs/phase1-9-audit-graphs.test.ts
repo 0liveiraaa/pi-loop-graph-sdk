@@ -5,6 +5,7 @@ import { SkillCatalog } from "../../src/host/skill-catalog.js";
 import { ToolCatalog } from "../../src/host/tool-catalog.js";
 import { phaseAuditSkillRegistration } from "../../src/graphs/phase1-9-audit-graphs.js";
 import { GraphRuntime } from "../../src/runtime/graph-runtime.js";
+import type { JsonValue } from "../../src/core/json.js";
 
 describe("Phase 1-9 real audit graph fixtures", () => {
   it("forms one root graph with compose and call children using Core GraphRefs", () => {
@@ -20,15 +21,24 @@ describe("Phase 1-9 real audit graph fixtures", () => {
     const skills = new SkillCatalog(); skills.register(phaseAuditSkillRegistration);
     const runtime = new GraphRuntime({
       catalog, toolCatalog: tools, skillCatalog: skills,
-      runAgent: async (_node, input, context) => context.invocation.graph.id === phaseAuditComposeGraph.id
-        ? { boundary: "compose", marker: (input as any).marker, memoryMarkerVisible: true, secretVisible: false, sessionIsolationConfirmed: true }
-        : context.invocation.graph.id === phaseAuditCallGraph.id
-          ? { boundary: "call", marker: (input as any).marker, memoryMarkerVisible: false, secretVisible: false, sessionIsolationConfirmed: true }
-          : { phaseAudit: "passed", marker: (input as any).marker, expectedToolFailureObserved: true, skillInstructionObserved: true },
+      runAgent: async (_node, input, context): Promise<JsonValue> => {
+        const marker = (input as { marker: string }).marker;
+        if (context.invocation.graph.id === phaseAuditComposeGraph.id) {
+          return { boundary: "compose", marker, memoryMarkerVisible: true, secretVisible: false, sessionIsolationConfirmed: true };
+        }
+        if (context.invocation.graph.id === phaseAuditCallGraph.id) {
+          return { boundary: "call", marker, memoryMarkerVisible: false, secretVisible: false, sessionIsolationConfirmed: true };
+        }
+        return { phaseAudit: "passed", marker, expectedToolFailureObserved: true, skillInstructionObserved: true };
+      },
       createInvocationAgentHost: async () => ({
-        runAgent: async (_node, input, context) => context.invocation.graph.id === phaseAuditComposeGraph.id
-          ? { boundary: "compose", marker: (input as any).marker, memoryMarkerVisible: true, secretVisible: false, sessionIsolationConfirmed: true }
-          : { boundary: "call", marker: (input as any).marker, memoryMarkerVisible: false, secretVisible: false, sessionIsolationConfirmed: true },
+        runAgent: async (_node, input, context): Promise<JsonValue> => {
+          const marker = (input as { marker: string }).marker;
+          if (context.invocation.graph.id === phaseAuditComposeGraph.id) {
+            return { boundary: "compose", marker, memoryMarkerVisible: true, secretVisible: false, sessionIsolationConfirmed: true };
+          }
+          return { boundary: "call", marker, memoryMarkerVisible: false, secretVisible: false, sessionIsolationConfirmed: true };
+        },
         dispose() {},
       }),
     });
