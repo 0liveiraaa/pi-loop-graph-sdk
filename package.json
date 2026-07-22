@@ -31,8 +31,12 @@
   "pi": {},
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json && npm run test:types:target && tsc -p tests/types/legacy-removals/phase1.tsconfig.json && tsc -p tests/types/legacy-removals/phase3.tsconfig.json",
+    "test:types:target": "tsc -p tests/types/target/tsconfig.json",
+    "test:types:legacy-removals": "tsc -p tests/types/legacy-removals/tsconfig.json",
+    "test:package-consumer": "node tests/package-consumer/run.mjs",
     "test": "npm run build && vitest run",
+    "verify:phase0": "npm run typecheck && npm test && npm run test:package-consumer",
     "prepare": "npm run build"
   },
   "devDependencies": {

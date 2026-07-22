@@ -23,9 +23,12 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import { createLoopGraphExtension as createPublicLoopGraphExtension } from "../support/legacy-loop-graph-extension.js";
 import type { Edge, Entry, Graph, Node } from "../../src/type.js";
 import { END } from "../../src/type.js";
+
+const createLoopGraphExtension = (...args: Parameters<typeof createPublicLoopGraphExtension>) =>
+  createPublicLoopGraphExtension(...args) as any;
 import { projectMessages } from "../../src/adapter/projection.js";
 import type { MessageEntry } from "../../src/adapter/projection.js";
 

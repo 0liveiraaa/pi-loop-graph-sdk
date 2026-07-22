@@ -3,6 +3,24 @@
 // ============================================================
 
 import type { Edge, NodeRouting, NodeCompletion, AgentInstance } from "./type.js";
+import type { Connection, NodeCompletion as CoreNodeCompletion, Route } from "./core/graph.js";
+
+export async function selectConnection(
+  route: Route,
+  completion: CoreNodeCompletion,
+): Promise<Connection | null> {
+  const matched: Connection[] = [];
+  for (const connection of route.connections) {
+    try {
+      if (!connection.transition.guard || await connection.transition.guard(completion.result)) {
+        matched.push(connection);
+      }
+    } catch {
+      // A throwing guard does not match.
+    }
+  }
+  return matched[0] ?? null;
+}
 
 export async function selectEdge(
   routing: NodeRouting,

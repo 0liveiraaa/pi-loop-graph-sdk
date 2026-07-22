@@ -79,9 +79,101 @@ export type { IsolatedGraphSessionFactoryOptions } from "./adapter/isolated-grap
 
 // ── 核心类型 ──
 export * from "./type.js";
+export { Type } from "typebox";
+export type {
+  AgentNodeDefinition,
+  AgentRunRequest,
+  CodeNodeDefinition,
+  Connection,
+  ContextContent,
+  ContextProjection,
+  Entry as CoreEntry,
+  Graph,
+  GraphDefinition,
+  GraphNodeDefinition,
+  GraphRef,
+  NodeDefinition,
+  NodeDefinition as Node,
+  Route,
+  Stage,
+  Transition,
+} from "./core/graph.js";
+export type { JsonValue, JsonSchema } from "./core/json.js";
+export type { ResolvedSkillView, SkillRef } from "./core/skill.js";
+export { ContextState, materializeProjection } from "./core/context.js";
+export type {
+  ContextContribution,
+  ContextLayer,
+  ContextLifetime,
+  ContextRetention,
+  ContextSnapshot,
+  ContextStateOptions,
+  NodeContextMaterialization,
+  ContextContributionHandle,
+} from "./core/context.js";
+export { defineMechanism } from "./core/mechanism.js";
+export type {
+  Mechanism,
+  MechanismContext,
+  MechanismContextApi,
+  MechanismDecisionTrace,
+  MechanismExec,
+  MechanismExecResult,
+  MechanismFailurePolicy,
+  MechanismInstallation,
+  MechanismScope,
+  MechanismCompletionDecision,
+} from "./core/mechanism.js";
+export { MechanismRuntime } from "./runtime/mechanism-runtime.js";
+export type {
+  MechanismRuntimeOptions,
+  MechanismFailureRecord,
+  MechanismChain,
+} from "./runtime/mechanism-runtime.js";
+export type { ToolSet } from "./builders/refs.js";
+export { GraphCatalog } from "./host/graph-catalog.js";
+export { SkillCatalog } from "./host/skill-catalog.js";
+export type {
+  SkillCatalogOptions,
+  SkillRegistration,
+  SkillResolver,
+  SkillResolverFunction,
+} from "./host/skill-catalog.js";
+export {
+  RUNTIME_PROTOCOL_TOOL_NAME,
+  ToolCatalog,
+} from "./host/tool-catalog.js";
+export type {
+  ToolImplementation,
+  UnsafeToolResolver,
+  UnsafeToolResolverInput,
+} from "./host/tool-catalog.js";
+export {
+  DEFAULT_HOST_BASELINE,
+  resolveHostBaseline,
+} from "./host/baseline.js";
+export type { HostBaseline } from "./host/baseline.js";
+export {
+  DEFAULT_INVOCATION_LIMITS,
+  resolveInvocationLimits,
+} from "./core/limits.js";
+export type { InvocationLimits } from "./core/limits.js";
+export type {
+  GraphFailure,
+  GraphFailureCode,
+  GraphRunResult,
+} from "./core/result.js";
+export { defineGraph, defineLinearGraph, defineSingleAgentGraph } from "./builders/graph.js";
+export { agentNode, codeNode, graphNode } from "./builders/node.js";
+export { connect, defineTransition, entry, finish, firstMatch } from "./builders/route.js";
+export { graphRef } from "./core/graph.js";
+export { skillRef, toolSet } from "./builders/refs.js";
 
 // ── 运行时与路由 ──
-export { GraphRuntime } from "./runtime.js";
+export { GraphRuntime } from "./runtime/graph-runtime.js";
+export type {
+  GraphRuntimeHost,
+} from "./runtime/graph-runtime.js";
 export type { CallFrame } from "./runtime.js";
 export { validateGraph, assertValidGraph, validateGraphTools } from "./validate.js";
 export type { GraphValidationIssue, GraphValidationOptions } from "./validate.js";

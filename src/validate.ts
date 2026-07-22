@@ -4,6 +4,8 @@
 
 import type { Graph, GraphInvocationBoundary } from "./type.js";
 import { END } from "./type.js";
+import type { Graph as CoreGraph } from "./core/graph.js";
+import { validateGraphDefinition } from "./core/graph.js";
 
 export interface GraphValidationIssue {
   code:
@@ -32,9 +34,21 @@ export interface GraphValidationOptions {
 }
 
 export function validateGraph(
-  graph: Graph,
+  graph: Graph | CoreGraph,
   options: GraphValidationOptions = {},
 ): GraphValidationIssue[] {
+  if ("stages" in graph) {
+    try {
+      validateGraphDefinition(graph);
+      return [];
+    } catch (error) {
+      return [{
+        code: "ENTRY_TARGET_MISSING",
+        message: error instanceof Error ? error.message : String(error),
+        path: "graph",
+      }];
+    }
+  }
   const issues: GraphValidationIssue[] = [];
 
   detectGraphReferenceCycles(graph, issues);
@@ -120,7 +134,7 @@ export function validateGraph(
 }
 
 export function assertValidGraph(
-  graph: Graph,
+  graph: Graph | CoreGraph,
   options: GraphValidationOptions = {},
 ): void {
   const issues = validateGraph(graph, options);

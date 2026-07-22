@@ -1,0 +1,12 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "rootDir": "../../..",
+    "paths": {
+      "pi-loop-graph-sdk": ["../../../src/index.ts"]
+    }
+  },
+  "include": ["./phase1-removed.contract.ts"]
+}

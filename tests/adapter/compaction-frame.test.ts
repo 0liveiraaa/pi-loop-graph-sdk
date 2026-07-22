@@ -13,10 +13,15 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { GraphRuntime, type NodeScopeDescriptor } from "../../src/runtime.js";
-import { findCompactedFrameBase } from "../../src/adapter/loop-graph-extension.js";
-import { createLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import {
+  createLoopGraphExtension as createPublicLoopGraphExtension,
+  findCompactedFrameBase,
+} from "../support/legacy-loop-graph-extension.js";
 import type { ContextFrame, Edge, Entry, Graph, Node, GraphRunResult, NodeCompletion } from "../../src/type.js";
 import { END } from "../../src/type.js";
+
+const createLoopGraphExtension = (...args: Parameters<typeof createPublicLoopGraphExtension>) =>
+  createPublicLoopGraphExtension(...args) as any;
 import { projectMessages, type MessageEntry } from "../../src/adapter/projection.js";
 
 // ── Helpers ──

@@ -6,11 +6,22 @@ import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
-import type { LoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import { createLoopGraphExtension as createPublicLoopGraphExtension } from "../../src/adapter/loop-graph-extension.js";
+import {
+  createLoopGraphExtension as createLegacyLoopGraphExtension,
+  type LoopGraphExtension,
+  type LoopGraphExtensionOptions,
+} from "../support/legacy-loop-graph-extension.js";
 import { debugLog } from "../../src/adapter/debug-log.js";
 import type { Graph, Edge, Entry, Mechanism, Node } from "../../src/type.js";
 import { END } from "../../src/type.js";
+import { reviewGraph } from "../../src/graphs/review-graph.js";
+import { probeGraph } from "../../src/graphs/probe-graph.js";
+
+const createLoopGraphExtension = (
+  pi: Parameters<typeof createPublicLoopGraphExtension>[0],
+  options?: LoopGraphExtensionOptions & { defaultTools?: string[] },
+) => createLegacyLoopGraphExtension(pi, options as LoopGraphExtensionOptions) as any;
 
 // ── 帮助函数：构造最小 fake pi 对象 ──
 
@@ -1011,18 +1022,51 @@ describe("createLoopGraphExtension", () => {
       expect(cmdNames).not.toContain("validate-test");
     });
 
-    it("demoGraphs: true 时注册所有 demo 图", () => {
+    it("demoGraphs: true 时加入 Core Catalog，但不提前恢复 invocation exposure", async () => {
       const pi = fakePi();
-      createLoopGraphExtension(pi, { demoGraphs: true });
+      const loop = createLoopGraphExtension(pi, { demoGraphs: true });
 
       const cmdNames = (pi.registerCommand as any).mock.calls.map(
         (c: any[]) => c[0],
       );
-      expect(cmdNames).toContain("echo-test");
-      expect(cmdNames).toContain("probe");
-      expect(cmdNames).toContain("chain");
-      expect(cmdNames).toContain("sub");
-      expect(cmdNames).toContain("validate-test");
+      expect(cmdNames).toEqual([]);
+      await expect(loop.executeGraph(reviewGraph, {
+        source: "tool",
+        params: { args: "hello" },
+      })).resolves.toMatchObject({
+        status: "completed",
+        output: { message: "已收到参数: hello" },
+      });
+    });
+
+    it("公开 Core executeGraph 通过 Pi Host 执行 Agent Node", async () => {
+      const pi = fakePi();
+      const loop = createPublicLoopGraphExtension(pi, { runtimeOnly: true });
+
+      await expect(loop.executeGraph(probeGraph, {
+        source: "tool",
+        params: {},
+      })).resolves.toMatchObject({
+        status: "completed",
+        output: { fromAgent: true },
+      });
+      expect(pi.setActiveTools).toHaveBeenCalledWith(["__graph_complete__"]);
+    });
+
+    it("公开 Core executeGraph 传播 AbortSignal", async () => {
+      const pi = fakePi();
+      const loop = createPublicLoopGraphExtension(pi, { runtimeOnly: true });
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(loop.executeGraph(reviewGraph, {
+        source: "tool",
+        params: { args: "ignored" },
+      }, { signal: controller.signal })).resolves.toMatchObject({
+        status: "cancelled",
+        steps: 0,
+        failure: { code: "cancelled" },
+      });
     });
   });
 
@@ -1938,7 +1982,7 @@ describe("createLoopGraphExtension", () => {
             edges: [toNext],
             router: {
               kind: "custom",
-              async fn(edges) {
+              async fn(edges: Edge[]) {
                 await Promise.resolve();
                 return edges[0] ?? null;
               },

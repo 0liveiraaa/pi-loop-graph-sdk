@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "noImplicitAny": false,
+    "rootDir": "../../..",
+    "paths": {
+      "pi-loop-graph-sdk": ["../../../src/index.ts"]
+    }
+  },
+  "include": ["./*.ts"]
+}

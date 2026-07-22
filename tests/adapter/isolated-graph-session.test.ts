@@ -6,8 +6,8 @@ import { describe, expect, it, beforeAll, vi } from "vitest";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { Edge, Entry, Graph, GraphRunRequest, GraphRunResult, Mechanism, Node, NodeCompletion, NodeInput } from "../../src/type.js";
 import { END } from "../../src/type.js";
-import { createIsolatedGraphSessionFactory } from "../../src/adapter/isolated-graph-session.js";
-import type { IsolatedGraphSessionFactoryOptions } from "../../src/adapter/isolated-graph-session.js";
+import { createIsolatedGraphSessionFactory } from "../support/legacy-isolated-graph-session.js";
+import type { IsolatedGraphSessionFactoryOptions } from "../support/legacy-isolated-graph-session.js";
 
 // ── 共享基础设施 ──
 
@@ -23,7 +23,6 @@ function factoryOptions(overrides?: Partial<IsolatedGraphSessionFactoryOptions>)
   return {
     authStorage,
     modelRegistry,
-    defaultTools: [],
     ...overrides,
   };
 }

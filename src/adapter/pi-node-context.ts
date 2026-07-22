@@ -13,6 +13,8 @@
 // ============================================================
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ContextBlock } from "../core/graph.js";
+import type { ContextSnapshot } from "../core/context.js";
 import type {
   CompletionSubmission,
   CompletionSubmissionDecision,
@@ -56,6 +58,8 @@ export type AgentRunTelemetryEvent =
   | { type: "completion.rejected"; agentRunId: number; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number }
   | { type: "completion.failed"; agentRunId: number; scope: "node" | "graph"; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number };
 
+export const CONTEXT_SNAPSHOT_MESSAGE_TYPE = "loop_graph_context";
+
 export class PiNodeContext implements NodeContext {
   readonly signal: AbortSignal;
 
@@ -79,6 +83,7 @@ export class PiNodeContext implements NodeContext {
   private validationInFlight: Promise<void> | null = null;
   private activeOutputContract: PreparedOutputContract | null = null;
   private activeOutputContractMessage: Readonly<Record<string, unknown>> | null = null;
+  private activeContextSnapshot: ContextSnapshot | null = null;
   private submissionQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -258,6 +263,34 @@ export class PiNodeContext implements NodeContext {
 
   getActiveOutputContractMessage(): Readonly<Record<string, unknown>> | null {
     return this.activeOutputContractMessage;
+  }
+
+  setContextSnapshot(snapshot: ContextSnapshot | null): void {
+    this.activeContextSnapshot = snapshot;
+  }
+
+  getContextSnapshotMessage(): Readonly<Record<string, unknown>> | null {
+    const snapshot = this.activeContextSnapshot;
+    if (!snapshot) return null;
+    const content: ContextBlock[] = [];
+    for (const layer of snapshot.layers) {
+      if (typeof layer.content === "string") content.push({ type: "text", text: layer.content });
+      else content.push(...layer.content.map((block) => ({ ...block })));
+    }
+    return Object.freeze({
+      role: "custom",
+      customType: CONTEXT_SNAPSHOT_MESSAGE_TYPE,
+      content,
+      display: false,
+      details: Object.freeze({
+        rootRunId: snapshot.rootRunId,
+        graphInvocationId: snapshot.graphInvocationId,
+        nodeVisitId: snapshot.nodeVisitId,
+        agentRunId: snapshot.agentRunId,
+        memoryRevision: snapshot.memoryRevision,
+      }),
+      timestamp: Date.now(),
+    });
   }
 
   submitCompletion(params: {
@@ -508,6 +541,7 @@ export class PiNodeContext implements NodeContext {
     this.postMechanismValidateFn = undefined;
     this.activeOutputContract = null;
     this.activeOutputContractMessage = null;
+    this.activeContextSnapshot = null;
   }
 
   setNodeCompletionValidator(
@@ -581,6 +615,7 @@ export class PiNodeContext implements NodeContext {
     this.validationInFlight = null;
     this.activeOutputContract = null;
     this.activeOutputContractMessage = null;
+    this.activeContextSnapshot = null;
     this.submissionQueue = Promise.resolve();
   }
 }

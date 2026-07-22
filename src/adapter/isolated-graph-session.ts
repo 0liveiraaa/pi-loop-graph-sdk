@@ -33,6 +33,9 @@ import type {
   IsolatedGraphSessionFactory,
 } from "./graph-execution-host.js";
 import { IsolatedSessionGraphHost } from "./graph-execution-host.js";
+import type { HostBaseline } from "../host/baseline.js";
+import type { SkillCatalog } from "../host/skill-catalog.js";
+import type { ToolCatalog, UnsafeToolResolver } from "../host/tool-catalog.js";
 
 export interface IsolatedGraphSessionFactoryOptions {
   authStorage: AuthStorage;
@@ -40,8 +43,11 @@ export interface IsolatedGraphSessionFactoryOptions {
   cwd?: string;
   agentDir?: string;
   model?: CreateAgentSessionOptions["model"];
-  defaultTools?: string[];
   customTools?: ToolDefinition[];
+  toolCatalog?: ToolCatalog;
+  skillCatalog?: SkillCatalog;
+  unsafeToolResolver?: UnsafeToolResolver;
+  baseline?: HostBaseline;
   skillBasePath?: string;
   frameFormatter?: (frames: ContextFrame[]) => string | null;
   limits?: LoopGraphLimits;
@@ -74,6 +80,9 @@ export interface IsolatedGraphSessionFactoryOptions {
 export function createIsolatedGraphSessionFactory(
   options: IsolatedGraphSessionFactoryOptions,
 ): IsolatedGraphSessionFactory {
+  const legacyOptions = options as IsolatedGraphSessionFactoryOptions & {
+    readonly defaultTools?: string[];
+  };
   return async (_request: GraphRunRequest): Promise<IsolatedGraphSession> => {
     const cwd = options.cwd ?? process.cwd();
     const agentDir = options.agentDir ?? getAgentDir();
@@ -95,7 +104,11 @@ export function createIsolatedGraphSessionFactory(
         (pi) => {
           loop = createLoopGraphExtension(pi, {
             runtimeOnly: true,
-            defaultTools: options.defaultTools,
+            defaultTools: legacyOptions.defaultTools,
+            toolCatalog: options.toolCatalog,
+            skillCatalog: options.skillCatalog,
+            unsafeToolResolver: options.unsafeToolResolver,
+            baseline: options.baseline,
             skillBasePath: options.skillBasePath,
             frameFormatter: options.frameFormatter,
             createDelegateHost: options.createDelegateHost,
@@ -115,7 +128,7 @@ export function createIsolatedGraphSessionFactory(
             logger: options.logger,
             debug: options.debug,
             debugLogPath: options.debugLogPath,
-          });
+          } as any);
         },
       ],
     });
@@ -124,7 +137,7 @@ export function createIsolatedGraphSessionFactory(
     const customToolNames = (options.customTools ?? []).map((tool) => tool.name);
     const activeTools = [
       "read",
-      ...(options.defaultTools ?? []),
+      ...(legacyOptions.defaultTools ?? []),
       ...customToolNames,
       "__graph_complete__",
     ];
@@ -151,7 +164,7 @@ export function createIsolatedGraphSessionFactory(
 
     return {
       run(graph, request) {
-        return runtime.executeGraph(graph, {
+        return (runtime as any).executeGraph(graph, {
           source: "tool",
           params: request.background,
         });
