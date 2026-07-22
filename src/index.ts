@@ -20,6 +20,7 @@ export type {
   CompletionFeedbackInput,
   ContextRendererRegistry,
   LoopGraphExecutionOptions,
+  GraphExposure,
 } from "./adapter/loop-graph-extension.js";
 export {
   DEFAULT_OUTPUT_CONTRACT_MAX_BYTES,
@@ -68,7 +69,7 @@ export type { AgentExecuteOptions } from "./agent-execute.js";
 
 // ── 隔离图执行载体 ──
 export { IsolatedSessionGraphHost } from "./adapter/graph-execution-host.js";
-export { createIsolatedGraphSessionFactory } from "./adapter/isolated-graph-session.js";
+export { createIsolatedGraphSessionFactory, createPiGraphHost } from "./adapter/isolated-graph-session.js";
 export type {
   GraphExecutionHost,
   IsolatedGraphSession,
@@ -158,6 +159,13 @@ export {
   resolveInvocationLimits,
 } from "./core/limits.js";
 export type { InvocationLimits } from "./core/limits.js";
+export { createGraphHost, executeIsolatedGraph } from "./host/graph-host.js";
+export type {
+  GraphHost,
+  GraphHostRunOptions,
+  CreateGraphHostOptions,
+  ExecuteIsolatedGraphOptions,
+} from "./host/graph-host.js";
 export type {
   GraphFailure,
   GraphFailureCode,

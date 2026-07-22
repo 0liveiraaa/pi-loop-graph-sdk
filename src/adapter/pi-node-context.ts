@@ -52,11 +52,14 @@ export interface AgentRunMechanismLifecycle {
 
 export type AgentRunTelemetryEvent =
   | { type: "output_contract.prepared"; agentRunId: number; schemaFingerprint: string; schemaBytes: number }
-  | { type: "completion.submitted"; agentRunId: number; reportedStatus: CompletionSubmission["reportedStatus"]; schemaFingerprint?: string }
+  | { type: "completion.submitted"; agentRunId: number; schemaFingerprint?: string }
   | { type: "completion.validation_started"; agentRunId: number; validatorStage: CompletionValidationStage; schemaFingerprint?: string }
   | { type: "completion.accepted"; agentRunId: number; completionStatus: NodeCompletion["status"]; schemaFingerprint?: string; durationMs: number }
   | { type: "completion.rejected"; agentRunId: number; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number }
   | { type: "completion.failed"; agentRunId: number; scope: "node" | "graph"; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number };
+
+type CompletionState = "submitted" | "validating" | "accepted" | "rejected" | "failed";
+const DEFAULT_MAX_COMPLETION_REJECTIONS = 3;
 
 export const CONTEXT_SNAPSHOT_MESSAGE_TYPE = "loop_graph_context";
 
@@ -85,6 +88,12 @@ export class PiNodeContext implements NodeContext {
   private activeOutputContractMessage: Readonly<Record<string, unknown>> | null = null;
   private activeContextSnapshot: ContextSnapshot | null = null;
   private submissionQueue: Promise<void> = Promise.resolve();
+  private rejectionCount = 0;
+  private completionState: CompletionState = "submitted";
+
+  get completionSubmissionState(): CompletionState {
+    return this.completionState;
+  }
 
   constructor(
     pi: ExtensionAPI,
@@ -294,20 +303,18 @@ export class PiNodeContext implements NodeContext {
   }
 
   submitCompletion(params: {
-    status: "ok" | "failed" | "cancelled";
     result: Record<string, unknown>;
   }): Promise<CompletionSubmissionDecision> {
     const runId = this.activeRunId;
     const schemaFingerprint = this.activeOutputContract?.fingerprint;
     const startedAt = Date.now();
     const submission: CompletionSubmission = {
-      reportedStatus: params.status,
       result: params.result,
     };
+    this.completionState = "submitted";
     this.emitTelemetry({
       type: "completion.submitted",
       agentRunId: runId,
-      reportedStatus: submission.reportedStatus,
       schemaFingerprint,
     });
     const result = this.submissionQueue.then(() =>
@@ -315,6 +322,7 @@ export class PiNodeContext implements NodeContext {
     ).then((decision) => {
       const durationMs = Date.now() - startedAt;
       if (decision.decision === "accepted") {
+        this.completionState = "accepted";
         this.emitTelemetry({
           type: "completion.accepted",
           agentRunId: runId,
@@ -323,6 +331,7 @@ export class PiNodeContext implements NodeContext {
           durationMs,
         });
       } else if (decision.decision === "rejected") {
+        this.completionState = "rejected";
         this.emitTelemetry({
           type: "completion.rejected",
           agentRunId: runId,
@@ -332,6 +341,7 @@ export class PiNodeContext implements NodeContext {
           durationMs,
         });
       } else {
+        this.completionState = "failed";
         this.emitTelemetry({
           type: "completion.failed",
           agentRunId: runId,
@@ -416,12 +426,12 @@ export class PiNodeContext implements NodeContext {
     submission: CompletionSubmission,
     runId: number,
   ): Promise<CompletionSubmissionDecision> {
+    this.completionState = "validating";
     const schemaFingerprint = this.activeOutputContract?.fingerprint;
     if (runId === 0 || runId !== this.activeRunId) {
       return { decision: "rejected", reason: "当前 Agent Run 已结束", schemaFingerprint };
     }
     const fingerprint = createCompletionFingerprint({
-      status: submission.reportedStatus,
       result: submission.result,
     });
     if (this.completionFingerprints.has(fingerprint)) {
@@ -429,19 +439,9 @@ export class PiNodeContext implements NodeContext {
     }
     const completion: NodeCompletion = {
       nodeId: this.currentNodeId ?? "unknown",
-      status: submission.reportedStatus,
+      status: "ok",
       result: { ...submission.result },
     };
-    if (submission.reportedStatus !== "ok") {
-      this.completionFingerprints.add(fingerprint);
-      this.pendingCompletions.push(completion);
-      return {
-        decision: "accepted",
-        completionStatus: submission.reportedStatus,
-        validation: "skipped",
-        schemaFingerprint,
-      };
-    }
 
     const validationStages: ReadonlyArray<readonly [CompletionValidationStage, AgentRunRequest["validateCompletion"]]> = [
       ["outputSchema", this.activeOutputContract?.validate],
@@ -458,6 +458,8 @@ export class PiNodeContext implements NodeContext {
         schemaFingerprint,
       );
       if (!validation.isValid) {
+        const exhausted = this.rejectOrExhaust(runId, stage, schemaFingerprint);
+        if (exhausted) return exhausted;
         debugLog.agentRetry(this.currentNodeId ?? "?", validation.reason);
         return {
           decision: "rejected",
@@ -472,6 +474,8 @@ export class PiNodeContext implements NodeContext {
       this.emitValidationStarted(runId, "mechanism", schemaFingerprint);
       const gate = await this.mechanismLifecycle.validateCompletion(runId, completion);
       if (gate.action === "reject") {
+        const exhausted = this.rejectOrExhaust(runId, "mechanism", schemaFingerprint);
+        if (exhausted) return exhausted;
         debugLog.agentRetry(this.currentNodeId ?? "?", gate.reason);
         return {
           decision: "rejected",
@@ -509,6 +513,8 @@ export class PiNodeContext implements NodeContext {
         schemaFingerprint,
       );
       if (!validation.isValid) {
+        const exhausted = this.rejectOrExhaust(runId, "agent-choice", schemaFingerprint);
+        if (exhausted) return exhausted;
         debugLog.agentRetry(this.currentNodeId ?? "?", validation.reason);
         return {
           decision: "rejected",
@@ -529,6 +535,33 @@ export class PiNodeContext implements NodeContext {
     };
   }
 
+  private rejectOrExhaust(
+    runId: number,
+    validatorStage: CompletionValidationStage,
+    schemaFingerprint?: string,
+  ): Extract<CompletionSubmissionDecision, { decision: "failed" }> | undefined {
+    this.rejectionCount += 1;
+    if (this.rejectionCount <= DEFAULT_MAX_COMPLETION_REJECTIONS) return undefined;
+    const reason = `Agent Run 完成提交已达到最多 ${DEFAULT_MAX_COMPLETION_REJECTIONS} 次拒绝`;
+    this.completionState = "failed";
+    // Exhaustion is a Runtime terminal decision. Persist it so agent_end resolves
+    // the same failure instead of incorrectly reporting "without completion".
+    if (runId === this.activeRunId) {
+      this.pendingCompletions.push({
+        nodeId: this.currentNodeId ?? "unknown",
+        status: "failed",
+        result: { reason, completionGate: { action: "rejection-budget-exhausted" } },
+      });
+    }
+    return {
+      decision: "failed",
+      scope: "node",
+      reason,
+      validatorStage,
+      schemaFingerprint,
+    };
+  }
+
   setCurrentNodeId(nodeId: string): void {
     this.currentNodeId = nodeId;
     // 一个 NodeContext 在统一 Runtime 的 callStack 中复用。每次进入节点都
@@ -542,6 +575,8 @@ export class PiNodeContext implements NodeContext {
     this.activeOutputContract = null;
     this.activeOutputContractMessage = null;
     this.activeContextSnapshot = null;
+    this.rejectionCount = 0;
+    this.completionState = "submitted";
   }
 
   setNodeCompletionValidator(
@@ -615,8 +650,12 @@ export class PiNodeContext implements NodeContext {
     this.validationInFlight = null;
     this.activeOutputContract = null;
     this.activeOutputContractMessage = null;
+    this.rejectionCount = 0;
+    this.completionState = "submitted";
     this.activeContextSnapshot = null;
     this.submissionQueue = Promise.resolve();
+    this.rejectionCount = 0;
+    this.completionState = "submitted";
   }
 }
 
@@ -647,12 +686,11 @@ async function runCompletionValidator(
 }
 
 function createCompletionFingerprint(params: {
-  status: "ok" | "failed" | "cancelled";
   result: Record<string, unknown>;
 }): string {
   try {
-    return `${params.status}:${JSON.stringify(params.result)}`;
+    return JSON.stringify(params.result);
   } catch {
-    return `${params.status}:${String(params.result)}`;
+    return String(params.result);
   }
 }

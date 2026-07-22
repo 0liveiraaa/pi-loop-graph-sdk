@@ -25,6 +25,7 @@ import { childGraph, subgraphGraph } from "../graphs/subgraph-graph.js";
 import { reviewGraph } from "../graphs/review-graph.js";
 import { validateGraph as validateTestGraph } from "../graphs/validate-graph.js";
 import type { NodeContextRenderer } from "./projection.js";
+import type { GraphRef } from "../core/graph.js";
 
 const completeToolRegistered = new WeakSet<object>();
 
@@ -80,6 +81,7 @@ export interface LoopGraphExtensionOptions {
 
 export interface LoopGraphExtension {
   registerGraph(graph: CoreGraph): void;
+  exposeGraph(ref: GraphRef, exposure: GraphExposure): void;
   executeGraph(
     graph: CoreGraph,
     trigger:
@@ -88,6 +90,10 @@ export interface LoopGraphExtension {
     options?: LoopGraphExecutionOptions,
   ): Promise<CoreGraphRunResult>;
 }
+
+export type GraphExposure =
+  | { readonly kind: "command"; readonly name: string; readonly description?: string; readonly parseInput?: (args: string) => JsonValue }
+  | { readonly kind: "tool"; readonly name: string; readonly description?: string; readonly parameters?: ToolDefinition["parameters"]; readonly parseInput?: (params: unknown) => JsonValue; readonly formatResult?: (result: CoreGraphRunResult) => unknown };
 
 export function createLoopGraphExtension(
   pi: ExtensionAPI,
@@ -113,10 +119,10 @@ export function createLoopGraphExtension(
   pi.on("tool_result", async (event) => {
     if (event.toolName !== COMPLETE_TOOL_NAME || !activeNodeContext) return;
     const params = event.input as Record<string, unknown> | undefined;
-    if (!params || !["ok", "failed", "cancelled"].includes(String(params.status)) || !isRecord(params.result)) {
+    if (!params || Object.keys(params).some((key) => key !== "result") || !isRecord(params.result)) {
       const decision: CompletionSubmissionDecision = {
         decision: "rejected",
-        reason: "完成提交必须包含合法的 status 和对象类型 result",
+        reason: "完成提交只能包含对象类型 result",
       };
       return {
         content: [{ type: "text", text: completionFeedbackFormatter({ nodeId: "?", decision }) }],
@@ -125,7 +131,6 @@ export function createLoopGraphExtension(
       };
     }
     const decision = await activeNodeContext.submitCompletion({
-      status: params.status as "ok" | "failed" | "cancelled",
       result: params.result,
     });
     return {
@@ -214,8 +219,34 @@ export function createLoopGraphExtension(
 
   return {
     registerGraph: registerCoreGraph,
+    exposeGraph,
     executeGraph,
   };
+
+  function exposeGraph(ref: GraphRef, exposure: GraphExposure): void {
+    const graph = catalog.resolve(ref);
+    if (!graph) throw new Error(`Graph not registered: ${ref.id}@${ref.version}`);
+    if (exposure.kind === "command") {
+      pi.registerCommand(exposure.name, {
+        description: exposure.description,
+        async handler(args) {
+          await executeGraph(graph, { source: "command", params: (exposure.parseInput?.(args) ?? { args }) as Record<string, unknown> });
+        },
+      });
+      return;
+    }
+    pi.registerTool({
+      name: exposure.name,
+      label: exposure.name,
+      description: exposure.description ?? exposure.name,
+      parameters: exposure.parameters ?? Type.Record(Type.String(), Type.Unknown()),
+      async execute(_toolCallId, params) {
+        const result = await executeGraph(graph, { source: "tool", params: (exposure.parseInput?.(params) ?? params) as Record<string, unknown> });
+        const formatted = exposure.formatResult?.(result) ?? result;
+        return { content: [{ type: "text", text: typeof formatted === "string" ? formatted : JSON.stringify(formatted) }], details: formatted };
+      },
+    });
+  }
 
   async function runPiAgent(
     prompt: string,

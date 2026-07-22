@@ -37,7 +37,7 @@ describe("PiNodeContext completion submission", () => {
       },
     });
 
-    const rejected = await ctx.submitCompletion({ status: "ok", result: {} });
+    const rejected = await ctx.submitCompletion({ result: {} });
     expect(rejected).toMatchObject({ decision: "rejected", reason: expect.stringContaining("outputSchema") });
     expect(order).toEqual([]);
     expect(pi._sent[0].message).toMatchObject({
@@ -46,7 +46,7 @@ describe("PiNodeContext completion submission", () => {
     });
     expect(pi._sent[0].message.content).toContain('"required"');
 
-    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1, nodeOk: true } }))
+    await expect(ctx.submitCompletion({ result: { value: 1, nodeOk: true } }))
       .resolves.toMatchObject({ decision: "accepted", validation: "passed" });
     await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok" });
@@ -96,7 +96,7 @@ describe("PiNodeContext completion submission", () => {
         : { isValid: false, reason: "缺少 valid" },
     });
 
-    await expect(ctx.submitCompletion({ status: "ok", result: {} })).resolves.toEqual({
+    await expect(ctx.submitCompletion({ result: {} })).resolves.toEqual({
       decision: "rejected",
       reason: "缺少 valid",
       validatorStage: "agent-run",
@@ -104,9 +104,33 @@ describe("PiNodeContext completion submission", () => {
     });
     expect(pi._sent).toHaveLength(1);
 
-    await ctx.submitCompletion({ status: "ok", result: { valid: true } });
+    await ctx.submitCompletion({ result: { valid: true } });
     await ctx.onAgentEnd();
     await expect(run).resolves.toMatchObject({ status: "ok", result: { valid: true } });
+  });
+
+  it("第四次拒绝形成稳定 Runtime failure，agent_end 不退化为未提交", async () => {
+    const pi = fakePi();
+    const ctx = new PiNodeContext(pi, 1000);
+    ctx.setCurrentNodeId("exhausted");
+    const run = ctx.runAgent({
+      prompt: "retry",
+      validateCompletion: () => ({ isValid: false, reason: "仍不合法" }),
+    });
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await expect(ctx.submitCompletion({ result: { attempt } }))
+        .resolves.toMatchObject({ decision: "rejected" });
+    }
+    await expect(ctx.submitCompletion({ result: { attempt: 4 } }))
+      .resolves.toMatchObject({ decision: "failed", scope: "node" });
+    expect(ctx.completionSubmissionState).toBe("failed");
+
+    await ctx.onAgentEnd();
+    await expect(run).resolves.toMatchObject({
+      status: "failed",
+      result: { completionGate: { action: "rejection-budget-exhausted" } },
+    });
   });
 
   it("未调用 complete 时返回固定失败 reason", async () => {
@@ -127,9 +151,9 @@ describe("PiNodeContext completion submission", () => {
     const ctx = new PiNodeContext(pi, 1000);
     ctx.setCurrentNodeId("dedupe");
     const run = ctx.runAgent({ prompt: "dedupe" });
-    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1 } }))
+    await expect(ctx.submitCompletion({ result: { value: 1 } }))
       .resolves.toMatchObject({ decision: "accepted" });
-    await expect(ctx.submitCompletion({ status: "ok", result: { value: 1 } }))
+    await expect(ctx.submitCompletion({ result: { value: 1 } }))
       .resolves.toMatchObject({ decision: "rejected", reason: "重复提交相同节点结果" });
 
     await ctx.onAgentEnd();
@@ -139,29 +163,6 @@ describe("PiNodeContext completion submission", () => {
       status: "ok",
       result: { value: 1 },
     });
-  });
-
-  it.each(["failed", "cancelled"] as const)("%s 提交跳过成功校验", async (status) => {
-    const pi = fakePi();
-    const ctx = new PiNodeContext(pi, 1000);
-    const validator = vi.fn(() => ({ isValid: false as const, reason: "不应执行" }));
-    ctx.setCurrentNodeId("terminal-report");
-    ctx.setNodeCompletionValidator(validator);
-    const run = ctx.runAgent({
-      prompt: "terminal",
-      outputSchema: {
-        type: "object",
-        required: ["successOnly"],
-        properties: { successOnly: { type: "boolean" } },
-      },
-      validateCompletion: validator,
-    });
-
-    await expect(ctx.submitCompletion({ status, result: { reason: "agent report" } }))
-      .resolves.toMatchObject({ decision: "accepted", completionStatus: status, validation: "skipped" });
-    await ctx.onAgentEnd();
-    await expect(run).resolves.toMatchObject({ status });
-    expect(validator).not.toHaveBeenCalled();
   });
 
   it("同一 Node 的连续 Agent Run 使用各自契约且结束后不残留", async () => {
@@ -175,7 +176,7 @@ describe("PiNodeContext completion submission", () => {
     });
     const firstContract = ctx.getActiveOutputContractMessage();
     expect(firstContract?.content).toContain('"first"');
-    await ctx.submitCompletion({ status: "ok", result: { first: true } });
+    await ctx.submitCompletion({ result: { first: true } });
     await ctx.onAgentEnd();
     await first;
     expect(ctx.getActiveOutputContractMessage()).toBeNull();
@@ -189,7 +190,7 @@ describe("PiNodeContext completion submission", () => {
     expect(secondContract?.content).not.toContain('"first"');
     expect((secondContract?.details as any).schemaFingerprint)
       .not.toBe((firstContract?.details as any).schemaFingerprint);
-    await ctx.submitCompletion({ status: "ok", result: { second: 2 } });
+    await ctx.submitCompletion({ result: { second: 2 } });
     await ctx.onAgentEnd();
     await second;
   });
@@ -243,14 +244,15 @@ describe("PiNodeContext completion submission", () => {
 });
 
 describe("completion tool", () => {
-  it("只确认提交，不回显模型填写的 status/result", async () => {
+  it("只接受 result 且不回显模型业务数据", async () => {
     const tool = createCompleteTool();
     expect(tool.name).toBe("__graph_complete__");
     expect(tool.parameters).toMatchObject({
-      required: ["status", "result"],
-      properties: { status: { enum: ["ok", "failed", "cancelled"] } },
+      required: ["result"],
+      additionalProperties: false,
+      properties: { result: { type: "object" } },
     });
-    await expect(tool.execute("call", { status: "ok", result: { done: true } } as any, undefined as any, undefined as any, undefined as any))
+    await expect(tool.execute("call", { result: { done: true } } as any, undefined as any, undefined as any, undefined as any))
       .resolves.toEqual({
         content: [{ type: "text", text: "节点结果已提交，等待检查。" }],
         details: undefined,

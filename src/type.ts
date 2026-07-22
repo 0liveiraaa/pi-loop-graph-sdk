@@ -184,7 +184,6 @@ export type JsonSchema = Readonly<Record<string, unknown>>;
 
 /** Agent 对 __graph_complete__ 的一次候选提交；通过检查前不等于 NodeCompletion。 */
 export interface CompletionSubmission {
-  reportedStatus: "ok" | "failed" | "cancelled";
   result: Record<string, unknown>;
 }
 
@@ -192,6 +191,7 @@ export type CompletionValidationStage =
   | "outputSchema"
   | "agent-run"
   | "node"
+  | "route"
   | "mechanism"
   | "agent-choice";
 

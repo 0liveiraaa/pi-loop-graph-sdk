@@ -39,7 +39,7 @@ function fakePi() {
         for (const handler of handlers.get("tool_result") ?? []) {
           await handler({
             toolName: "__graph_complete__",
-            input: { status: "ok", result: { fromAgent: true } },
+            input: { result: { fromAgent: true } },
           });
         }
         for (const handler of handlers.get("agent_end") ?? []) await handler({});
@@ -71,6 +71,20 @@ function agentGraph() {
 }
 
 describe("Core LoopGraphExtension", () => {
+  it("registerGraph does not expose until exposeGraph is called", () => {
+    const pi = fakePi();
+    const extension = createLoopGraphExtension(pi, { runtimeOnly: true });
+    const graph = agentGraph();
+    extension.registerGraph(graph);
+    expect(pi.registerCommand).not.toHaveBeenCalled();
+
+    extension.exposeGraph({ id: graph.id, version: graph.version }, { kind: "command", name: "public-agent" });
+    expect(pi.registerCommand).toHaveBeenCalledWith("public-agent", expect.objectContaining({ handler: expect.any(Function) }));
+
+    extension.exposeGraph({ id: graph.id, version: graph.version }, { kind: "tool", name: "public_agent_tool" });
+    expect(pi._registeredTools.some((tool: any) => tool.name === "public_agent_tool")).toBe(true);
+  });
+
   it("executes Agent Nodes and Code Node runAgent through the Pi Host bridge", async () => {
     const pi = fakePi();
     const extension = createLoopGraphExtension(pi, { runtimeOnly: true });

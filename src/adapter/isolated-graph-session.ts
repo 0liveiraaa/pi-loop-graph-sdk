@@ -36,6 +36,8 @@ import { IsolatedSessionGraphHost } from "./graph-execution-host.js";
 import type { HostBaseline } from "../host/baseline.js";
 import type { SkillCatalog } from "../host/skill-catalog.js";
 import type { ToolCatalog, UnsafeToolResolver } from "../host/tool-catalog.js";
+import type { GraphHost } from "../host/graph-host.js";
+import type { GraphRunResult as CoreGraphRunResult } from "../core/result.js";
 
 export interface IsolatedGraphSessionFactoryOptions {
   authStorage: AuthStorage;
@@ -194,4 +196,50 @@ export function createIsolatedDelegateHostFactory(
     createDelegateHost: createHost,
   });
   return createHost;
+}
+
+/** Creates a Core GraphHost backed by one isolated Pi AgentSession. */
+export async function createPiGraphHost(
+  options: IsolatedGraphSessionFactoryOptions,
+): Promise<GraphHost> {
+  const createSession = createIsolatedGraphSessionFactory(options);
+  const session = await createSession({
+    background: {},
+    invocationKind: "api",
+    boundary: "call",
+  });
+  let disposed = false;
+  let running = false;
+  return {
+    async execute(graph, input, runOptions = {}) {
+      if (disposed) throw new Error("GraphHost 已释放");
+      if (running) throw new Error("GraphHost 已有 Root Run 正在执行；并发运行必须创建独立 Host");
+      if (runOptions.signal?.aborted) throw abortError();
+      running = true;
+      const onAbort = () => { void session.abort().catch(() => undefined); };
+      runOptions.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await session.run(graph as unknown as import("../type.js").Graph, {
+          background: input as Record<string, unknown>,
+          invocationKind: "api",
+          boundary: "call",
+          signal: runOptions.signal,
+        }) as unknown as CoreGraphRunResult<any>;
+      } finally {
+        runOptions.signal?.removeEventListener("abort", onAbort);
+        running = false;
+      }
+    },
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      try { await session.abort(); } finally { session.dispose(); }
+    },
+  };
+}
+
+function abortError(): Error {
+  const error = new Error("Graph execution aborted");
+  error.name = "AbortError";
+  return error;
 }

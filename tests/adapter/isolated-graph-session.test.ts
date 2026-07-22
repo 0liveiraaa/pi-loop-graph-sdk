@@ -145,7 +145,7 @@ function agentNodeGraph(): Graph {
     tools: ["read"],
     async execute(_instance, _input, ctx) {
       return ctx.runAgent({
-        prompt: 'You are in a graph node. Call __graph_complete__ with status="ok" and result={done:true}. Do nothing else.',
+        prompt: 'You are in a graph node. Call __graph_complete__ with result={done:true}. Do not include status or any other argument. Do nothing else.',
         outputSchema: {
           type: "object",
           properties: { done: { type: "boolean" } },
@@ -503,7 +503,7 @@ describe("contextRenderer", () => {
   });
 });
 
-describe("agent 节点（需要 LLM）", () => {
+describe.runIf(process.env.PI_LIVE_TESTS === "1")("agent 节点（需要 LLM）", () => {
   it("agent 节点调用 __graph_complete__ 后返回结果", async () => {
     const factory = createIsolatedGraphSessionFactory(factoryOptions());
     const session = await factory(delegateReq());

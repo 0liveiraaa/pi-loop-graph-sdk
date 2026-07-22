@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
-  CompletionSubmission,
   CompletionValidationStage,
   NodeCompletion,
 } from "../type.js";
@@ -23,7 +22,7 @@ export type LoopGraphLifecycleEvent = Readonly<
   | { type: "node_exit"; timestamp: number; graphId: string; nodeId: string; scopeId: string; status: string; depth: number }
   | { type: "compaction"; timestamp: number; graphId: string; nodeId: string; scopeId: string; generation: number; reason?: unknown }
   | (AgentRunLifecycleContext & { type: "output_contract.prepared"; schemaFingerprint: string; schemaBytes: number })
-  | (AgentRunLifecycleContext & { type: "completion.submitted"; reportedStatus: CompletionSubmission["reportedStatus"]; schemaFingerprint?: string })
+  | (AgentRunLifecycleContext & { type: "completion.submitted"; schemaFingerprint?: string })
   | (AgentRunLifecycleContext & { type: "completion.validation_started"; validatorStage: CompletionValidationStage; schemaFingerprint?: string })
   | (AgentRunLifecycleContext & { type: "completion.accepted"; completionStatus: NodeCompletion["status"]; schemaFingerprint?: string; durationMs: number })
   | (AgentRunLifecycleContext & { type: "completion.rejected"; reason: string; validatorStage?: CompletionValidationStage; schemaFingerprint?: string; durationMs: number })

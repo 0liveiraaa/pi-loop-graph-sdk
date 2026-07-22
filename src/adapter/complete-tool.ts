@@ -17,17 +17,13 @@ export function createCompleteTool(): ToolDefinition {
     parameters: {
       type: "object",
       properties: {
-        status: {
-          type: "string",
-          enum: ["ok", "failed", "cancelled"],
-          description: "ok=成功, failed=失败, cancelled=取消",
-        },
         result: {
           type: "object",
           description: "本阶段产出数据",
         },
       },
-      required: ["status", "result"],
+      required: ["result"],
+      additionalProperties: false,
     } as any,
     async execute(_toolCallId: any, _params: any) {
       return {
@@ -48,10 +44,7 @@ export function createCompleteTool(): ToolDefinition {
       if (!decision) {
         content = theme.fg("muted", "节点结果已提交，等待检查");
       } else if (decision.decision === "accepted") {
-        const label = decision.validation === "passed"
-          ? "✓ 节点结果已通过检查"
-          : `✓ Agent 报告${decision.completionStatus === "failed" ? "失败" : "取消"}`;
-        content = theme.fg("success", label);
+        content = theme.fg("success", "✓ 节点结果已通过检查");
       } else if (decision.decision === "rejected") {
         content = theme.fg("error", `✗ 节点结果未被接受：${decision.reason}`);
       } else {

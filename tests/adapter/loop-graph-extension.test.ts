@@ -62,6 +62,11 @@ function fakePi() {
               input: { status: "ok", result: { fromAgent: true } },
               details: undefined,
             });
+            await handler({
+              toolName: "__graph_complete__",
+              input: { result: { fromAgent: true } },
+              details: undefined,
+            });
           }
           for (const handler of handlers.get("agent_end") ?? []) {
             await handler({});
@@ -637,7 +642,7 @@ describe("createLoopGraphExtension", () => {
           schemaFingerprint: expect.any(String),
           schemaBytes: expect.any(Number),
         }),
-        expect.objectContaining({ type: "completion.submitted", reportedStatus: "ok" }),
+        expect.objectContaining({ type: "completion.submitted" }),
         expect.objectContaining({ type: "completion.validation_started", validatorStage: "outputSchema" }),
         expect.objectContaining({ type: "completion.accepted", completionStatus: "ok" }),
       ]));
@@ -1051,6 +1056,27 @@ describe("createLoopGraphExtension", () => {
         output: { fromAgent: true },
       });
       expect(pi.setActiveTools).toHaveBeenCalledWith(["__graph_complete__"]);
+    });
+
+    it("公开 completion 边界拒绝模型附带 status", async () => {
+      const pi = fakePi();
+      const loop = createPublicLoopGraphExtension(pi, { runtimeOnly: true });
+      pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
+        if (!options?.triggerTurn) return;
+        queueMicrotask(async () => {
+          await pi.emitAsync("tool_result", {
+            toolName: "__graph_complete__",
+            input: { status: "failed", result: { forged: true } },
+          });
+          await pi.emitAsync("agent_end", {});
+        });
+      });
+
+      await expect(loop.executeGraph(probeGraph, { source: "tool", params: {} }))
+        .resolves.toMatchObject({
+          status: "completed",
+          output: { reason: "Agent finished without calling __graph_complete__." },
+        });
     });
 
     it("公开 Core executeGraph 传播 AbortSignal", async () => {
@@ -3474,7 +3500,7 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
     expect(String(result.result.reason)).toContain("验收超时");
   });
 
-  it("failed/cancelled completion 默认绕过可信 gate", async () => {
+  it("模型自报 status 不影响 Runtime 决策且可信 gate 仍执行", async () => {
     const pi = fakePi();
     let gateCalls = 0;
     pi.sendMessage.mockImplementation((_message: any, options?: { triggerTurn?: boolean }) => {
@@ -3501,8 +3527,8 @@ describe("Mechanism Phase 7-8 completion gate 与结构化上下文", () => {
 
     const result = await loop.executeGraph(graph, { source: "command", args: "" });
 
-    expect(result.status).toBe("failed");
-    expect(gateCalls).toBe(0);
+    expect(result.status).toBe("ok");
+    expect(gateCalls).toBe(1);
   });
 
   it("ctx.context.append 只发送复制后的 SDK 内容块和固定控制字段", async () => {
