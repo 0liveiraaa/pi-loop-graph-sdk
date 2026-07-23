@@ -107,6 +107,9 @@ export function createIsolatedGraphSessionFactory(
       options.compaction ? { compaction: options.compaction } : undefined,
     );
     let loop: LoopGraphExtension | null = null;
+    // A child AgentSession owns a fresh extension/tool registry. Keep a stable
+    // scope for all inline-factory loads belonging to this one Session.
+    const protocolToolRegistrationScope = {};
 
     const resourceLoader = new DefaultResourceLoader({
       cwd,
@@ -121,6 +124,7 @@ export function createIsolatedGraphSessionFactory(
         (pi) => {
           loop = createLoopGraphExtension(pi, {
             runtimeOnly: true,
+            protocolToolRegistrationScope,
             defaultTools: legacyOptions.defaultTools,
             toolCatalog: options.toolCatalog,
             skillCatalog: options.skillCatalog,
@@ -239,6 +243,9 @@ export async function createPiInvocationAgentHost(
   const agentDir = options.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.inMemory(options.compaction ? { compaction: options.compaction } : undefined);
   let loop: LoopGraphExtension | null = null;
+  // Invocation hosts are also isolated Sessions and therefore need their own
+  // completion-tool registration scope.
+  const protocolToolRegistrationScope = {};
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -252,6 +259,7 @@ export async function createPiInvocationAgentHost(
       (pi) => {
         loop = createLoopGraphExtension(pi, {
           runtimeOnly: true,
+          protocolToolRegistrationScope,
           toolCatalog: options.toolCatalog,
           skillCatalog: options.skillCatalog,
           unsafeToolResolver: options.unsafeToolResolver,

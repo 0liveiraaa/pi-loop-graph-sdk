@@ -29,7 +29,17 @@ import { Recorder, toRecordedJson } from "../replay/recorder.js";
 import type { PricingResolver, ReplayEvent, ReplayEventScope } from "../replay/events.js";
 import type { InvocationAgentHost, InvocationAgentHostRequest } from "../runtime/graph-runtime.js";
 
-const completeToolRegistered = new WeakSet<object>();
+// `pi` creates one ExtensionAPI facade per extension, so neither a module-local
+// WeakSet nor a marker on `pi` can deduplicate physical SDK copies. Use the
+// process-global registry shared by every ESM module copy instead. Isolated
+// AgentSessions supply a registration scope because their tool registries are
+// independent even though they run in the same JavaScript process.
+const COMPLETE_TOOL_REGISTRY = Symbol.for("pi-loop-graph-sdk.complete-tool-registry");
+
+interface CompleteToolRegistry {
+  readonly global: Set<string>;
+  readonly scoped: WeakMap<object, Set<string>>;
+}
 
 export interface LoopGraphLimits {
   readonly rootMaxSteps?: number;
@@ -70,6 +80,11 @@ export const defaultCompletionFeedbackFormatter: CompletionFeedbackFormatter = (
 
 export interface LoopGraphExtensionOptions {
   readonly runtimeOnly?: boolean;
+  /**
+   * @internal Identifies one isolated Pi resource-loading lifecycle. Completion
+   * tools must be registered once per such lifecycle, not once per process.
+   */
+  readonly protocolToolRegistrationScope?: object;
   readonly toolCatalog?: ToolCatalog;
   readonly skillCatalog?: SkillCatalog;
   readonly unsafeToolResolver?: UnsafeToolResolver;
@@ -130,9 +145,22 @@ export function createLoopGraphExtension(
     if (activeRecorder && scope) activeRecorder.record(event, scope);
   };
 
-  if (!completeToolRegistered.has(pi as object)) {
+  const processState = globalThis as typeof globalThis & { [key: symbol]: CompleteToolRegistry | undefined };
+  const completeToolRegistry = processState[COMPLETE_TOOL_REGISTRY] ??= {
+    global: new Set<string>(),
+    scoped: new WeakMap<object, Set<string>>(),
+  };
+  const registrationScope = options.protocolToolRegistrationScope;
+  const registeredProtocolTools = registrationScope
+    ? completeToolRegistry.scoped.get(registrationScope) ?? (() => {
+        const tools = new Set<string>();
+        completeToolRegistry.scoped.set(registrationScope, tools);
+        return tools;
+      })()
+    : completeToolRegistry.global;
+  if (!registeredProtocolTools.has(COMPLETE_TOOL_NAME)) {
     pi.registerTool(createCompleteTool());
-    completeToolRegistered.add(pi as object);
+    registeredProtocolTools.add(COMPLETE_TOOL_NAME);
   }
 
   pi.on("tool_result", async (event) => {

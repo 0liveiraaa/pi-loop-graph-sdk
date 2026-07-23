@@ -73,6 +73,21 @@ function agentGraph() {
 }
 
 describe("Core LoopGraphExtension", () => {
+  it("registers the completion protocol tool in an isolated registration scope", () => {
+    // The outer extension may already have claimed the process-wide name.
+    // A child AgentSession still needs the definition in its own tool registry.
+    createLoopGraphExtension(fakePi());
+
+    const childPi = fakePi();
+
+    createLoopGraphExtension(childPi, {
+      runtimeOnly: true,
+      protocolToolRegistrationScope: {},
+    });
+
+    expect(childPi._registeredTools.some((tool: any) => tool.name === "__graph_complete__")).toBe(true);
+  });
+
   it("registerGraph does not expose until exposeGraph is called", () => {
     const pi = fakePi();
     const extension = createLoopGraphExtension(pi, { runtimeOnly: true });
